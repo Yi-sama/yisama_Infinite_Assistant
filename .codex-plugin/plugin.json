@@ -1,0 +1,27 @@
+{
+  "name": "yisama-infinite-assistant",
+  "description": "与官方中转站账号互通，登录后自动准备 Codex，支持切换分组、查看余额和开启 Fast。",
+  "version": "0.1.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "yisama 无限助手",
+    "shortDescription": "登录后自动配置 Codex 并开启 Fast。",
+    "longDescription": "使用官方中转站账号登录，选择 All 或具体分组，查看账户余额、自定义充值、切换模型和思考等级，支持模型可选择 Ultra。自动开启 Fast，支持线路按 1.5x 计费。",
+    "developerName": "Yi-sama",
+    "category": "Developer tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Yi-sama/yisama_Infinite_Assistant",
+    "brandColor": "#111827",
+    "defaultPrompt": [
+      "登录并配置 yisama 无限助手",
+      "查看当前分组和剩余额度",
+      "切换 Codex 分组",
+      "打开自定义充值入口",
+      "查看可用思考等级并开启 Ultra"
+    ]
+  }
+}

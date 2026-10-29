@@ -1,0 +1,15 @@
+{
+  "name": "yisama",
+  "interface": {
+    "displayName": "yisama"
+  },
+  "plugins": [
+    {
+      "name": "yisama-infinite-assistant",
+      "source": {
+        "source": "local",
+        "path": "./"
+      }
+    }
+  ]
+}

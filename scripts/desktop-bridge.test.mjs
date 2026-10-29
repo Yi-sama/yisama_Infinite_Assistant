@@ -1,0 +1,593 @@
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import fs from 'node:fs/promises'
+import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
+import process from 'node:process'
+import readline from 'node:readline'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { parse } from 'smol-toml'
+
+const bridgeScript = fileURLToPath(new URL('./desktop-bridge.mjs', import.meta.url))
+const apiKey = 'sk-bridge-test-key-that-must-never-reach-stdio'
+const dashboardToken = 'dashboard-token-that-must-never-reach-stdio'
+
+async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 2 } },
+  cached = true, twoFactor = false, emailVerification = false } = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-desktop-bridge-'))
+  const pluginData = path.join(root, 'data')
+  const codexHome = path.join(root, 'codex')
+  let origin
+  const state = {
+    keys: [],
+    calls: [],
+    groups, groupModels: {}, fastUnavailableGroups: [],
+    models: ['gpt-5-codex', 'gpt-5'],
+    account: { id: 7, username: 'demo', display_name: 'Demo', quota: 6250000 },
+  }
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, origin)
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const text = Buffer.concat(chunks).toString('utf8')
+    const body = text ? JSON.parse(text) : undefined
+    state.calls.push({ path: url.pathname, method: req.method, body })
+    const reply = (data, status = 200) => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(data))
+    }
+    if (url.pathname === '/api/status') {
+      return reply({ success: true, data: { quota_per_unit: 500000, quota_display_type: 'USD' } })
+    }
+    if (url.pathname === '/api/assistant/auth/options') {
+      return reply({ success: true, data: {
+        password_login_enabled: true, register_enabled: true, email_verification_enabled: emailVerification,
+      } })
+    }
+    const authBundle = () => {
+      res.setHeader('set-cookie', 'new_api_refresh=desktop-refresh; Path=/api/user/auth; HttpOnly; SameSite=Strict')
+      return reply({ success: true, data: {
+        access_token: dashboardToken, access_expires_at: Math.floor(Date.now() / 1000) + 600,
+        session: { sid: 'desktop-session' }, user: state.account,
+      } })
+    }
+    if (url.pathname === '/api/assistant/auth/login') {
+      if (state.authFailure) return reply({ success: false, message: dashboardToken }, state.authFailure)
+      if (body.username !== 'demo' || body.password !== 'local-password') {
+        return reply({ success: false, message: `Wrong password: ${body.password}; ${dashboardToken}` })
+      }
+      return twoFactor ? reply({ success: true, data: {
+        require_2fa: true, flow_token: 'private-two-factor-flow', expires_at: Math.floor(Date.now() / 1000) + 300,
+      } }) : authBundle()
+    }
+    if (url.pathname === '/api/assistant/auth/login/2fa') {
+      if (body.flow_token !== 'private-two-factor-flow' || body.code !== '123456') {
+        return reply({ success: false, message: `Bad code ${body.code}; private-two-factor-flow` })
+      }
+      return authBundle()
+    }
+    if (url.pathname === '/api/assistant/auth/register') {
+      if (body.username !== 'new-user' || (emailVerification && body.verification_code !== '654321')) {
+        return reply({ success: false, message: `Registration rejected: ${body.password}` })
+      }
+      return reply({ success: true })
+    }
+    if (url.pathname === '/api/assistant/auth/verification') return reply({ success: true })
+    if (url.pathname === '/api/user/auth/refresh') {
+      if (req.headers.cookie !== 'new_api_refresh=desktop-refresh' || req.headers.origin !== origin ||
+        req.headers['x-auth-session'] !== 'desktop-session') return reply({ success: false }, 401)
+      return authBundle()
+    }
+    if (url.pathname === '/v1/models') {
+      const key = state.keys.find((item) => req.headers.authorization === `Bearer ${apiKey}-${item.id}`)
+      if (!key) return reply({ success: false }, 401)
+      return reply({ object: 'list', data: (state.groupModels[key.group] || state.models).map((id) => ({ id })) })
+    }
+    if (req.headers.authorization !== `Bearer ${dashboardToken}`) return reply({ success: false }, 401)
+    if (url.pathname === '/api/user/self') {
+      if (state.accountFailure) return reply({ success: false }, state.accountFailure)
+      return reply({ success: true, data: state.account })
+    }
+    if (url.pathname === '/api/user/self/groups') {
+      return reply({ success: true, data: state.groups })
+    }
+    if (url.pathname === '/api/token/search') {
+      return reply({ success: true, data: {
+        items: state.keys.filter((item) => !url.searchParams.get('keyword') || item.name === url.searchParams.get('keyword')),
+      } })
+    }
+    if (url.pathname === '/api/token/' && req.method === 'POST') {
+      state.keys.push({ ...body, id: state.keys.length + 1, status: 1,
+        fast_mode_available: !state.fastUnavailableGroups.includes(body.group) })
+      return reply({ success: true })
+    }
+    if (url.pathname === '/api/token/' && req.method === 'PUT') {
+      Object.assign(state.keys.find((item) => item.id === body.id), body)
+      return reply({ success: true })
+    }
+    if (/^\/api\/token\/\d+\/key$/.test(url.pathname)) {
+      return reply({ success: true, data: { key: `${apiKey}-${url.pathname.split('/').at(-2)}` } })
+    }
+    if (/^\/api\/token\/\d+$/.test(url.pathname)) {
+      const key = state.keys.find((item) => item.id === Number(url.pathname.split('/').at(-1)))
+      return reply({ success: true, data: { ...key, fast_mode: true,
+        fast_mode_available: !state.fastUnavailableGroups.includes(key.group) } })
+    }
+    return reply({ success: false }, 404)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  origin = `http://127.0.0.1:${server.address().port}`
+  const files = {
+    session: path.join(pluginData, 'session.json'),
+    state: path.join(pluginData, 'state.json'),
+    config: path.join(codexHome, 'config.toml'),
+  }
+  const originalConfig = 'model = "personal-model"\nmodel_reasoning_effort = "low"\n'
+  await fs.mkdir(pluginData, { recursive: true })
+  await fs.mkdir(codexHome, { recursive: true })
+  if (cached) await fs.writeFile(files.session, JSON.stringify({ origin, token: dashboardToken }), 'utf8')
+  await fs.writeFile(files.config, originalConfig, 'utf8')
+  await fs.writeFile(path.join(codexHome, 'models_cache.json'), JSON.stringify({ models: [
+    { slug: 'gpt-5-codex', supported_reasoning_levels: ['low', 'high', 'xhigh', 'max', 'ultra']
+      .map((effort) => ({ effort })) },
+    { slug: 'gpt-5', supported_reasoning_levels: ['low', 'high', 'xhigh'].map((effort) => ({ effort })) },
+  ] }), 'utf8')
+  t.after(async () => {
+    await new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) })
+    await fs.rm(root, { recursive: true, force: true })
+  })
+  return {
+    files,
+    originalConfig,
+    state,
+    env: {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      PLUGIN_DATA: pluginData,
+      YISAMA_PORTAL_URL: origin,
+      NODE_TLS_REJECT_UNAUTHORIZED: '1',
+    },
+  }
+}
+
+function bridgeClient(env) {
+  const child = spawn(process.execPath, [bridgeScript], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+  const output = readline.createInterface({ input: child.stdout, crlfDelay: Infinity })
+  const pending = []
+  const responses = []
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  output.on('line', (line) => {
+    const response = JSON.parse(line)
+    const resolve = pending.shift()
+    if (resolve) resolve(response)
+    else responses.push(response)
+  })
+  const next = () => new Promise((resolve) => {
+    const response = responses.shift()
+    if (response) resolve(response)
+    else pending.push(resolve)
+  })
+  return {
+    child,
+    async request(request) {
+      child.stdin.write(`${JSON.stringify(request)}\n`)
+      return next()
+    },
+    async raw(line) {
+      child.stdin.write(`${line}\n`)
+      return next()
+    },
+    async close() {
+      child.stdin.end()
+      const [code] = await once(child, 'exit')
+      return { code, stderr }
+    },
+  }
+}
+
+test('desktop bridge projects only public state over serialized stdio requests', async (t) => {
+  const { files, originalConfig, state, env } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(async () => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+
+  const initial = await bridge.request({ id: 1, action: 'status' })
+  assert.equal(initial.ok, true)
+  assert.equal(initial.data.loggedIn, true)
+  assert.equal(initial.data.configured, false)
+  assert.equal(initial.data.quota, '$12.50')
+  assert.deepEqual(initial.data.groups, [{ value: 'auto', label: 'All' }, { value: 'premium', label: 'premium' }])
+  assert.deepEqual(initial.data.models, [])
+
+  const login = await bridge.request({ id: 2, action: 'login' })
+  assert.deepEqual(Object.keys(login.data), [
+    'loggedIn', 'configured', 'username', 'quota', 'group', 'groupLabel', 'groups', 'model', 'models',
+    'message', 'restartRequired',
+  ])
+  assert.equal(login.ok, true)
+  assert.equal(login.data.group, 'auto')
+  assert.equal(login.data.groupLabel, 'All')
+  assert.equal(login.data.model, 'gpt-5-codex')
+  assert.equal(login.data.restartRequired, true)
+  assert.deepEqual(login.data.models, ['gpt-5-codex', 'gpt-5'])
+  let config = parse(await fs.readFile(files.config, 'utf8'))
+  assert.equal(config.service_tier, 'fast')
+  assert.equal(config.model_reasoning_effort, 'ultra')
+  assert.equal(state.keys[0].fast_mode, true)
+
+  const externalConfig = (await fs.readFile(files.config, 'utf8')).replace(
+    'model_provider = "yisama"', 'model_provider = "custom"',
+  )
+  await fs.writeFile(files.config, externalConfig, 'utf8')
+  const drifted = await bridge.request({ id: 3, action: 'status' })
+  assert.equal(drifted.ok, true)
+  assert.equal(drifted.data.configured, false)
+  assert.deepEqual(drifted.data.models, [])
+  assert.equal(await fs.readFile(files.config, 'utf8'), externalConfig)
+
+  const selected = await bridge.request({ id: 4, action: 'select', group: 'premium', model: 'gpt-5' })
+  assert.equal(selected.ok, true)
+  assert.equal(selected.data.group, 'premium')
+  assert.equal(selected.data.model, 'gpt-5')
+  config = parse(await fs.readFile(files.config, 'utf8'))
+  assert.equal(config.service_tier, 'fast')
+  assert.equal(config.model_reasoning_effort, 'xhigh')
+  assert.equal(state.keys.length, 1)
+  assert.equal(state.keys[0].group, 'premium')
+
+  const invalid = await bridge.raw('{not json')
+  assert.deepEqual(invalid, {
+    id: null,
+    ok: false,
+    error: '操作未完成，请检查网络或联系管理员；未输出账号敏感信息。',
+  })
+
+  const badGroup = await bridge.request({ id: 5, action: 'select', group: 'missing' })
+  assert.equal(badGroup.ok, false)
+  assert.doesNotMatch(badGroup.error, /sk-|dashboard|Authorization|Bearer/i)
+
+  const restored = await bridge.request({ id: 6, action: 'restore' })
+  assert.equal(restored.ok, true)
+  assert.equal(restored.data.loggedIn, false)
+  assert.equal(restored.data.configured, false)
+  assert.equal(restored.data.restartRequired, true)
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  await assert.rejects(fs.readFile(files.session, 'utf8'), { code: 'ENOENT' })
+  const callsBeforeOfflineStatus = state.calls.length
+  const offline = await bridge.request({ id: 7, action: 'status' })
+  assert.equal(offline.ok, true)
+  assert.equal(offline.data.loggedIn, false)
+  assert.equal(offline.data.configured, false)
+  assert.equal(state.calls.length, callsBeforeOfflineStatus, 'offline status does not open a login flow or call the portal')
+
+  const closed = await bridge.close()
+  assert.equal(closed.code, 0)
+  assert.equal(closed.stderr, '')
+  const publicOutput = JSON.stringify([initial, login, drifted, selected, invalid, badGroup, restored, offline, closed])
+  assert.doesNotMatch(publicOutput, /sk-bridge-test-key|dashboard-token|Authorization|Bearer/i)
+})
+
+test('desktop login defaults to the first available group when All is unavailable', async (t) => {
+  const { state, env } = await fixture(t, { groups: { premium: { ratio: 2 } } })
+  const bridge = bridgeClient(env)
+  t.after(async () => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+
+  const login = await bridge.request({ id: 1, action: 'login' })
+  assert.equal(login.ok, true)
+  assert.equal(login.data.group, 'premium')
+  assert.equal(login.data.groupLabel, 'premium')
+  assert.equal(state.keys.length, 1)
+  assert.equal(state.keys[0].group, 'premium')
+
+  const closed = await bridge.close()
+  assert.equal(closed.code, 0)
+  assert.equal(closed.stderr, '')
+})
+
+test('rapid group changes keep one credential and reconcile the server on every switch', async (t) => {
+  const { state, env, files } = await fixture(t)
+  state.groupModels = { auto: ['gpt-5-codex'], premium: ['claude-opus-4-6'] }
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const authFile = path.join(env.CODEX_HOME, 'auth.json')
+  const auth = await fs.readFile(authFile, 'utf8')
+  const original = await fs.readFile(path.join(env.PLUGIN_DATA, 'backups/config.original.toml'), 'utf8')
+  for (const [index, group] of ['premium', 'auto', 'premium', 'auto'].entries()) {
+    const selected = await bridge.request({ id: index + 2, action: 'select', group })
+    assert.equal(selected.ok, true, selected.error)
+    assert.equal(selected.data.group, group)
+    assert.equal(state.keys.length, 1)
+    assert.equal(state.keys[0].group, group, 'a cached selection must not skip the server mutation')
+    assert.equal(await fs.readFile(authFile, 'utf8'), auth)
+    const config = parse(await fs.readFile(files.config, 'utf8'))
+    assert.deepEqual(JSON.parse(await fs.readFile(config.model_catalog_json, 'utf8')).models
+      .map((model) => model.slug), state.groupModels[group])
+    assert.equal(await fs.readFile(path.join(env.PLUGIN_DATA, 'backups/config.original.toml'), 'utf8'), original)
+  }
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('text groups without Fast switch and persist their own model catalog and ordinary mode', async (t) => {
+  const { state, env, files } = await fixture(t, { groups: {
+    auto: {}, Gemini: {}, domestic: {}, images: {},
+  } })
+  state.fastUnavailableGroups = ['Gemini', 'domestic', 'images']
+  state.groupModels = {
+    Gemini: ['Auto', 'gemini-3-flash', 'gemini-3-pro'],
+    domestic: ['Auto', 'deepseek-v4-pro', 'qwen3-max'],
+    images: ['gpt-image-1', 'gemini-3-pro-image'],
+  }
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).data.group, 'auto')
+  for (const [index, group] of ['Gemini', 'domestic'].entries()) {
+    const selected = await bridge.request({ id: 2 + index, action: 'select', group })
+    assert.equal(selected.ok, true, selected.error)
+    assert.equal(selected.data.group, group)
+    assert.equal(selected.data.model, state.groupModels[group][1])
+    assert.deepEqual(selected.data.models, state.groupModels[group])
+    assert.match(selected.data.message, /普通模式/)
+    assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined)
+    assert.equal(JSON.parse(await fs.readFile(files.state, 'utf8')).group, group)
+    const catalogPath = parse(await fs.readFile(files.config, 'utf8')).model_catalog_json
+    assert.ok(catalogPath.startsWith(env.PLUGIN_DATA))
+    assert.deepEqual(JSON.parse(await fs.readFile(catalogPath, 'utf8')).models.map((model) => model.slug),
+      state.groupModels[group], 'the native catalog must contain the selected group, not the previous GPT list')
+  }
+  const applied = await bridge.request({ id: 4, action: 'select', model: 'qwen3-max' })
+  assert.equal(applied.data.group, 'domestic')
+  assert.equal(applied.data.model, 'qwen3-max')
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined)
+  const before = await fs.readFile(files.config, 'utf8')
+  const media = await bridge.request({ id: 5, action: 'select', group: 'images' })
+  assert.equal(media.ok, false)
+  assert.equal(media.code, 'GROUP_NO_TEXT_MODEL')
+  assert.equal(await fs.readFile(files.config, 'utf8'), before)
+  assert.equal(state.keys[0].group, 'domestic', 'a rejected group must not change the live route')
+  const status = await bridge.request({ id: 6, action: 'status' })
+  assert.equal(status.data.group, 'domestic')
+  assert.equal(status.data.model, 'qwen3-max')
+  const fast = await bridge.request({ id: 7, action: 'select', group: 'auto' })
+  assert.equal(fast.data.group, 'auto')
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, 'fast')
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('a new Codex launch clears the restart notice without rewriting the saved configuration', async (t) => {
+  const { env, files } = await fixture(t)
+  const bridge = bridgeClient({ ...env, YISAMA_CODEX_STARTED_AT: new Date(Date.now() - 60000).toISOString() })
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).data.restartRequired, true)
+  assert.equal((await bridge.request({ id: 2, action: 'status' })).data.restartRequired, true)
+  assert.equal((await bridge.close()).stderr, '')
+  const savedState = await fs.readFile(files.state, 'utf8')
+  const savedConfig = await fs.readFile(files.config, 'utf8')
+  const configuredAt = JSON.parse(savedState).configuredAt
+  const reopened = bridgeClient({
+    ...env, YISAMA_CODEX_STARTED_AT: new Date(Date.parse(configuredAt) + 1000).toISOString(),
+  })
+  t.after(() => { if (reopened.child.exitCode === null) reopened.child.kill() })
+  const status = await reopened.request({ id: 3, action: 'status' })
+  assert.equal(status.data.restartRequired, false)
+  assert.doesNotMatch(status.data.message, /重启|重新打开/)
+  const same = await reopened.request({ id: 4, action: 'select', group: 'auto', model: status.data.model })
+  assert.equal(same.data.restartRequired, false, 'reapplying an unchanged selection must not require another restart')
+  assert.equal(await fs.readFile(files.state, 'utf8'), savedState)
+  assert.equal(await fs.readFile(files.config, 'utf8'), savedConfig)
+  assert.equal((await reopened.close()).stderr, '')
+})
+
+test('temporary balance failures are not reported as a logged-out account', async (t) => {
+  const { state, env } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  assert.equal((await bridge.request({ id: 1, action: 'status' })).data.loggedIn, true)
+  for (const status of [403, 429, 503]) {
+    state.accountFailure = status
+    const response = await bridge.request({ id: status, action: 'status' })
+    assert.equal(response.ok, false)
+    assert.equal(response.data, undefined)
+  }
+  state.accountFailure = 0
+  state.account.quota = 500000
+  const recovered = await bridge.request({ id: 2, action: 'status' })
+  assert.equal(recovered.data.loggedIn, true)
+  assert.equal(recovered.data.quota, '$1.00')
+  state.accountFailure = 401
+  assert.equal((await bridge.request({ id: 3, action: 'status' })).data.loggedIn, false)
+  assert.equal((await bridge.close()).code, 0)
+})
+
+test('logout before configuration clears the session without touching personal settings', async (t) => {
+  const { files, env, originalConfig } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  assert.equal((await bridge.request({ id: 1, action: 'status' })).data.loggedIn, true)
+  const response = await bridge.request({ id: 2, action: 'restore' })
+  assert.equal(response.ok, true)
+  assert.equal(response.data.loggedIn, false)
+  await assert.rejects(fs.readFile(files.session, 'utf8'), { code: 'ENOENT' })
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  assert.equal((await bridge.request({ id: 3, action: 'status' })).data.loggedIn, false)
+  assert.equal((await bridge.close()).code, 0)
+})
+
+test('local password login never opens the portal and saves only the resulting renewable session', async (t) => {
+  const { files, env, state, originalConfig } = await fixture(t, { cached: false })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const missing = await bridge.request({ id: 1, action: 'login' })
+  assert.equal(missing.ok, false, 'missing local credentials must not launch a browser')
+  assert.equal(state.calls.length, 0)
+  const options = await bridge.request({ id: 2, action: 'authOptions' })
+  assert.deepEqual(options.data, { auth: {
+    passwordLoginEnabled: true, registrationEnabled: true, emailVerificationEnabled: false,
+  } })
+  const wrong = await bridge.request({ id: 3, action: 'login', username: 'demo', password: 'secret-wrong-password' })
+  assert.equal(wrong.ok, false)
+  assert.equal(wrong.code, 'AUTH_REJECTED')
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  await assert.rejects(fs.access(files.session), { code: 'ENOENT' })
+  const login = await bridge.request({ id: 4, action: 'login', username: 'demo', password: 'local-password' })
+  assert.equal(login.ok, true)
+  assert.equal(login.data.loggedIn, true)
+  assert.equal(login.data.configured, false)
+  assert.equal(login.data.setupPending, true)
+  assert.equal(state.calls.some((call) => call.path === '/api/user/self'), false,
+    'successful authentication is acknowledged before account preparation')
+  assert.equal(state.keys.length, 0)
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  const prepared = await bridge.request({ id: 5, action: 'login' })
+  assert.equal(prepared.data.configured, true)
+  assert.equal(prepared.data.quota, '$12.50')
+  const session = JSON.parse(await fs.readFile(files.session, 'utf8'))
+  assert.equal(session.cookies[0].name, 'new_api_refresh')
+  assert.equal(session.sessionId, 'desktop-session')
+  session.expiresAt = 1
+  await fs.writeFile(files.session, JSON.stringify(session), 'utf8')
+  const refreshed = await bridge.request({ id: 6, action: 'status' })
+  assert.equal(refreshed.data.loggedIn, true)
+  assert.equal(state.calls.filter((call) => call.path === '/api/user/auth/refresh').length, 1)
+  const persisted = (await fs.readFile(files.session, 'utf8')) + (await fs.readFile(files.state, 'utf8'))
+  assert.doesNotMatch(persisted, /local-password|secret-wrong-password|private-two-factor-flow/)
+  assert.doesNotMatch(JSON.stringify([missing, options, wrong, login, prepared, refreshed]), /local-password|secret-wrong-password|sk-bridge|dashboard-token/)
+  assert.equal(state.calls.some((call) => ['/api/user/login', '/sign-in'].includes(call.path)), false)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('two-factor local login retains its private flow only in memory and permits correcting a code', async (t) => {
+  const { files, state, env, originalConfig } = await fixture(t, { cached: false, twoFactor: true })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const challenge = await bridge.request({ id: 1, action: 'login', username: 'demo', password: 'local-password' })
+  assert.equal(challenge.ok, true)
+  assert.equal(challenge.data.auth.step, 'twoFactor')
+  assert.match(challenge.data.auth.loginId, /^[a-f0-9-]{36}$/)
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  await assert.rejects(fs.access(files.session), { code: 'ENOENT' })
+  const wrong = await bridge.request({ id: 2, action: 'login',
+    loginId: challenge.data.auth.loginId, twoFactorCode: '000000' })
+  assert.equal(wrong.ok, false)
+  const completed = await bridge.request({ id: 3, action: 'login',
+    loginId: challenge.data.auth.loginId, twoFactorCode: '123456' })
+  assert.equal(completed.ok, true)
+  assert.equal(completed.data.loggedIn, true)
+  assert.equal(completed.data.setupPending, true)
+  assert.equal(completed.data.configured, false)
+  const replay = await bridge.request({ id: 4, action: 'login',
+    loginId: challenge.data.auth.loginId, twoFactorCode: '123456' })
+  assert.equal(replay.ok, false)
+  assert.equal(replay.code, 'AUTH_EXPIRED')
+  assert.equal(state.calls.filter((call) => call.path === '/api/assistant/auth/login').length, 1)
+  assert.equal(state.calls.filter((call) => call.path === '/api/assistant/auth/login/2fa').length, 2)
+  assert.doesNotMatch(JSON.stringify([challenge, wrong, completed, replay]), /private-two-factor-flow|local-password|000000|123456|dashboard-token/)
+  assert.doesNotMatch(await fs.readFile(files.session, 'utf8'), /private-two-factor-flow|local-password|000000|123456/)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('authentication succeeds independently of a later account-preparation failure', async (t) => {
+  const { files, state, env, originalConfig } = await fixture(t, { cached: false })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  state.accountFailure = 503
+  const login = await bridge.request({ id: 1, action: 'login',
+    username: 'demo', password: 'local-password' })
+  assert.equal(login.ok, true)
+  assert.equal(login.data.loggedIn, true)
+  assert.equal(login.data.setupPending, true)
+  assert.deepEqual(state.calls.map((call) => call.path), ['/api/assistant/auth/login'])
+  const prepare = await bridge.request({ id: 2, action: 'login' })
+  assert.equal(prepare.ok, false)
+  assert.notEqual(prepare.code, 'AUTH_REJECTED')
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  assert.equal(JSON.parse(await fs.readFile(files.session, 'utf8')).token, dashboardToken)
+  state.accountFailure = 0
+  const retried = await bridge.request({ id: 3, action: 'login' })
+  assert.equal(retried.data.configured, true)
+  assert.equal(state.calls.filter((call) => call.path === '/api/assistant/auth/login').length, 1)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('account service failures are not reported as an incorrect password', async (t) => {
+  const { files, state, env } = await fixture(t, { cached: false })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  state.authFailure = 503
+  const unavailable = await bridge.request({ id: 1, action: 'login',
+    username: 'demo', password: 'local-password' })
+  assert.equal(unavailable.ok, false)
+  assert.equal(unavailable.code, 'AUTH_UNAVAILABLE')
+  assert.doesNotMatch(unavailable.error, /密码|local-password|dashboard-token/)
+  await assert.rejects(fs.access(files.session), { code: 'ENOENT' })
+  state.authFailure = 0
+  const wrong = await bridge.request({ id: 2, action: 'login',
+    username: 'demo', password: 'wrong-password' })
+  assert.equal(wrong.code, 'AUTH_REJECTED')
+  const login = await bridge.request({ id: 3, action: 'login',
+    username: 'demo', password: 'local-password' })
+  assert.equal(login.data.loggedIn, true)
+  assert.equal(state.calls.length, 3, 'failed authentication must not automatically retry passwords')
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('model selection reuses its credential and catalog while balance refreshes remain fresh', async (t) => {
+  const { state, env } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const prepared = await bridge.request({ id: 1, action: 'login' })
+  assert.equal(prepared.data.configured, true)
+  for (const route of ['/api/user/self', '/api/user/self/groups', '/api/status', '/v1/models']) {
+    assert.equal(state.calls.filter((call) => call.path === route).length, 1,
+      `${route} must not be repeated by preparation`)
+  }
+  assert.equal(state.calls.filter((call) => call.method === 'PUT').length, 0,
+    'a newly created healthy credential must not be rewritten')
+  const before = state.calls.length
+  const selected = await bridge.request({ id: 2, action: 'select', group: 'auto', model: 'gpt-5' })
+  assert.equal(selected.data.model, 'gpt-5')
+  assert.deepEqual(state.calls.slice(before).map((call) => call.path), ['/api/user/self'],
+    'changing only the model must not reveal, rewrite or recreate credentials')
+  state.account.quota = 500000
+  const refreshed = await bridge.request({ id: 3, action: 'status' })
+  assert.equal(refreshed.data.quota, '$1.00')
+  assert.equal(refreshed.data.model, 'gpt-5')
+  assert.equal(state.calls.filter((call) => call.path === '/api/status').length, 1)
+  assert.equal(state.calls.filter((call) => call.path === '/v1/models').length, 1)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('local registration preserves website email verification and never forwards privileged fields', async (t) => {
+  const { state, env, files, originalConfig } = await fixture(t, { cached: false, emailVerification: true })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const options = await bridge.request({ id: 1, action: 'authOptions' })
+  assert.equal(options.data.auth.emailVerificationEnabled, true)
+  const sent = await bridge.request({ id: 2, action: 'sendVerification', email: 'demo@example.test' })
+  assert.equal(sent.data.verificationSent, true)
+  const wrong = await bridge.request({ id: 3, action: 'register', username: 'new-user', password: 'new-password',
+    email: 'demo@example.test', verificationCode: '000000' })
+  assert.equal(wrong.ok, false)
+  const registered = await bridge.request({ id: 4, action: 'register', username: 'new-user', password: 'new-password',
+    email: 'demo@example.test', verificationCode: '654321', role: 100, quota: 99999999 })
+  assert.equal(registered.data.registered, true)
+  assert.deepEqual(state.calls.filter((call) => call.path === '/api/assistant/auth/register').at(-1).body, {
+    username: 'new-user', password: 'new-password', email: 'demo@example.test', verification_code: '654321',
+  })
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  await assert.rejects(fs.access(files.session), { code: 'ENOENT' })
+  assert.doesNotMatch(JSON.stringify([options, sent, wrong, registered]), /new-password|000000|654321/)
+  assert.equal((await bridge.close()).stderr, '')
+})

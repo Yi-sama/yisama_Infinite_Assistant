@@ -1,0 +1,6 @@
+.yisama/
+*.yisama-backup-*.bak
+node_modules/
+test-results/
+dist/
+output/

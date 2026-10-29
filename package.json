@@ -1,0 +1,19 @@
+{
+  "name": "yisama-infinite-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs",
+    "setup": "node scripts/yisama.mjs setup",
+    "update:local": "node scripts/update-local.mjs",
+    "build:windows": "powershell.exe -NoProfile -File scripts/build-windows.ps1"
+  },
+  "dependencies": {
+    "playwright": "1.64.1",
+    "smol-toml": "1.9.1"
+  }
+}
