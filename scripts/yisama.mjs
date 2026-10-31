@@ -933,6 +933,7 @@ async function configureDesktop({
   const selected = chooseGroup(group, availableGroups)
   const canReuse = previous.configured && previous.userId === session.user.id &&
     current.apiKey && Number.isInteger(previous.keyId)
+  const groupChanged = previous.configured && previous.group !== selected.value
   try {
     const internalKey = requestedModel && canReuse && previous.group === selected.value
       ? {
@@ -940,7 +941,7 @@ async function configureDesktop({
         fastAvailable: previous.fastAvailable ?? current.fast, fastEnabled: current.fast,
       }
       : await ensureAssistantKey(session.token, selected.value, {
-        requireFast: false, fastEnabled: canReuse ? current.fast : true,
+        requireFast: false, fastEnabled: canReuse ? (groupChanged ? false : current.fast) : true,
         keyId: canReuse ? previous.keyId : null,
         existingKey: canReuse ? current.apiKey : null,
       })

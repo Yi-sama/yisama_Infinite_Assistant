@@ -426,6 +426,25 @@ test('rapid group changes keep one credential and reconcile the server on every 
   assert.equal((await bridge.close()).stderr, '')
 })
 
+test('switching between Fast-capable groups starts each group in ordinary mode', async (t) => {
+  const { state, env, files } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  assert.equal(state.keys[0].fast_mode, true)
+
+  const premium = await bridge.request({ id: 2, action: 'select', group: 'premium' })
+  assert.equal(premium.ok, true, premium.error)
+  assert.equal(state.keys[0].fast_mode, false)
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined)
+
+  const auto = await bridge.request({ id: 3, action: 'select', group: 'auto' })
+  assert.equal(auto.ok, true, auto.error)
+  assert.equal(state.keys[0].fast_mode, false)
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
 test('group changes restore each group last selected model', async (t) => {
   const { state, env, files } = await fixture(t)
   state.groupModels = {
