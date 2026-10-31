@@ -12,6 +12,7 @@ $runtime = Join-Path $appRoot 'runtime\node.exe'
 $assistantScript = Join-Path $PSScriptRoot 'codex-assistant.mjs'
 $dataRoot = Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant'
 $endpointFile = Join-Path $dataRoot 'codex-endpoint.json'
+$startupTimeoutSeconds = 60
 
 function Show-LauncherError {
     param([string]$Message)
@@ -139,7 +140,7 @@ function Get-VerifiedEndpoint {
 }
 
 function Wait-VerifiedEndpoint {
-    param([int]$ProcessId, [int]$TimeoutSeconds = 25)
+    param([int]$ProcessId, [int]$TimeoutSeconds = $startupTimeoutSeconds)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         $endpoint = Get-VerifiedEndpoint -ProcessId $ProcessId
@@ -216,7 +217,7 @@ try {
     $wallpaper = Get-WallpaperLauncher
     if ($wallpaper) {
         Start-Process -FilePath $wallpaper.FilePath -ArgumentList $wallpaper.Arguments -WindowStyle Hidden | Out-Null
-        $deadline = [DateTime]::UtcNow.AddSeconds(25)
+        $deadline = [DateTime]::UtcNow.AddSeconds($startupTimeoutSeconds)
         $endpoint = $null
         do {
             foreach ($process in Get-CodexDesktopProcesses) {
