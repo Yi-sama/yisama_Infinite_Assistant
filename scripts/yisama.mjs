@@ -1161,6 +1161,95 @@ async function openRecharge() {
   }
 }
 
+function jsonArray(value) {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function paymentUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  try {
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
+function publicRechargeInfo(data) {
+  const source = data && typeof data === 'object' ? data : {}
+  const amountOptions = jsonArray(source.amount_options)
+    .map(Number)
+    .filter((amount) => Number.isFinite(amount) && amount > 0)
+  const paymentMethods = jsonArray(source.pay_methods)
+    .filter((method) => method && typeof method === 'object' && method.type !== 'waffo')
+    .map((method) => ({
+      name: typeof method.name === 'string' ? method.name.slice(0, 80) : '',
+      type: typeof method.type === 'string' ? method.type.slice(0, 40) : '',
+      minTopup: Number.isFinite(Number(method.min_topup)) ? Number(method.min_topup) : 0,
+    }))
+    .filter((method) => method.name && method.type)
+  return {
+    amountOptions,
+    paymentMethods,
+    minTopup: Number.isFinite(Number(source.min_topup)) ? Number(source.min_topup) : 0,
+    currency: typeof source.currency === 'string' ? source.currency.slice(0, 12) : 'USD',
+  }
+}
+
+export async function desktopRechargeInfo() {
+  const session = await authenticatedSession({ interactive: false })
+  const response = await requestApi('/user/topup/info', { token: session.token })
+  return publicRechargeInfo(response.data)
+}
+
+export async function desktopRechargeAmount({ amount, paymentMethod } = {}) {
+  const value = Number(amount)
+  if (!Number.isFinite(value) || value <= 0 || value > 1000000) {
+    throw new UserError('请输入有效的充值金额。')
+  }
+  const method = typeof paymentMethod === 'string' ? paymentMethod.slice(0, 40) : ''
+  const session = await authenticatedSession({ interactive: false })
+  const pathname = method === 'stripe' ? '/user/stripe/amount' : '/user/amount'
+  const response = await requestApi(pathname, {
+    token: session.token, method: 'POST', body: { amount: Math.floor(value) },
+  })
+  const paymentAmount = Number(response.data)
+  if (!Number.isFinite(paymentAmount) || paymentAmount < 0) {
+    throw new UserError('暂时无法计算支付金额。')
+  }
+  return { paymentAmount }
+}
+
+export async function desktopRechargePay({ amount, paymentMethod } = {}) {
+  const value = Number(amount)
+  const method = typeof paymentMethod === 'string' ? paymentMethod.slice(0, 40) : ''
+  if (!Number.isFinite(value) || value <= 0 || value > 1000000 || !method) {
+    throw new UserError('请输入有效的充值金额和支付方式。')
+  }
+  const session = await authenticatedSession({ interactive: false })
+  const pathname = method === 'stripe' ? '/user/stripe/pay' : '/user/pay'
+  const response = await requestApi(pathname, {
+    token: session.token, method: 'POST',
+    body: method === 'stripe'
+      ? { amount: Math.floor(value), payment_method: 'stripe' }
+      : { amount: Math.floor(value), payment_method: method },
+  })
+  const data = response.data && typeof response.data === 'object' ? response.data : {}
+  const url = paymentUrl(data.pay_link || data.payment_url || data.url || response.url)
+  const fields = Object.fromEntries(Object.entries(data)
+    .filter(([key, field]) => key !== 'url' && key !== 'pay_link' && key !== 'payment_url' &&
+      ['string', 'number', 'boolean'].includes(typeof field)))
+  if (!url) throw new UserError('订单已创建，但支付入口无效，请稍后重试。')
+  return { paymentUrl: url, fields, amount: Math.floor(value), paymentMethod: method }
+}
+
 export async function desktopRecharge() {
   await openRecharge()
   return desktopStatus({ message: '已在外部浏览器打开官方站点钱包。' })

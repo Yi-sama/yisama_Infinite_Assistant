@@ -38,6 +38,12 @@ export function installAssistantUI(options = {}) {
     loginId: '',
     verificationRetryAt: 0,
     nativeSync: '',
+    rechargeOpen: false,
+    rechargeInfo: null,
+    rechargeAmount: '',
+    rechargePaymentMethod: '',
+    rechargePaymentAmount: '',
+    rechargePayment: null,
   }
   let disposed = false
   let sequence = 0
@@ -234,6 +240,18 @@ export function installAssistantUI(options = {}) {
     ${R} .y-apply{margin-top:12px}
     ${R} .y-takeover{margin-top:12px}
     ${R} .y-actions{display:grid;gap:6px;margin-top:16px}
+    ${R} .y-recharge{display:grid;gap:10px;margin-top:4px;padding:12px;border:1px solid var(--y-line);border-radius:14px;background:rgba(255,255,255,.025)}
+    ${R} .y-recharge__title{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;font-weight:700}
+    ${R} .y-recharge__hint{color:var(--y-fg3);font:500 10px/1.4 var(--y-mono)}
+    ${R} .y-recharge__presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+    ${R} .y-recharge__preset{min-width:0;min-height:32px;padding:0 6px;border:1px solid var(--y-line2);border-radius:9px;color:var(--y-fg2);font:600 11px/1 var(--y-mono)}
+    ${R} .y-recharge__preset:hover,${R} .y-recharge__preset[data-selected="true"]{border-color:var(--y-vio);background:rgba(128,96,224,.16);color:var(--y-fg)}
+    ${R} .y-recharge__input,${R} .y-recharge__select{width:100%;height:36px;padding:0 10px;border:1px solid var(--y-line2);border-radius:10px;background:rgba(7,7,11,.6);color:var(--y-fg);font-size:12px}
+    ${R} .y-recharge__input:focus,${R} .y-recharge__select:focus{outline:none;border-color:var(--y-vio);box-shadow:0 0 0 3px rgba(128,96,224,.2)}
+    ${R} .y-recharge__estimate{display:flex;justify-content:space-between;gap:8px;color:var(--y-fg3);font-size:11px}
+    ${R} .y-recharge__estimate strong{color:var(--y-fg2);font-weight:650}
+    ${R} .y-recharge__payment{display:grid;gap:8px;padding-top:8px;border-top:1px solid var(--y-line);color:var(--y-fg2);font-size:11px}
+    ${R} .y-recharge__payment[hidden]{display:none}
     ${R} .y-link{justify-self:center;padding:6px 10px;border-radius:99px;color:var(--y-fg3);font-size:11.5px;transition:color .2s}
     ${R} .y-link:hover:not(:disabled){color:var(--y-red)}
     ${R} .y-confirm{margin-top:14px;padding:14px;border:1px solid rgba(255,138,122,.3);border-radius:16px;background:rgba(255,138,122,.05)}
@@ -339,8 +357,32 @@ export function installAssistantUI(options = {}) {
   const actions = el('section', { className: 'y-actions', hidden: '' })
   const rechargeButton = el('button', { type: 'button', className: 'y-button y-button--primary y-button--wide', 'data-testid': 'recharge' }, '充值')
   rechargeButton.append(svg('0 0 24 24', [{ d: 'M8 16L16 8M9 8h7v7' }]))
+  const rechargePanel = el('section', { className: 'y-recharge', hidden: '', 'data-testid': 'recharge-panel' })
+  const rechargeTitle = el('div', { className: 'y-recharge__title' })
+  rechargeTitle.append(el('span', {}, '充值'), el('span', { className: 'y-recharge__hint' }, '本地下单'))
+  const rechargePresets = el('div', { className: 'y-recharge__presets', 'data-testid': 'recharge-presets' })
+  const rechargeAmountInput = el('input', {
+    className: 'y-recharge__input', type: 'number', min: '1', step: '1', placeholder: '输入充值金额',
+    'aria-label': '充值金额', 'data-testid': 'recharge-amount',
+  })
+  const rechargeMethodSelect = el('select', { className: 'y-recharge__select', 'aria-label': '支付方式', 'data-testid': 'recharge-method' })
+  const rechargeEstimate = el('div', { className: 'y-recharge__estimate' })
+  const rechargeEstimateLabel = el('span', {}, '预计支付')
+  const rechargeEstimateValue = el('strong', { 'data-testid': 'recharge-payment-amount' }, '—')
+  rechargeEstimate.append(rechargeEstimateLabel, rechargeEstimateValue)
+  const rechargeSubmit = el('button', {
+    type: 'button', className: 'y-button y-button--accent y-button--wide', 'data-testid': 'recharge-submit',
+  }, '创建订单')
+  const rechargePayment = el('div', { className: 'y-recharge__payment', hidden: '', 'data-testid': 'recharge-payment' })
+  const rechargePaymentText = el('span')
+  const rechargePaymentButton = el('button', {
+    type: 'button', className: 'y-button y-button--quiet y-button--wide', 'data-testid': 'continue-payment',
+  }, '继续支付')
+  rechargePayment.append(rechargePaymentText, rechargePaymentButton)
+  rechargePanel.append(rechargeTitle, rechargePresets, rechargeAmountInput, rechargeMethodSelect,
+    rechargeEstimate, rechargeSubmit, rechargePayment)
   const restoreButton = el('button', { type: 'button', className: 'y-link', 'data-testid': 'restore' }, '退出并恢复原配置')
-  actions.append(rechargeButton, restoreButton)
+  actions.append(rechargeButton, rechargePanel, restoreButton)
   const confirmation = el('section', { className: 'y-confirm', hidden: '', 'data-testid': 'restore-confirmation' })
   const confirmationText = el('p', {}, '退出账户，并把 Codex 配置恢复到使用助手之前的状态？恢复后需要重启 Codex 才会生效。')
   const confirmationActions = el('div')
@@ -580,6 +622,52 @@ export function installAssistantUI(options = {}) {
     option.dataset.failed = 'true'
     window.setTimeout(() => { delete option.dataset.failed }, 500)
   }
+  const rechargeValue = () => {
+    const value = Number(state.rechargeAmount)
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+  }
+  const rechargeMethod = () => state.rechargePaymentMethod || state.rechargeInfo?.paymentMethods?.[0]?.type || ''
+  const renderRecharge = (locked) => {
+    const info = state.rechargeInfo
+    rechargePanel.hidden = !state.rechargeOpen
+    if (!info) {
+      rechargePresets.replaceChildren()
+      rechargeMethodSelect.replaceChildren()
+      rechargeEstimateValue.textContent = '—'
+      rechargeSubmit.disabled = true
+      rechargePayment.hidden = true
+      return
+    }
+    const amountOptions = Array.isArray(info.amountOptions) ? info.amountOptions : []
+    rechargePresets.replaceChildren(...amountOptions.slice(0, 9).map((amount) => {
+      const option = el('button', {
+        type: 'button', className: 'y-recharge__preset', 'data-amount': String(amount),
+      }, String(amount))
+      option.dataset.selected = String(Number(state.rechargeAmount) === amount)
+      return option
+    }))
+    const methodOptions = Array.isArray(info.paymentMethods) ? info.paymentMethods : []
+    const selectedMethod = rechargeMethod()
+    rechargeMethodSelect.replaceChildren(...methodOptions.map((method) =>
+      el('option', { value: method.type, text: method.name })))
+    rechargeMethodSelect.value = selectedMethod
+    rechargeAmountInput.value = state.rechargeAmount
+    rechargeAmountInput.disabled = locked
+    rechargeMethodSelect.disabled = locked || !methodOptions.length
+    const amount = rechargeValue()
+    const minTopup = Number(methodOptions.find((method) => method.type === selectedMethod)?.minTopup ||
+      info.minTopup || 0)
+    rechargeEstimateLabel.textContent = minTopup && amount < minTopup ? `最低 ${minTopup}` : '预计支付'
+    rechargeEstimateValue.textContent = state.rechargePaymentAmount || '—'
+    rechargeSubmit.disabled = locked || !amount || !selectedMethod || Boolean(minTopup && amount < minTopup) ||
+      hasActivePending('rechargeInfo') || hasActivePending('rechargeAmount') || hasActivePending('rechargePay')
+    rechargeSubmit.textContent = hasActivePending('rechargePay') ? '正在创建…' : '创建订单'
+    const payment = state.rechargePayment
+    rechargePayment.hidden = !payment?.paymentUrl
+    rechargePaymentText.textContent = payment?.paymentUrl
+      ? `订单已创建：${payment.amount}，请继续完成支付。` : ''
+    rechargePaymentButton.disabled = locked
+  }
   const placePanel = () => {
     if (panel.hidden) return
     const margin = 8
@@ -630,6 +718,7 @@ export function installAssistantUI(options = {}) {
     loggedOut.hidden = state.loggedIn
     confirmation.hidden = confirmation.dataset.open !== 'true' || !state.loggedIn
     restoreButton.hidden = !confirmation.hidden
+    rechargePanel.hidden = !state.loggedIn || !state.rechargeOpen
     if (state.loggedIn) {
       const selectedGroup = state.pendingGroup || state.group
       groupLabel.hidden = !state.groups.length
@@ -642,7 +731,9 @@ export function installAssistantUI(options = {}) {
       applyButton.disabled = busy || Boolean(state.pendingGroup) || (state.groups.length > 0 && !selectedGroup)
       takeoverButton.disabled = busy || Boolean(state.pendingGroup) || hasActivePending('reconfigure')
       account.textContent = state.username || '—'
-      rechargeButton.disabled = busy
+      rechargeButton.disabled = busy && !hasActivePending('rechargeInfo')
+      rechargeButton.textContent = state.rechargeOpen ? '收起充值' : '充值'
+      renderRecharge(busy)
       restoreButton.disabled = busy
       confirmRestore.disabled = busy
     }
@@ -730,6 +821,13 @@ export function installAssistantUI(options = {}) {
         : '切换未完成，原分组未改动，请重试。'
     } else if (entry.action === 'reconfigure') {
       state.error = '接管准备未完成，原配置未改动，请重试。'
+    } else if (entry.action === 'rechargeInfo') {
+      state.error = '暂时无法读取充值方式，请稍后重试。'
+    } else if (entry.action === 'rechargeAmount') {
+      state.rechargePaymentAmount = ''
+      state.error = '暂时无法计算支付金额，请检查充值金额。'
+    } else if (entry.action === 'rechargePay') {
+      state.error = '订单创建失败，请检查金额和支付方式后重试。'
     } else {
       state.error = '操作未完成，请稍后重试。'
     }
@@ -771,9 +869,14 @@ export function installAssistantUI(options = {}) {
     if (typeof details.group === 'string' && details.group) command.group = details.group
     const authFields = action === 'login' ? ['username', 'password', 'loginId', 'twoFactorCode']
       : action === 'register' ? ['username', 'password', 'email', 'verificationCode']
-        : action === 'sendVerification' ? ['email'] : []
+        : action === 'sendVerification' ? ['email']
+          : ['rechargeAmount', 'rechargePay'].includes(action) ? ['paymentMethod'] : []
     for (const name of authFields) {
       if (typeof details[name] === 'string' && details[name]) command[name] = details[name]
+    }
+    if (['rechargeAmount', 'rechargePay'].includes(action)) {
+      const amount = Number(details.amount)
+      if (Number.isFinite(amount) && amount > 0) command.amount = Math.floor(amount)
     }
     if (action === 'select' && command.group) {
       state.pendingGroup = command.group
@@ -962,7 +1065,72 @@ export function installAssistantUI(options = {}) {
     if (state.nativeSync !== 'account-change' || !state.configured || hasForegroundPending()) return
     request('reconfigure')
   })
-  addListener(rechargeButton, 'click', () => request('recharge'))
+  addListener(rechargeButton, 'click', () => {
+    if (hasForegroundPending() && !hasActivePending('rechargeInfo')) return
+    state.rechargeOpen = !state.rechargeOpen
+    state.rechargePayment = null
+    state.error = ''
+    render()
+    if (state.rechargeOpen && !state.rechargeInfo) request('rechargeInfo')
+    else if (state.rechargeOpen && rechargeValue() && rechargeMethod()) {
+      request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
+    }
+  })
+  addListener(rechargePresets, 'click', (event) => {
+    const button = event.target.closest?.('[data-amount]')
+    if (!button || hasForegroundPending()) return
+    state.rechargeAmount = button.dataset.amount || ''
+    state.rechargePayment = null
+    state.rechargePaymentAmount = ''
+    render()
+    request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
+  })
+  addListener(rechargeAmountInput, 'input', () => {
+    state.rechargeAmount = rechargeAmountInput.value
+    state.rechargePayment = null
+    state.rechargePaymentAmount = ''
+    render()
+  })
+  addListener(rechargeMethodSelect, 'change', () => {
+    if (hasForegroundPending()) return
+    state.rechargePaymentMethod = rechargeMethodSelect.value
+    state.rechargePayment = null
+    state.rechargePaymentAmount = ''
+    render()
+    if (rechargeValue() && rechargeMethod()) {
+      request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
+    }
+  })
+  addListener(rechargeSubmit, 'click', () => {
+    if (hasForegroundPending()) return
+    const amount = rechargeValue()
+    const paymentMethod = rechargeMethod()
+    if (amount && paymentMethod) request('rechargePay', { amount, paymentMethod })
+  })
+  addListener(rechargePaymentButton, 'click', () => {
+    const payment = state.rechargePayment
+    if (!payment?.paymentUrl) return
+    const fields = payment.fields && typeof payment.fields === 'object' ? payment.fields : {}
+    if (Object.keys(fields).length) {
+      const form = document.createElement('form')
+      form.action = payment.paymentUrl
+      form.method = 'POST'
+      form.target = '_blank'
+      for (const [name, value] of Object.entries(fields)) {
+        if (!/^[\w.-]{1,100}$/.test(name) || value === null || value === undefined) continue
+        const input = document.createElement('input')
+        input.type = 'hidden'
+        input.name = name
+        input.value = String(value)
+        form.appendChild(input)
+      }
+      document.body.appendChild(form)
+      form.submit()
+      form.remove()
+    } else {
+      window.open(payment.paymentUrl, '_blank', 'noopener,noreferrer')
+    }
+  })
   addListener(restoreButton, 'click', () => {
     confirmation.dataset.open = 'true'
     render()
@@ -1036,6 +1204,22 @@ export function installAssistantUI(options = {}) {
         } else if (entry.action === 'sendVerification' && data.verificationSent === true) {
           state.verificationRetryAt = Date.now() + 60 * 1000
           state.message = '验证码已发送，请查看邮箱。'
+        } else if (entry.action === 'rechargeInfo') {
+          state.rechargeInfo = data
+          state.rechargeOpen = true
+          state.rechargeAmount = String(data.amountOptions?.[0] || data.minTopup || '')
+          state.rechargePaymentMethod = data.paymentMethods?.[0]?.type || ''
+          state.rechargePaymentAmount = ''
+          state.rechargePayment = null
+        } else if (entry.action === 'rechargeAmount') {
+          state.rechargePaymentAmount = cleanText(String(data.paymentAmount ?? ''), 40)
+        } else if (entry.action === 'rechargePay') {
+          state.rechargePayment = {
+            paymentUrl: cleanText(data.paymentUrl, 2000),
+            fields: data.fields && typeof data.fields === 'object' ? data.fields : {},
+            amount: Number(data.amount) || rechargeValue(),
+          }
+          state.message = '订单已创建，请继续完成支付。'
         } else {
           applyData(data, entry.action === 'status')
           if (data.configured && ['select', 'login'].includes(entry.action)) state.nativeSync = 'pending'
@@ -1047,6 +1231,9 @@ export function installAssistantUI(options = {}) {
       render()
       if (startSetup) request('login')
       if (entry.action === 'status' && response.ok === true && !state.loggedIn && !state.authReady) request('authOptions')
+      if (entry.action === 'rechargeInfo' && response.ok === true && rechargeValue() && rechargeMethod()) {
+        request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
+      }
       return true
     },
     dispose() {

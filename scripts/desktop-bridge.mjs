@@ -6,6 +6,9 @@ import {
   desktopAuthOptions,
   desktopRegister,
   desktopSendVerification,
+  desktopRechargeInfo,
+  desktopRechargeAmount,
+  desktopRechargePay,
   desktopRecharge,
   desktopRestore,
   desktopSelect,
@@ -18,7 +21,8 @@ import {
 
 const MAX_LINE_LENGTH = 16 * 1024
 const ACTIONS = new Set(['status', 'login', 'authOptions', 'register', 'sendVerification',
-  'select', 'reconfigure', 'recharge', 'restore', 'fast'])
+  'select', 'reconfigure', 'rechargeInfo', 'rechargeAmount', 'rechargePay', 'recharge',
+  'restore', 'fast'])
 
 function requestId(value) {
   return Number.isFinite(value) ? value : null
@@ -30,10 +34,11 @@ export function validateRequest(value) {
     throw new Error('invalid bridge request')
   }
   const limits = { group: 200, model: 200, username: 200, password: 1024, email: 254,
-    verificationCode: 100, loginId: 100, twoFactorCode: 100 }
+    verificationCode: 100, loginId: 100, twoFactorCode: 100, paymentMethod: 40 }
   const allowed = value.action === 'login' ? ['username', 'password', 'loginId', 'twoFactorCode']
     : value.action === 'register' ? ['username', 'password', 'email', 'verificationCode']
-      : value.action === 'sendVerification' ? ['email'] : value.action === 'select' ? ['group', 'model'] : []
+      : value.action === 'sendVerification' ? ['email'] : value.action === 'select' ? ['group', 'model']
+        : ['rechargeAmount', 'rechargePay'].includes(value.action) ? ['paymentMethod'] : []
   const request = { id: value.id, action: value.action }
   if (value.action === 'fast') {
     if (typeof value.enabled !== 'boolean' || !/^[0-9a-f]{64}$/.test(value.keyFingerprint)) {
@@ -50,6 +55,13 @@ export function validateRequest(value) {
     }
     if (value[field] !== undefined) request[field] = value[field]
   }
+  if (['rechargeAmount', 'rechargePay'].includes(value.action)) {
+    if (!Number.isFinite(value.amount) || value.amount <= 0 || value.amount > 1000000) {
+      throw new Error('invalid bridge request')
+    }
+    request.amount = value.amount
+  }
+  if (value.action === 'rechargePay' && !request.paymentMethod) throw new Error('invalid bridge request')
   if (value.action === 'login') {
     const credentials = value.username !== undefined || value.password !== undefined
     const challenge = value.loginId !== undefined || value.twoFactorCode !== undefined
@@ -73,6 +85,9 @@ export async function handleRequest(request) {
   if (action === 'sendVerification') return desktopSendVerification(details)
   if (action === 'select') return desktopSelect({ group, model })
   if (action === 'reconfigure') return desktopReconfigure()
+  if (action === 'rechargeInfo') return desktopRechargeInfo()
+  if (action === 'rechargeAmount') return desktopRechargeAmount(details)
+  if (action === 'rechargePay') return desktopRechargePay(details)
   if (action === 'fast') return desktopFastMode(details)
   if (action === 'recharge') return desktopRecharge()
   return desktopRestore()
