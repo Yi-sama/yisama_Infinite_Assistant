@@ -540,6 +540,38 @@ test('narrow viewport keeps the panel within the document and supports Escape', 
   assert.equal(await panel.isHidden(), true)
 })
 
+test('badge position adapts to viewport changes and survives reinjection', async (t) => {
+  const app = await fixture(t, { width: 1280, height: 800 })
+  if (!app) return
+  const { page, next, respond } = app
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$9061.92' }) })
+  const badge = page.locator('[data-testid="assistant-badge"]')
+  const initialBox = await badge.boundingBox()
+  assert.ok(initialBox)
+  await page.evaluate(({ left, top, width, height }) => {
+    localStorage.setItem('yisama-infinite-assistant-ui-position-v1', JSON.stringify({
+      left, top, viewportWidth: 1280, viewportHeight: 800, badgeWidth: width, badgeHeight: height,
+    }))
+  }, { left: 1120, top: 700, width: initialBox.width, height: initialBox.height })
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.dispose())
+  await page.setViewportSize({ width: 800, height: 500 })
+  await page.evaluate(installAssistantUI, { allowTestLocation: true })
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$9061.92' }) })
+  await page.waitForTimeout(50)
+  const resizedBox = await badge.boundingBox()
+  assert.ok(resizedBox)
+  assert.ok(resizedBox.x >= 8 && resizedBox.y >= 8)
+  assert.ok(resizedBox.x + resizedBox.width <= 792)
+  assert.ok(resizedBox.y + resizedBox.height <= 492)
+  const savedPosition = await page.evaluate(() => JSON.parse(localStorage.getItem(
+    'yisama-infinite-assistant-ui-position-v1',
+  )))
+  assert.equal(savedPosition.viewportWidth, 800)
+  assert.equal(savedPosition.viewportHeight, 500)
+  assert.ok(Number.isFinite(savedPosition.badgeWidth))
+  assert.ok(Number.isFinite(savedPosition.badgeHeight))
+})
+
 test('inline login validates inputs, handles errors and two-factor verification without browser navigation', async (t) => {
   const app = await fixture(t)
   if (!app) return

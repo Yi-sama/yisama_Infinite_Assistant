@@ -799,7 +799,7 @@ export function installAssistantUI(options = {}) {
     const retryAfter = Math.max(0, Math.ceil((state.verificationRetryAt - Date.now()) / 1000))
     sendVerificationButton.disabled = busy || retryAfter > 0
     sendVerificationButton.textContent = hasActivePending('sendVerification') ? '正在发送…' : retryAfter ? `${retryAfter}s 后重发` : '发送验证码'
-    placePanel()
+    placeBadge()
     if (opening && !reducedMotion()) {
       panel.animate?.([
         { opacity: 0, transform: 'translateY(10px) scale(.92)', filter: 'blur(6px)' },
@@ -959,22 +959,117 @@ export function installAssistantUI(options = {}) {
     if (opening) request('status')
     if (open) window.setTimeout(() => closeButton.focus(), 0)
   }
+  const positionMargin = 8
   const storedPosition = safe(() => JSON.parse(window.localStorage.getItem(storageKey) || 'null'), null)
-  const defaultPosition = () => ({ left: Math.max(8, window.innerWidth - 138), top: Math.max(8, window.innerHeight - 56) })
+  const viewportSize = () => ({
+    width: Math.max(1, Number(window.innerWidth) || 1),
+    height: Math.max(1, Number(window.innerHeight) || 1),
+  })
+  const badgeSize = () => ({
+    width: badge.offsetWidth || 120,
+    height: badge.offsetHeight || 32,
+  })
+  const positionRange = (viewport, size) => Math.max(0, viewport - size - positionMargin * 2)
+  const positionRatio = (value, viewport, size) => {
+    const range = positionRange(viewport, size)
+    return range ? clamp((value - positionMargin) / range, 0, 1) : 1
+  }
+  const positionFromRatio = (ratio, viewport, size) =>
+    positionMargin + clamp(ratio, 0, 1) * positionRange(viewport, size)
+  const defaultPosition = () => {
+    const viewport = viewportSize()
+    const size = badgeSize()
+    return {
+      left: Math.max(positionMargin, viewport.width - size.width - positionMargin),
+      top: Math.max(positionMargin, viewport.height - size.height - positionMargin),
+    }
+  }
   const badgePosition = {
     left: Number.isFinite(storedPosition?.left) ? storedPosition.left : defaultPosition().left,
     top: Number.isFinite(storedPosition?.top) ? storedPosition.top : defaultPosition().top,
   }
-  const placeBadge = () => {
-    const width = badge.offsetWidth || 120
-    const height = badge.offsetHeight || 32
-    badgePosition.left = clamp(badgePosition.left, 8, Math.max(8, window.innerWidth - width - 8))
-    badgePosition.top = clamp(badgePosition.top, 8, Math.max(8, window.innerHeight - height - 8))
+  const hasStoredViewport = Number.isFinite(storedPosition?.left) &&
+    Number.isFinite(storedPosition?.top) &&
+    Number.isFinite(storedPosition?.viewportWidth) &&
+    Number.isFinite(storedPosition?.viewportHeight)
+  let placementReady = false
+  let lastPlacement = null
+  let placementFrame = 0
+  const saveBadgePosition = () => safe(() => {
+    const viewport = viewportSize()
+    const size = badgeSize()
+    window.localStorage.setItem(storageKey, JSON.stringify({
+      left: Math.round(badgePosition.left),
+      top: Math.round(badgePosition.top),
+      viewportWidth: Math.round(viewport.width),
+      viewportHeight: Math.round(viewport.height),
+      badgeWidth: Math.round(size.width),
+      badgeHeight: Math.round(size.height),
+    }))
+  })
+  const placeBadge = ({ persist = true } = {}) => {
+    const viewport = viewportSize()
+    const size = badgeSize()
+    const previousPlacement = lastPlacement
+    if (!placementReady) {
+      if (hasStoredViewport) {
+        const storedWidth = Number.isFinite(storedPosition.badgeWidth) ? storedPosition.badgeWidth : size.width
+        const storedHeight = Number.isFinite(storedPosition.badgeHeight) ? storedPosition.badgeHeight : size.height
+        badgePosition.left = positionFromRatio(
+          positionRatio(storedPosition.left, storedPosition.viewportWidth, storedWidth),
+          viewport.width, size.width,
+        )
+        badgePosition.top = positionFromRatio(
+          positionRatio(storedPosition.top, storedPosition.viewportHeight, storedHeight),
+          viewport.height, size.height,
+        )
+      }
+      placementReady = true
+    } else if (previousPlacement && (
+      previousPlacement.viewport.width !== viewport.width ||
+      previousPlacement.viewport.height !== viewport.height ||
+      previousPlacement.size.width !== size.width ||
+      previousPlacement.size.height !== size.height
+    )) {
+      badgePosition.left = positionFromRatio(
+        positionRatio(badgePosition.left, previousPlacement.viewport.width, previousPlacement.size.width),
+        viewport.width, size.width,
+      )
+      badgePosition.top = positionFromRatio(
+        positionRatio(badgePosition.top, previousPlacement.viewport.height, previousPlacement.size.height),
+        viewport.height, size.height,
+      )
+    }
+    badgePosition.left = clamp(badgePosition.left, positionMargin,
+      Math.max(positionMargin, viewport.width - size.width - positionMargin))
+    badgePosition.top = clamp(badgePosition.top, positionMargin,
+      Math.max(positionMargin, viewport.height - size.height - positionMargin))
     badge.style.left = `${Math.round(badgePosition.left)}px`
     badge.style.top = `${Math.round(badgePosition.top)}px`
+    lastPlacement = { viewport, size }
+    const placementChanged = !previousPlacement ||
+      previousPlacement.viewport.width !== viewport.width ||
+      previousPlacement.viewport.height !== viewport.height ||
+      previousPlacement.size.width !== size.width ||
+      previousPlacement.size.height !== size.height
+    if (persist && placementChanged) saveBadgePosition()
     placePanel()
   }
-  const saveBadgePosition = () => safe(() => window.localStorage.setItem(storageKey, JSON.stringify(badgePosition)))
+  const scheduleBadgePlacement = () => {
+    if (placementFrame) return
+    if (typeof window.requestAnimationFrame !== 'function') {
+      placeBadge()
+      return
+    }
+    placementFrame = window.requestAnimationFrame(() => {
+      placementFrame = 0
+      placeBadge()
+    })
+  }
+  cleanups.push(() => {
+    if (placementFrame) window.cancelAnimationFrame?.(placementFrame)
+    placementFrame = 0
+  })
 
   addListener(badge, 'pointerdown', (event) => {
     if (event.button !== 0) return
@@ -989,7 +1084,7 @@ export function installAssistantUI(options = {}) {
     if (!dragging.moved) return
     badgePosition.left = dragging.left + dx
     badgePosition.top = dragging.top + dy
-    placeBadge()
+    placeBadge({ persist: false })
   })
   const finishDrag = (event) => {
     if (!dragging || event.pointerId !== dragging.pointerId) return
@@ -1191,7 +1286,8 @@ export function installAssistantUI(options = {}) {
   addListener(document, 'visibilitychange', () => {
     if (!document.hidden) request('status')
   })
-  addListener(window, 'resize', placeBadge)
+  addListener(window, 'resize', scheduleBadgePlacement)
+  if (window.visualViewport) addListener(window.visualViewport, 'resize', scheduleBadgePlacement)
   const pollTimer = window.setInterval(() => {
     if (!document.hidden) request('status')
   }, 60 * 1000)
@@ -1293,7 +1389,7 @@ export function installAssistantUI(options = {}) {
   }
   window.__yisamaInfiniteAssistant = runtime
   render()
-  placeBadge()
+  scheduleBadgePlacement()
   request('status')
   return runtime
 }
