@@ -431,8 +431,9 @@ async function findAssistantKey(token, group) {
 }
 
 export async function ensureAssistantKey(token, group, {
-  requireFast = true, keyId = null, existingKey = null,
+  requireFast = true, fastEnabled = true, keyId = null, existingKey = null,
 } = {}) {
+  const desiredFast = fastEnabled === true
   let key
   if (Number.isInteger(keyId)) {
     try {
@@ -448,32 +449,45 @@ export async function ensureAssistantKey(token, group, {
       body: {
         name: keyName(), remain_quota: 0, expired_time: -1,
         unlimited_quota: true, model_limits_enabled: false, model_limits: '',
-        allow_ips: '', group, auto_groups: [], cross_group_retry: group === 'auto', fast_mode: true,
+        allow_ips: '', group, auto_groups: [], cross_group_retry: group === 'auto', fast_mode: desiredFast,
       },
     })
     key = await findAssistantKey(token, group)
   }
   if (!key || !Number.isInteger(key.id)) throw new UserError('账号准备未完成，请重新设置。')
   const id = key.id
+  const fastAvailable = key.fast_mode_available === true
+  const expectedFast = desiredFast && fastAvailable
+  const updateKey = (fastMode) => requestApi('/token/', {
+    token, method: 'PUT',
+    body: {
+      id, name: keyName(), status: 1, expired_time: -1,
+      remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '',
+      allow_ips: '', group, auto_groups: [], cross_group_retry: group === 'auto', fast_mode: fastMode,
+    },
+  })
   // Reconcile older owned credentials without rewriting a healthy credential on every selection.
   if (key.name !== keyName() || key.group !== group || key.status !== 1 ||
-    key.fast_mode !== true || key.expired_time !== -1 ||
+    key.fast_mode !== expectedFast || key.expired_time !== -1 ||
     key.unlimited_quota !== true || key.model_limits_enabled !== false ||
     (key.model_limits || '') !== '' || (key.allow_ips || '') !== '' ||
     (Array.isArray(key.auto_groups) ? key.auto_groups.length !== 0 : Boolean(key.auto_groups)) ||
     key.cross_group_retry !== (group === 'auto')) {
-    await requestApi('/token/', {
-      token, method: 'PUT',
-      body: {
-        id, name: keyName(), status: 1, expired_time: -1,
-        remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '',
-        allow_ips: '', group, auto_groups: [], cross_group_retry: group === 'auto', fast_mode: true,
-      },
-    })
+    await updateKey(expectedFast)
   }
   key = (await requestApi(`/token/${id}`, { token })).data
-  if (key?.status !== 1 || key?.group !== group || key?.fast_mode !== true ||
-    (requireFast && key?.fast_mode_available !== true)) {
+  let finalFastAvailable = key?.fast_mode_available === true
+  let finalFastEnabled = key?.fast_mode === true
+  if (key?.status === 1 && key?.group === group &&
+    finalFastEnabled !== (desiredFast && finalFastAvailable)) {
+    await updateKey(desiredFast && finalFastAvailable)
+    key = (await requestApi(`/token/${id}`, { token })).data
+    finalFastAvailable = key?.fast_mode_available === true
+    finalFastEnabled = key?.fast_mode === true
+  }
+  if (key?.status !== 1 || key?.group !== group ||
+    finalFastEnabled !== (desiredFast && finalFastAvailable) ||
+    (requireFast && !finalFastAvailable)) {
     throw new UserError('当前分组暂不能启用 Fast，请选择支持的分组。')
   }
   let rawKey = keyId === id ? existingKey : null
@@ -482,8 +496,10 @@ export async function ensureAssistantKey(token, group, {
     rawKey = secret.data?.key
   }
   if (typeof rawKey !== 'string' || rawKey.length < 8) throw new UserError('账号准备未完成，请重新设置。')
-  return { id, group, key: rawKey.startsWith('sk-') ? rawKey : `sk-${rawKey}`,
-    fast: key.fast_mode_available === true }
+  return {
+    id, group, key: rawKey.startsWith('sk-') ? rawKey : `sk-${rawKey}`,
+    fastAvailable: finalFastAvailable, fastEnabled: finalFastEnabled,
+  }
 }
 
 export async function fetchModels(apiKey) {
@@ -625,6 +641,7 @@ async function setup(requestedGroup, requestedReasoning) {
       group: selected.value, groupLabel: selected.label, keyId: internalKey.id,
       keyFingerprint: createHash('sha256').update(internalKey.key).digest('hex'),
       model, modelByGroup: { ...modelByGroup, [selected.value]: model },
+      fastAvailable: internalKey.fastAvailable,
       configuredAt: new Date().toISOString(),
     },
   })
@@ -918,9 +935,13 @@ async function configureDesktop({
     current.apiKey && Number.isInteger(previous.keyId)
   try {
     const internalKey = requestedModel && canReuse && previous.group === selected.value
-      ? { id: previous.keyId, group: selected.value, key: current.apiKey, fast: current.fast }
+      ? {
+        id: previous.keyId, group: selected.value, key: current.apiKey,
+        fastAvailable: previous.fastAvailable ?? current.fast, fastEnabled: current.fast,
+      }
       : await ensureAssistantKey(session.token, selected.value, {
-        requireFast: false, keyId: canReuse ? previous.keyId : null,
+        requireFast: false, fastEnabled: canReuse ? current.fast : true,
+        keyId: canReuse ? previous.keyId : null,
         existingKey: canReuse ? current.apiKey : null,
       })
     const models = await desktopModels(internalKey.key, selected.value)
@@ -932,19 +953,21 @@ async function configureDesktop({
     const modelByGroup = rememberModelByGroup(previous, previous.group, active.model)
     const model = requestedModel || chooseModel(models, modelByGroup[selected.value] || active.model)
     const reasoning = highestSupportedReasoning(await supportedReasoning(files, config, model))
-    const catalog = await desktopCatalog(files, config, previous, models, internalKey.fast)
+    const catalog = await desktopCatalog(files, config, previous, models, internalKey.fastAvailable)
     const catalogHash = createHash('sha256').update(JSON.stringify(catalog) + '\n').digest('hex')
     const changed = !current.configured || previous.group !== selected.value || current.apiKey !== internalKey.key ||
-      active.model !== model || (active.model_reasoning_effort ?? null) !== reasoning || current.fast !== internalKey.fast ||
+      active.model !== model || (active.model_reasoning_effort ?? null) !== reasoning ||
+      current.fast !== internalKey.fastEnabled || previous.fastAvailable !== internalKey.fastAvailable ||
       previous.catalogHash !== catalogHash || active.model_catalog_json !== previous.catalogPath
     if (changed || forceRestart) await configureCodex({
-      files, state: previous, apiKey: internalKey.key, origin, model, reasoning, fast: internalKey.fast, catalog,
+      files, state: previous, apiKey: internalKey.key, origin, model, reasoning,
+      fast: internalKey.fastEnabled, catalog,
       statePatch: {
         origin, userId: session.user.id, username: session.user.username,
         group: selected.value, groupLabel: selected.label, keyId: internalKey.id,
         keyFingerprint: createHash('sha256').update(internalKey.key).digest('hex'),
         model, modelByGroup: { ...modelByGroup, [selected.value]: model },
-        fastAvailable: internalKey.fast, configuredAt: new Date().toISOString(), restartRequired: true,
+        fastAvailable: internalKey.fastAvailable, configuredAt: new Date().toISOString(), restartRequired: true,
       },
     })
     return publicState({
@@ -953,14 +976,15 @@ async function configureDesktop({
       quota: formatQuota(session.user, status.data),
       group: selected.value, groupLabel: selected.label,
       groups: groupInfo, model, models,
-      message: internalKey.fast ? '分组已保存。' : '分组已保存，使用普通模式。',
+      message: internalKey.fastEnabled ? '分组已保存。' : '分组已保存，使用普通模式。',
       restartRequired: forceRestart || changed || desktopRestartRequired(previous),
     })
   } catch (error) {
     if (canReuse && previous.group !== selected.value) {
       try {
         await ensureAssistantKey(session.token, previous.group, {
-          requireFast: false, keyId: previous.keyId, existingKey: current.apiKey,
+          requireFast: false, fastEnabled: current.fast,
+          keyId: previous.keyId, existingKey: current.apiKey,
         })
       } catch (rollbackError) {
         throw new ConfigRecoveryError('切换分组失败，原分组未能恢复，请重新选择原分组。', {

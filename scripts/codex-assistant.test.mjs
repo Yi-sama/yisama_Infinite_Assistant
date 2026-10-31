@@ -36,7 +36,7 @@ test('native controls adapt only the inspected hook sites and reject missing or 
   }
 })
 
-function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true } = {}) {
+function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true, serverDelay = 0 } = {}) {
   const listeners = new Set()
   const calls = []
   const authCalls = []
@@ -59,9 +59,11 @@ function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = t
     yisamaAssistantCommand(payload) {
       const request = JSON.parse(payload)
       calls.push(request)
-      queueMicrotask(() => window.__yisamaNativeFast.receive({
+      const reply = () => window.__yisamaNativeFast.receive({
         id: request.id, ok: !serverFailure, data: { enabled: request.enabled },
-      }))
+      })
+      if (serverDelay > 0) setTimeout(reply, serverDelay)
+      else queueMicrotask(reply)
     },
   }
   window.top = window
@@ -77,7 +79,7 @@ function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = t
   return { window, controller, native, calls, authCalls, key }
 }
 
-test('native Fast waits for the server, delegates to the original setter, and preserves native account access', async () => {
+test('native Fast updates the native UI before the server and preserves native account access', async () => {
   const { controller, native, calls, authCalls, key, window } = fastFixture()
   assert.equal(controller.access('local', 'apikey')?.fast, true)
   assert.equal(controller.access('local', 'chatgpt'), null)
@@ -86,31 +88,47 @@ test('native Fast waits for the server, delegates to the original setter, and pr
   const wrapped = controller.wrap('local', 'apikey', native)
   assert.equal(controller.wrap('local', 'apikey', native), wrapped)
   assert.equal(await wrapped(null, 'composer_menu'), true)
-  assert.equal(calls[0].action, 'fast')
-  assert.equal(calls[0].enabled, false)
-  assert.equal(calls[0].keyFingerprint, createHash('sha256').update(key).digest('hex'))
-  assert.equal(calls[1].nativeTier, null)
+  await delay(10)
+  assert.equal(calls[0].nativeTier, null)
+  const firstServerCall = calls.find((call) => call.action === 'fast')
+  assert.equal(firstServerCall.enabled, false)
+  assert.equal(firstServerCall.keyFingerprint, createHash('sha256').update(key).digest('hex'))
   assert.deepEqual(authCalls, ['getAuthStatus'])
   assert.equal(JSON.stringify(calls).includes(key), false)
   assert.equal(await wrapped('priority', 'composer_menu'), true)
-  assert.equal(calls[2].enabled, true)
-  assert.equal(calls[3].nativeTier, 'priority')
+  await delay(10)
+  assert.equal(calls.findLast((call) => call.action === 'fast').enabled, true)
+  assert.equal(calls.findLast((call) => Object.hasOwn(call, 'nativeTier')).nativeTier, 'priority')
   window.__yisamaNativeFastSourceReady = false
   assert.equal(controller.access('local', 'apikey'), null)
   controller.dispose()
 })
 
-test('native Fast rejects unverified accounts and rolls the server back when native persistence fails', async () => {
+test('native Fast rolls the optimistic native setting back when server confirmation fails', async () => {
   for (const options of [{ serverFailure: true }, { nativeFailure: true }, { ownAuth: false }]) {
     const { controller, native, calls } = fastFixture(options)
-    assert.equal(await controller.wrap('local', 'apikey', native)(null, 'composer_menu'), false)
+    const result = await controller.wrap('local', 'apikey', native)(null, 'composer_menu')
+    await delay(10)
+    assert.equal(result, options.nativeFailure ? false : true)
     const changes = calls.filter((call) => call.action === 'fast')
     assert.deepEqual(changes.map((call) => call.enabled),
-      options.ownAuth === false ? [] : options.nativeFailure ? [false, true] : [false])
-    assert.equal(calls.filter((call) => Object.hasOwn(call, 'nativeTier')).length, options.nativeFailure ? 1 : 0)
+      options.ownAuth === false || options.nativeFailure ? [] : [false])
+    assert.equal(calls.filter((call) => Object.hasOwn(call, 'nativeTier')).length,
+      options.nativeFailure ? 1 : 2)
     assert.equal(calls.at(-1).status, 'error')
     controller.dispose()
   }
+})
+
+test('native Fast returns before a delayed server confirmation completes', async () => {
+  const { controller, native, calls } = fastFixture({ serverDelay: 40 })
+  assert.equal(await controller.wrap('local', 'apikey', native)(null, 'composer_menu'), true)
+  assert.equal(calls[0].nativeTier, null)
+  assert.equal(controller.isBusy(), true)
+  await delay(60)
+  assert.equal(controller.isBusy(), false)
+  assert.equal(calls.find((call) => call.action === 'fast').enabled, false)
+  controller.dispose()
 })
 
 test('native Fast does not alter an unowned API provider or enable Ultra Fast', async () => {
@@ -283,7 +301,8 @@ test('Fast-only synchronization preserves the catalog, query cache, and owned th
     'an actual route or catalog change still requires full synchronization')
   assert.equal(state.invalidations, 2)
   assert.equal(state.updates.length, 2, 'a real catalog change still reconciles owned threads')
-  assert.deepEqual({ ...state.updates.at(-1) }, { threadId: 'owned', serviceTier: null })
+  assert.deepEqual({ ...state.updates.at(-1) },
+    { threadId: 'owned', model: 'gpt-owned', serviceTier: null })
 
   settings.catalogVersion = 'catalog-failure'
   settings.version = 'failed-tier-change'

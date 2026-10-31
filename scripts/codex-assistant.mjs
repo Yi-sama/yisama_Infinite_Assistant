@@ -124,34 +124,59 @@ export function installNativeFast() {
         if (!controller.access(host, method)) return nativeSet(tier, source)
         if (busy || (tier !== null && tier !== 'priority')) return false
         const own = authorization
+        const previousEnabled = own.fastEnabled === true
+        const enabled = tier === 'priority'
         busy = true
-        let changed = false
-        let fingerprint
+        let nativeChanged = false
+        const setLocalFast = (value) => {
+          own.fastEnabled = value
+          if (authorization?.apiKey === own.apiKey) authorization.fastEnabled = value
+        }
+        const rollbackNative = async () => {
+          if (!nativeChanged) return
+          try {
+            await nativeSet(previousEnabled ? 'priority' : null, 'yisama_fast_rollback')
+            setLocalFast(previousEnabled)
+          } catch { authorization = null }
+        }
         try {
-          const auth = await nativeAuth()
-          if (auth.authMethod !== 'apikey' || auth.authToken !== own.apiKey) {
-            authorization = null
-            throw new Error('Fast account changed.')
-          }
-          const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(own.apiKey))
-          fingerprint = Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
-          const enabled = tier === 'priority'
-          const response = await send(enabled, fingerprint)
-          changed = response.enabled === enabled
-          if (response.enabled !== enabled || authorization !== own || disposed) throw new Error('Fast account changed.')
-          // The preflight auth and server-side key ownership check cover this serialized click.
+          // Let the native control paint immediately; remote ownership is confirmed below.
           if (await nativeSet(tier, source) !== true) throw new Error('Native Fast setting failed.')
-          own.fastEnabled = enabled
-          return true
+          nativeChanged = true
+          setLocalFast(enabled)
         } catch {
-          if (changed) {
-            try {
-              await send(own.fastEnabled, fingerprint)
-            } catch { authorization = null }
-          }
+          busy = false
           window.__yisamaInfiniteAssistant?.nativeStatus?.('error')
           return false
-        } finally { busy = false }
+        }
+        void (async () => {
+          let changed = false
+          let fingerprint
+          try {
+            const auth = await nativeAuth()
+            if (auth.authMethod !== 'apikey' || auth.authToken !== own.apiKey ||
+              authorization?.apiKey !== own.apiKey || disposed) {
+              authorization = null
+              throw new Error('Fast account changed.')
+            }
+            const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(own.apiKey))
+            fingerprint = Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+            const response = await send(enabled, fingerprint)
+            changed = response.enabled === enabled
+            if (response.enabled !== enabled || authorization?.apiKey !== own.apiKey || disposed) {
+              throw new Error('Fast account changed.')
+            }
+          } catch {
+            if (changed) {
+              try {
+                await send(previousEnabled, fingerprint)
+              } catch { authorization = null }
+            }
+            await rollbackNative()
+            window.__yisamaInfiniteAssistant?.nativeStatus?.('error')
+          } finally { busy = false }
+        })()
+        return true
       }
       wrappers.set(nativeSet, wrapped)
       return wrapped
@@ -786,7 +811,7 @@ export async function syncNativeModels(settings, options = {}) {
           if (!models.includes(thread.model)) continue
           const next = settings.modelSettings[thread.model]
           if (!next) throw new Error('Native thread model unavailable.')
-          await rpc('thread/settings/update', { threadId, serviceTier: next.serviceTier })
+          await rpc('thread/settings/update', { threadId, model: thread.model, serviceTier: next.serviceTier })
         }
         cursor = loaded.nextCursor
       } while (cursor)

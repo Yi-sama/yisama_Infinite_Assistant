@@ -387,7 +387,7 @@ test('native synchronization updates subsequent turns only for assistant-owned p
   }, { allowTestLocation: true }), { source: syncNativeModels.toString(), version })
   assert.equal((await sync('owned-threads')).status, 'synced')
   assert.deepEqual(await page.evaluate(() => window.nativeFixture.updates), [
-    { threadId: 'keep', serviceTier: null },
+    { threadId: 'keep', model: 'gemini-3-flash', serviceTier: null },
   ])
   const calls = await page.evaluate(() => window.nativeFixture.calls)
   assert.equal(calls.filter((method) => method === 'thread/loaded/list').length, 2)

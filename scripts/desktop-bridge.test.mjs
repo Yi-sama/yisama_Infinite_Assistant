@@ -366,7 +366,7 @@ test('native Fast cannot change foreign credentials or claim an unconfirmed serv
   assert.equal((await bridge.close()).stderr, '')
 })
 
-test('status refreshes Fast permission changes without switching groups, rewriting keys or escalating reasoning', async (t) => {
+test('status refreshes Fast permission changes without enabling it unexpectedly', async (t) => {
   const { state, env, files } = await fixture(t)
   state.fastUnavailableGroups = ['auto']
   const bridge = bridgeClient(env)
@@ -383,7 +383,7 @@ test('status refreshes Fast permission changes without switching groups, rewriti
   assert.equal(saved.fastAvailable, true)
   assert.ok(catalog.models.every((model) => model.service_tiers.some((tier) => tier.id === 'priority')))
   let config = parse(await fs.readFile(files.config, 'utf8'))
-  assert.equal(config.service_tier, 'fast')
+  assert.equal(config.service_tier, undefined, 'permission recovery must not turn Fast back on')
   assert.equal(config.model_reasoning_effort, original.model_reasoning_effort)
   state.fastUnavailableGroups = ['auto']
   assert.equal((await bridge.request({ id: 4, action: 'status' })).ok, true)
@@ -397,7 +397,7 @@ test('status refreshes Fast permission changes without switching groups, rewriti
   assert.equal(saved.group, 'auto')
   assert.ok(state.calls.slice(before).every((call) => call.method === 'GET'))
   assert.equal(state.keys.length, 1)
-  assert.equal(state.keys[0].fast_mode, true)
+  assert.equal(state.keys[0].fast_mode, false)
   assert.equal((await bridge.close()).stderr, '')
 })
 
@@ -465,6 +465,7 @@ test('text groups without Fast switch and persist their own model catalog and or
     assert.equal(selected.data.model, state.groupModels[group][1])
     assert.deepEqual(selected.data.models, state.groupModels[group])
     assert.match(selected.data.message, /普通模式/)
+    assert.equal(state.keys[0].fast_mode, false, 'ordinary group switches must disable the server Fast flag')
     assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined)
     const catalog = JSON.parse(await fs.readFile(parse(await fs.readFile(files.config, 'utf8')).model_catalog_json, 'utf8'))
     assert.ok(catalog.models.every((model) => model.service_tiers.length === 0 &&
@@ -490,7 +491,9 @@ test('text groups without Fast switch and persist their own model catalog and or
   assert.equal(status.data.model, 'qwen3-max')
   const fast = await bridge.request({ id: 7, action: 'select', group: 'auto' })
   assert.equal(fast.data.group, 'auto')
-  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, 'fast')
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined,
+    'switching back must preserve the user disabled Fast setting')
+  assert.equal(state.keys[0].fast_mode, false)
   assert.equal((await bridge.close()).stderr, '')
 })
 
@@ -554,7 +557,7 @@ test('native synchronization ignores model preferences but still tracks Fast and
   assert.equal(standard.fastEnabled, false)
   assert.equal((await bridge.request({ id: 2, action: 'select', group: 'premium' })).ok, true)
   const grouped = await snapshot()
-  assert.equal(grouped.fastEnabled, initial.fastEnabled)
+  assert.equal(grouped.fastEnabled, false, 'a group switch must preserve the disabled Fast setting')
   assert.notEqual(grouped.version, initial.version, 'group changes still refresh the catalog')
   assert.notEqual(grouped.catalogVersion, initial.catalogVersion)
   assert.equal((await bridge.close()).stderr, '')
