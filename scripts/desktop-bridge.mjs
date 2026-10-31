@@ -9,13 +9,16 @@ import {
   desktopRecharge,
   desktopRestore,
   desktopSelect,
+  desktopReconfigure,
   desktopStatus,
+  desktopFastMode,
   safeError,
   publicErrorCode,
 } from './yisama.mjs'
 
 const MAX_LINE_LENGTH = 16 * 1024
-const ACTIONS = new Set(['status', 'login', 'authOptions', 'register', 'sendVerification', 'select', 'recharge', 'restore'])
+const ACTIONS = new Set(['status', 'login', 'authOptions', 'register', 'sendVerification',
+  'select', 'reconfigure', 'recharge', 'restore', 'fast'])
 
 function requestId(value) {
   return Number.isFinite(value) ? value : null
@@ -32,6 +35,13 @@ export function validateRequest(value) {
     : value.action === 'register' ? ['username', 'password', 'email', 'verificationCode']
       : value.action === 'sendVerification' ? ['email'] : value.action === 'select' ? ['group', 'model'] : []
   const request = { id: value.id, action: value.action }
+  if (value.action === 'fast') {
+    if (typeof value.enabled !== 'boolean' || !/^[0-9a-f]{64}$/.test(value.keyFingerprint)) {
+      throw new Error('invalid bridge request')
+    }
+    request.enabled = value.enabled
+    request.keyFingerprint = value.keyFingerprint
+  }
   for (const field of allowed) {
     if (value[field] !== undefined && (typeof value[field] !== 'string' ||
       !(field === 'password' ? value[field].length : value[field].trim()) ||
@@ -62,6 +72,8 @@ export async function handleRequest(request) {
   if (action === 'register') return desktopRegister(details)
   if (action === 'sendVerification') return desktopSendVerification(details)
   if (action === 'select') return desktopSelect({ group, model })
+  if (action === 'reconfigure') return desktopReconfigure()
+  if (action === 'fast') return desktopFastMode(details)
   if (action === 'recharge') return desktopRecharge()
   return desktopRestore()
 }

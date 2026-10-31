@@ -44,14 +44,26 @@ async function cachedDesktopValue(key, ttl, load) {
   }
 }
 
-function desktopGroups(session) {
-  return cachedDesktopValue(`groups:${session.origin}:${session.token}`, CATALOG_TTL,
-    () => fetchGroups(session.token))
+// The assistant offers chat (LLM) routes only; image and video catalogues are hidden.
+function desktopTextCatalog() {
+  return cachedDesktopValue(`pricing:${originFromEnvironment()}`, DISPLAY_TTL,
+    () => requestApi('/pricing').then(classifyPricing, () => classifyPricing(null)))
 }
 
-function desktopModels(apiKey, group = '') {
-  return cachedDesktopValue(`models:${originFromEnvironment()}:${group}:${apiKey}`, CATALOG_TTL,
-    () => fetchModels(apiKey))
+async function desktopGroupInfo(session, keep = '') {
+  const [groups, catalog] = await Promise.all([
+    cachedDesktopValue(`groups:${session.origin}:${session.token}`, CATALOG_TTL, () => fetchGroupInfo(session.token)),
+    desktopTextCatalog(),
+  ])
+  return groups.filter((group) => group.value === 'auto' || group.value === keep || !catalog.mediaGroups.has(group.value))
+}
+
+async function desktopModels(apiKey, group = '') {
+  const [models, catalog] = await Promise.all([
+    cachedDesktopValue(`models:${originFromEnvironment()}:${group}:${apiKey}`, CATALOG_TTL, () => fetchModels(apiKey)),
+    desktopTextCatalog(),
+  ])
+  return textModels(models, catalog)
 }
 
 function desktopDisplay() {
@@ -345,12 +357,45 @@ export async function authenticatedSession({ interactive = true, onPortalOpen } 
   return { ...session, user: response.data }
 }
 
-export async function fetchGroups(token) {
+export async function fetchGroupInfo(token) {
   const { data } = await requestApi('/user/self/groups', { token })
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new UserError('暂时无法读取可用分组。')
   }
-  return Object.keys(data).filter(Boolean)
+  return Object.entries(data).filter(([value]) => value).map(([value, info]) => ({
+    value, ratio: Number.isFinite(info?.ratio) ? info.ratio : null,
+  }))
+}
+
+export async function fetchGroups(token) {
+  return (await fetchGroupInfo(token)).map((group) => group.value)
+}
+
+const MEDIA_MODEL = /(?:^|[-_.])(?:image|imagen|audio|tts|video|embedding|rerank)(?:$|[-_.])/i
+
+// Classifies the public pricing list: image/video endpoints and paid per-call models are not LLMs,
+// and a group whose models are mostly non-LLM is a media group.
+export function classifyPricing(pricing) {
+  const nonText = new Set()
+  const counts = new Map()
+  for (const model of Array.isArray(pricing?.data) ? pricing.data : []) {
+    const types = Array.isArray(model?.supported_endpoint_types) ? model.supported_endpoint_types : []
+    const text = !types.some((type) => type === 'image-generation' || /video|audio|embedding|rerank/i.test(type)) &&
+      !(model.quota_type === 1 && model.model_price > 0)
+    if (!text && typeof model.model_name === 'string') nonText.add(model.model_name)
+    for (const group of Array.isArray(model?.enable_groups) ? model.enable_groups : []) {
+      const count = counts.get(group) || { text: 0, other: 0 }
+      count[text ? 'text' : 'other'] += 1
+      counts.set(group, count)
+    }
+  }
+  const mediaGroups = new Set([...counts].filter(([, count]) => count.text === 0 || count.other > count.text)
+    .map(([group]) => group))
+  return { nonText, mediaGroups }
+}
+
+export function textModels(models, catalog = classifyPricing(null)) {
+  return models.filter((id) => !catalog.nonText.has(id) && !MEDIA_MODEL.test(id))
 }
 
 export function chooseGroup(requested, availableGroups) {
@@ -461,6 +506,17 @@ export function chooseModel(models, preferred) {
   return model
 }
 
+function rememberModelByGroup(state, group, model) {
+  const saved = state?.modelByGroup
+  const remembered = saved && typeof saved === 'object' && !Array.isArray(saved)
+    ? Object.fromEntries(Object.entries(saved).filter(([key, value]) =>
+      typeof key === 'string' && key && typeof value === 'string' && value))
+    : {}
+  return group && typeof model === 'string' && model
+    ? { ...remembered, [group]: model }
+    : remembered
+}
+
 function activeConfig(config) {
   return { ...config, ...config.profiles?.[config.profile] }
 }
@@ -479,7 +535,7 @@ async function supportedReasoning(files, config, model) {
     .filter((effort) => Object.hasOwn(REASONING_LABELS, effort)))]
 }
 
-async function desktopCatalog(files, config, state, models) {
+async function desktopCatalog(files, config, state, models, fast = false) {
   const sources = [activeConfig(config).model_catalog_json]
   if (state.backups?.config) {
     const original = parse(await readOptional(state.backups.config) || '')
@@ -491,7 +547,7 @@ async function desktopCatalog(files, config, state, models) {
     const catalog = await readJson(path.resolve(path.dirname(files.codexConfig), file))
     if (Array.isArray(catalog?.models)) metadata.push(...catalog.models)
   }
-  return makeModelCatalog(models, metadata.reverse())
+  return makeModelCatalog(models, metadata.reverse(), { fast })
 }
 
 export function chooseReasoning(requested, current, supported) {
@@ -556,7 +612,8 @@ async function setup(requestedGroup, requestedReasoning) {
   const models = await fetchModels(internalKey.key)
   const current = parse(await readOptional(files.codexConfig) || '')
   const active = activeConfig(current)
-  const preferred = active.model
+  const modelByGroup = rememberModelByGroup(previous, previous.group, active.model)
+  const preferred = modelByGroup[selected.value] || active.model
   const model = chooseModel(models, preferred)
   const reasoning = chooseReasoning(requestedReasoning, active.model_reasoning_effort,
     await supportedReasoning(files, current, model))
@@ -567,7 +624,8 @@ async function setup(requestedGroup, requestedReasoning) {
       origin, userId: session.user.id, username: session.user.username,
       group: selected.value, groupLabel: selected.label, keyId: internalKey.id,
       keyFingerprint: createHash('sha256').update(internalKey.key).digest('hex'),
-      model, configuredAt: new Date().toISOString(),
+      model, modelByGroup: { ...modelByGroup, [selected.value]: model },
+      configuredAt: new Date().toISOString(),
     },
   })
   console.log(`登录成功：${session.user.display_name || session.user.username || 'yisama 用户'}`)
@@ -615,10 +673,11 @@ async function showStatus() {
 }
 
 function publicGroups(groups) {
-  return groups.slice(0, 100).map((value) => ({
-    value: String(value).slice(0, 200),
-    label: value === 'auto' ? 'All' : String(value).slice(0, 200),
-  }))
+  return groups.slice(0, 100).map((group) => {
+    const value = String(group?.value ?? group).slice(0, 200)
+    const ratio = Number.isFinite(group?.ratio) ? group.ratio : undefined
+    return { value, label: value === 'auto' ? 'All' : value, ...(ratio === undefined ? {} : { ratio }) }
+  })
 }
 
 function publicText(value) {
@@ -679,7 +738,7 @@ function configuredModel(files, state, origin) {
       config.model_providers?.yisama?.requires_openai_auth === true &&
       !config.model_providers?.yisama?.env_key && ownedKey
     return { model: active.model || '', apiKey: configured ? auth.OPENAI_API_KEY : null, configured,
-      fast: active.service_tier === 'fast' }
+      fast: ['fast', 'priority'].includes(active.service_tier) }
   })
 }
 
@@ -699,21 +758,38 @@ export async function desktopStatus({ message, restartRequired } = {}) {
   const current = await configuredModel(files, state, origin)
   const configured = current.configured
   const [groups, status, models] = await Promise.all([
-    desktopGroups(session), desktopDisplay(),
+    desktopGroupInfo(session, configured ? state.group : ''), desktopDisplay(),
     current.apiKey ? desktopModels(current.apiKey, state.group) : [],
   ])
   let model = configured ? current.model || publicText(state.model) : ''
+  let fastAvailable = state.fastAvailable
   if (configured && models.length) {
     const config = parse(await readOptional(files.codexConfig) || '')
     const active = activeConfig(config)
-    const catalog = await desktopCatalog(files, config, state, models)
+    const existingCatalog = await readJson(state.catalogPath, {})
+    fastAvailable ??= existingCatalog.models?.some((model) =>
+      model.service_tiers?.some((tier) => tier.id === 'priority')) ?? current.fast
+    let fast = current.fast
+    if (Number.isInteger(state.keyId) && state.userId === session.user.id) {
+      const key = (await requestApi(`/token/${state.keyId}`, { token: session.token })).data
+      if (key?.id !== state.keyId || key.status !== 1 || key.group !== state.group) {
+        throw new UserError('当前助手线路已变化，请重新配置。')
+      }
+      fastAvailable = key.fast_mode_available === true
+      fast = fastAvailable && key.fast_mode === true
+    }
+    const catalog = await desktopCatalog(files, config, state, models, fastAvailable)
     const hash = createHash('sha256').update(JSON.stringify(catalog) + '\n').digest('hex')
-    if (state.catalogHash !== hash || active.model_catalog_json !== state.catalogPath) {
+    if (state.catalogHash !== hash || active.model_catalog_json !== state.catalogPath ||
+      current.fast !== fast || state.fastAvailable !== fastAvailable) {
       model = chooseModel(models, model)
       state = await configureCodex({
-        files, state, apiKey: current.apiKey, origin, model, fast: current.fast, catalog,
+        files, state, apiKey: current.apiKey, origin, model, fast, catalog,
         reasoning: model === active.model ? active.model_reasoning_effort : null,
-        statePatch: { model, configuredAt: new Date().toISOString(), restartRequired: true },
+        statePatch: {
+          model, modelByGroup: rememberModelByGroup(state, state.group, model),
+          fastAvailable, configuredAt: new Date().toISOString(), restartRequired: true,
+        },
       })
     }
   }
@@ -729,7 +805,7 @@ export async function desktopStatus({ message, restartRequired } = {}) {
     model,
     models,
     message: message || (configured
-      ? '配置已保存。'
+      ? fastAvailable === false ? '当前分组未开放 Fast。' : '配置已保存。'
       : '已登录 yisama 账号，尚未配置 Codex。'),
     restartRequired: needsRestart,
   })
@@ -744,16 +820,85 @@ export async function desktopNativeConfiguration() {
   const current = await configuredModel(files, state, originFromEnvironment())
   if (!current.configured || !current.apiKey) return null
   const catalog = await readJson(state.catalogPath)
+  const catalogVersion = createHash('sha256').update(JSON.stringify([
+    'native-model-controls-v5', state.catalogHash, state.group, state.keyFingerprint,
+  ])).digest('hex')
   return {
-    version: createHash('sha256').update(JSON.stringify([
-      'stable-auth-v1', state.catalogHash, state.group, state.keyFingerprint, config.service_tier,
-    ])).digest('hex'),
+    catalogVersion,
+    version: createHash('sha256').update(JSON.stringify([catalogVersion, current.fast])).digest('hex'),
     apiKey: current.apiKey,
+    provider: PROVIDER_ID,
+    fastAvailable: catalog.models.some((model) => model.service_tiers?.some((tier) => tier.id === 'priority')),
+    fastEnabled: current.fast,
+    model: config.model,
     models: catalog.models.map((model) => model.slug),
+    modelSettings: Object.fromEntries(catalog.models.map((model) => [model.slug, {
+      fastAvailable: model.service_tiers?.some((tier) => tier.id === 'priority') === true,
+      serviceTier: current.fast ? model.default_service_tier ?? null : null,
+      reasoningEfforts: model.supported_reasoning_levels?.map((level) => level.effort) || [],
+      reasoningDescriptions: Object.fromEntries((model.supported_reasoning_levels || [])
+        .map((level) => [level.effort, level.description]).filter(([, description]) => description)),
+      effort: highestSupportedReasoning(model.supported_reasoning_levels?.map((level) => level.effort)) ||
+        model.default_reasoning_level || 'none',
+    }])),
   }
 }
 
-async function configureDesktop({ requestedGroup, requestedModel, preserveGroup = false } = {}) {
+export async function desktopFastMode({ enabled, keyFingerprint } = {}) {
+  if (typeof enabled !== 'boolean' || !/^[0-9a-f]{64}$/.test(keyFingerprint)) {
+    throw new UserError('Fast 设置无效。')
+  }
+  const files = paths()
+  const state = await readJson(files.state, {})
+  const origin = originFromEnvironment()
+  const [current, storedSession] = await Promise.all([
+    configuredModel(files, state, origin), readJson(files.session, null),
+  ])
+  let session = storedSession
+  const sessionUsable = session?.origin === origin && typeof session.token === 'string' &&
+    (!session.expiresAt || session.expiresAt * 1000 > Date.now() + 30000)
+  if (!sessionUsable) session = await authenticatedSession({ interactive: false })
+  if (!current.configured || state.keyFingerprint !== keyFingerprint || !Number.isInteger(state.keyId)) {
+    throw new UserError('当前账号不属于助手，未更改 Fast。')
+  }
+  const readKey = async () => (await requestApi(`/token/${state.keyId}`, { token: session.token })).data
+  let key
+  try {
+    key = await readKey()
+  } catch (error) {
+    if (error.status !== 401 || !sessionUsable) throw error
+    session = await authenticatedSession({ interactive: false })
+    key = await readKey()
+  }
+  if (key?.id !== state.keyId || key.user_id !== state.userId || key.status !== 1 || key.group !== state.group ||
+    (enabled && key.fast_mode_available !== true)) {
+    throw new UserError('当前线路无法更改 Fast。')
+  }
+  if (key.fast_mode === enabled) return { enabled }
+  if (key.fast_mode !== enabled) {
+    const updated = await requestApi('/token/?fast_mode_only=true', {
+      token: session.token, method: 'PUT', body: { id: state.keyId, fast_mode: enabled },
+    })
+    const saved = updated.data
+    if (saved?.fast_mode !== enabled || saved.user_id !== state.userId ||
+      saved.group !== state.group || saved.status !== 1) {
+      throw new UserError('服务端未确认 Fast 设置。')
+    }
+  }
+  return { enabled }
+}
+
+export async function desktopNativeSynced(version) {
+  if ((await desktopNativeConfiguration())?.version !== version) return false
+  const files = paths()
+  const state = await readJson(files.state, {})
+  if (state.restartRequired) await writeJson(files.state, { ...state, restartRequired: false })
+  return true
+}
+
+async function configureDesktop({
+  requestedGroup, requestedModel, preserveGroup = false, forceRestart = false,
+} = {}) {
   const files = paths()
   const previous = await readJson(files.state, {})
   const origin = originFromEnvironment()
@@ -761,9 +906,10 @@ async function configureDesktop({ requestedGroup, requestedModel, preserveGroup 
     throw new UserError('当前配置属于另一个站点，请先恢复原配置。')
   }
   const session = await authenticatedSession({ interactive: false })
-  const [availableGroups, current, status] = await Promise.all([
-    desktopGroups(session), configuredModel(files, previous, origin), desktopDisplay(),
+  const [groupInfo, current, status] = await Promise.all([
+    desktopGroupInfo(session, previous.group), configuredModel(files, previous, origin), desktopDisplay(),
   ])
+  const availableGroups = groupInfo.map((item) => item.value)
   if (!availableGroups.length) throw new UserError('此账号没有可用分组，请联系管理员。')
   const group = requestedGroup ?? (preserveGroup ? previous.group : undefined) ??
     (availableGroups.includes('auto') ? 'all' : availableGroups[0])
@@ -783,20 +929,22 @@ async function configureDesktop({ requestedGroup, requestedModel, preserveGroup 
     }
     const config = parse(await readOptional(files.codexConfig) || '')
     const active = activeConfig(config)
-    const model = requestedModel || chooseModel(models, active.model)
+    const modelByGroup = rememberModelByGroup(previous, previous.group, active.model)
+    const model = requestedModel || chooseModel(models, modelByGroup[selected.value] || active.model)
     const reasoning = highestSupportedReasoning(await supportedReasoning(files, config, model))
-    const catalog = await desktopCatalog(files, config, previous, models)
+    const catalog = await desktopCatalog(files, config, previous, models, internalKey.fast)
     const catalogHash = createHash('sha256').update(JSON.stringify(catalog) + '\n').digest('hex')
     const changed = !current.configured || previous.group !== selected.value || current.apiKey !== internalKey.key ||
       active.model !== model || (active.model_reasoning_effort ?? null) !== reasoning || current.fast !== internalKey.fast ||
       previous.catalogHash !== catalogHash || active.model_catalog_json !== previous.catalogPath
-    if (changed) await configureCodex({
+    if (changed || forceRestart) await configureCodex({
       files, state: previous, apiKey: internalKey.key, origin, model, reasoning, fast: internalKey.fast, catalog,
       statePatch: {
         origin, userId: session.user.id, username: session.user.username,
         group: selected.value, groupLabel: selected.label, keyId: internalKey.id,
         keyFingerprint: createHash('sha256').update(internalKey.key).digest('hex'),
-        model, configuredAt: new Date().toISOString(), restartRequired: true,
+        model, modelByGroup: { ...modelByGroup, [selected.value]: model },
+        fastAvailable: internalKey.fast, configuredAt: new Date().toISOString(), restartRequired: true,
       },
     })
     return publicState({
@@ -804,9 +952,9 @@ async function configureDesktop({ requestedGroup, requestedModel, preserveGroup 
       username: session.user?.display_name || session.user?.username,
       quota: formatQuota(session.user, status.data),
       group: selected.value, groupLabel: selected.label,
-      groups: availableGroups, model, models,
-      message: internalKey.fast ? '分组和模型已保存。' : '分组和模型已保存，此分组使用普通模式。',
-      restartRequired: changed || desktopRestartRequired(previous),
+      groups: groupInfo, model, models,
+      message: internalKey.fast ? '分组已保存。' : '分组已保存，使用普通模式。',
+      restartRequired: forceRestart || changed || desktopRestartRequired(previous),
     })
   } catch (error) {
     if (canReuse && previous.group !== selected.value) {
@@ -877,6 +1025,19 @@ export async function desktopSelect({ group, model } = {}) {
   return configureDesktop({ requestedGroup: group, requestedModel: model, preserveGroup: true })
 }
 
+export async function desktopReconfigure() {
+  const state = await readJson(paths().state, {})
+  if (!state?.configured || !state.group) throw new UserError('请先登录并选择分组。')
+  const result = await configureDesktop({
+    requestedGroup: state.group, preserveGroup: true, forceRestart: true,
+  })
+  return {
+    ...result,
+    message: '接管配置已准备。请重启 Codex 后使用 Ultra、Fast 等能力。',
+    restartRequired: true,
+  }
+}
+
 export async function desktopRestore() {
   desktopChallenge = null
   desktopCache.clear()
@@ -918,7 +1079,7 @@ async function modelCommand(requested, requestedReasoning) {
     await supportedReasoning(files, config, requested))
   await configureCodex({
     files, state, apiKey: auth.OPENAI_API_KEY, origin: state.origin, model: requested, reasoning,
-    statePatch: { model: requested },
+    statePatch: { model: requested, modelByGroup: { ...rememberModelByGroup(state), [state.group]: requested } },
   })
   console.log(`当前模型：${requested}`)
   showReasoningChange(reasoning, previous)

@@ -99,18 +99,24 @@ test('badge, sidebar actions, stale state, and screenshots', async (t) => {
   await page.screenshot({ path: path.join(output, 'assistant-desktop.png') })
   await page.locator('[data-testid="assistant-panel"]').screenshot({ path: path.join(output, 'assistant-panel.png') })
 
-  await page.locator('[data-testid="group-select"]').selectOption('premium')
+  await page.locator('[data-testid="group-select"] [data-value="premium"]').click()
   const groupChange = await next('select')
   assert.deepEqual({ action: groupChange.action, group: groupChange.group, model: groupChange.model }, {
     action: 'select', group: 'premium', model: undefined,
   })
-  assert.equal(await page.locator('[data-testid="group-select"]').isDisabled(), true)
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('aria-disabled'), 'true')
   await respond(groupChange, { ok: true, data: signedIn({
     group: 'premium', groupLabel: 'premium', models: ['gpt-5.1'], model: 'gpt-5.1', restartRequired: true,
   }) })
-  assert.equal(await page.locator('[data-testid="group-select"]').inputValue(), 'premium')
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('data-value'), 'premium')
   assert.equal(await page.locator('[data-testid="apply-selection"]').isHidden(), true)
   assert.equal(await page.locator('[data-testid="restart-note"]').count(), 0)
+  const selectedRow = page.locator('[data-testid="group-select"] [data-value="premium"]')
+  assert.equal(await selectedRow.getAttribute('data-state'), 'pending')
+  assert.match(await selectedRow.textContent(), /切换中/)
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.nativeStatus('synced'))
+  assert.equal(await selectedRow.getAttribute('data-state'), 'current')
+  assert.equal(await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot().restartRequired), false)
 
   await page.locator('[data-testid="recharge"]').click()
   const recharge = await next('recharge')
@@ -150,7 +156,7 @@ test('login, restore confirmation, reinjection, dispose, and location guard', as
   await page.locator('[data-testid="restore"]').click()
   await assert.doesNotReject(page.locator('[data-testid="restore-confirmation"]').waitFor({ state: 'visible' }))
   await page.locator('[data-testid="confirm-restore"]').click()
-  assert.equal(await page.locator('[data-testid="group-select"]').isDisabled(), true)
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('aria-disabled'), 'true')
   const restore = await next('restore')
   await respond(restore, { ok: true, data: { ...loggedOut, restartRequired: true } })
   assert.equal(await page.locator('[data-testid="login"]').count(), 1)
@@ -210,16 +216,17 @@ test('background refresh keeps controls available and cannot overwrite a newer s
   await open(signedIn())
   await page.locator('[data-testid="refresh"]').click()
   const refresh = await next('status')
-  for (const testId of ['group-select', 'recharge', 'restore']) {
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('aria-disabled'), 'false')
+  for (const testId of ['recharge', 'restore']) {
     assert.equal(await page.locator(`[data-testid="${testId}"]`).isDisabled(), false, `${testId} remains available during refresh`)
   }
-  await page.locator('[data-testid="group-select"]').selectOption('premium')
+  await page.locator('[data-testid="group-select"] [data-value="premium"]').click()
   const selection = await next('select')
   await respond(selection, { ok: true, data: signedIn({
     group: 'premium', groupLabel: 'premium', models: ['gpt-5.1'], model: 'gpt-5.1',
   }) })
   await respond(refresh, { ok: true, data: signedIn() })
-  assert.equal(await page.locator('[data-testid="group-select"]').inputValue(), 'premium')
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('data-value'), 'premium')
   assert.equal(await page.locator('[data-testid="model-select"]').count(), 0)
   await fs.mkdir(output, { recursive: true })
   await page.locator('[data-testid="assistant-panel"]').screenshot({ path: path.join(output, 'assistant-refresh-race.png') })
@@ -233,7 +240,7 @@ test('opening refreshes account state and reuses an in-flight refresh without bl
   await page.locator('[data-testid="assistant-badge"]').click()
   const refresh = await next('status')
   assert.match(await page.locator('[data-testid="panel-balance"]').textContent(), /\$12\.50/)
-  assert.equal(await page.locator('[data-testid="group-select"]').isDisabled(), false)
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('aria-disabled'), 'false')
   assert.equal(await page.locator('[data-testid="recharge"]').isDisabled(), false)
   await page.locator('[data-testid="close"]').click()
   await page.locator('[data-testid="assistant-badge"]').click()
@@ -243,7 +250,7 @@ test('opening refreshes account state and reuses an in-flight refresh without bl
   }) })
   assert.match(await page.locator('[data-testid="panel-balance"]').textContent(), /\$11\.25/)
   assert.match(await page.locator('[data-testid="badge-balance"]').textContent(), /\$11\.25/)
-  assert.equal(await page.locator('[data-testid="group-select"]').inputValue(), 'premium')
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('data-value'), 'premium')
   await page.locator('[data-testid="close"]').click()
   await page.locator('[data-testid="assistant-badge"]').click()
   await respond(await next('status'), { ok: true, data: signedIn({ quota: '$10.00' }) })
@@ -297,8 +304,8 @@ test('native catalogs reload immediately without restarting or hiding a failed s
   assert.equal(await page.evaluate(() => window.nativeFixture.restarts), 0)
   const calls = await page.evaluate(() => window.nativeFixture.methods.length)
   await sync('first', ['gemini-3-flash'])
-  assert.equal(await page.evaluate(() => window.nativeFixture.methods.length), calls,
-    'a synced catalog must not be queried repeatedly')
+  assert.deepEqual(await page.evaluate((start) => window.nativeFixture.methods.slice(start), calls),
+    ['getAuthStatus'], 'a synced catalog only rechecks account ownership, without logging in or rereading models')
   assert.equal(await page.evaluate(() => window.nativeFixture.invalidations), 1)
   assert.equal((await sync('second', ['claude-opus-4-6'])).status, 'error')
   assert.match(await page.locator('[data-testid="status-line"]').textContent(), /尚未同步/)
@@ -317,9 +324,78 @@ test('native catalogs reload immediately without restarting or hiding a failed s
   assert.equal(await page.evaluate(() => window.nativeFixture.methods.filter(
     (method) => method === 'account/login/start').length), loginCalls,
   'a different in-memory account must not overwrite saved authentication or cancel active replies')
-  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /仍使用原账号/)
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /主实例尚未接管/)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /Ultra.*Fast/)
+  assert.equal(await page.locator('[data-testid="takeover"]').isVisible(), true)
+  await page.locator('[data-testid="takeover"]').click()
+  const takeover = await next('reconfigure')
+  assert.equal(takeover.action, 'reconfigure')
+  await respond(takeover, { ok: true, data: signedIn({
+    message: '接管配置已准备。请重启 Codex 后使用 Ultra、Fast 等能力。',
+    restartRequired: true,
+  }) })
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /Ultra.*Fast/)
   assert.equal(await page.evaluate(syncNativeModels, { version: 'third', models: [] }), null,
     'production synchronization is forbidden outside the Codex main page')
+})
+
+test('native synchronization updates subsequent turns only for assistant-owned providers', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await page.evaluate(() => {
+    const fixture = { calls: [], updates: [], staleTier: false }
+    window.nativeFixture = fixture
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true,
+      value: () => `isolated-native-${fixture.calls.length}` })
+    window.__codexRoot = { _internalRoot: { current: { memoizedProps: { client: {
+      getQueryCache() {}, async invalidateQueries() {},
+    } } } } }
+    const threads = {
+      replace: { id: 'replace', modelProvider: 'yisama', model: 'old-model', status: { type: 'active' } },
+      keep: { id: 'keep', modelProvider: 'yisama', model: 'gemini-3-flash' },
+      external: { id: 'external', modelProvider: 'personal', model: 'personal-model' },
+    }
+    window.electronBridge = { async sendMessageFromView({ hostId, request }) {
+      fixture.calls.push(request.method)
+      const { method, params } = request
+      let result
+      if (method === 'getAuthStatus') result = { authMethod: 'apikey', authToken: 'isolated-native-test-key' }
+      else if (method === 'account/login/start') result = { type: 'apiKey' }
+      else if (method === 'model/list') result = { data: [
+        { model: 'gpt-5.5', serviceTiers: fixture.staleTier ? [] : [{ id: 'priority', name: 'Fast' }],
+          defaultServiceTier: 'priority' },
+        { model: 'gemini-3-flash', serviceTiers: [], defaultServiceTier: null },
+      ], nextCursor: null }
+      else if (method === 'thread/loaded/list') result = params.cursor
+        ? { data: ['external'], nextCursor: null } : { data: ['replace', 'keep'], nextCursor: 'second-page' }
+      else if (method === 'thread/read') result = { thread: threads[params.threadId] }
+      else if (method === 'thread/settings/update') { fixture.updates.push(params); result = {} }
+      else throw new Error(`Unexpected native method: ${method}`)
+      window.dispatchEvent(new MessageEvent('message', { data: {
+        type: 'mcp-response', hostId, message: { id: request.id, result },
+      } }))
+    } }
+  })
+  const sync = (version) => page.evaluate(({ source, version }) => (0, eval)(`(${source})`)({
+    version, provider: 'yisama', apiKey: 'isolated-native-test-key', model: 'gpt-5.5',
+    models: ['gpt-5.5', 'gemini-3-flash'], modelSettings: {
+      'gpt-5.5': { serviceTier: 'priority', effort: 'high' },
+      'gemini-3-flash': { serviceTier: null, effort: 'none' },
+    },
+  }, { allowTestLocation: true }), { source: syncNativeModels.toString(), version })
+  assert.equal((await sync('owned-threads')).status, 'synced')
+  assert.deepEqual(await page.evaluate(() => window.nativeFixture.updates), [
+    { threadId: 'keep', serviceTier: null },
+  ])
+  const calls = await page.evaluate(() => window.nativeFixture.calls)
+  assert.equal(calls.filter((method) => method === 'thread/loaded/list').length, 2)
+  assert.ok(!calls.some((method) => /interrupt|restart|turn\/settings/.test(method)))
+  await page.evaluate(() => { window.nativeFixture.staleTier = true })
+  assert.equal((await sync('stale-tier')).status, 'error')
+  assert.equal(await page.evaluate(() => window.nativeFixture.updates.length), 1,
+    'an unverified Fast catalog must not be reported as synchronized')
 })
 
 test('an outdated background refresh timeout cannot replace an active selection state', async (t) => {
@@ -330,14 +406,14 @@ test('an outdated background refresh timeout cannot replace an active selection 
   await open(signedIn())
   await page.locator('[data-testid="refresh"]').click()
   await next('status')
-  await page.locator('[data-testid="group-select"]').selectOption('premium')
+  await page.locator('[data-testid="group-select"] [data-value="premium"]').click()
   const selection = await next('select')
   await page.waitForTimeout(75)
   assert.doesNotMatch(await page.locator('[data-testid="message"]').textContent(), /无法刷新账户状态/)
   await respond(selection, { ok: true, data: signedIn({
     group: 'premium', groupLabel: 'premium', models: ['gpt-5.1'], model: 'gpt-5.1',
   }) })
-  assert.equal(await page.locator('[data-testid="group-select"]').inputValue(), 'premium')
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('data-value'), 'premium')
 })
 
 test('failed group selection explains the failure without a persistent restart banner', async (t) => {
@@ -347,9 +423,9 @@ test('failed group selection explains the failure without a persistent restart b
   await respond(await next('status'), { ok: true, data: signedIn({ restartRequired: true }) })
   await open(signedIn({ restartRequired: true }))
   assert.equal(await page.locator('[data-testid="restart-note"]').count(), 0)
-  await page.locator('[data-testid="group-select"]').selectOption('premium')
+  await page.locator('[data-testid="group-select"] [data-value="premium"]').click()
   await respond(await next('select'), { ok: false, code: 'GROUP_NO_TEXT_MODEL', error: 'Bearer sk-secret' })
-  assert.equal(await page.locator('[data-testid="group-select"]').inputValue(), 'auto')
+  assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('data-value'), 'auto')
   assert.match(await page.locator('[data-testid="message"]').textContent(), /没有可自动选择的对话模型.*原分组未改动/)
   assert.doesNotMatch(await page.locator('[data-testid="message"]').textContent(), /Bearer|sk-secret/)
   await page.locator('[data-testid="refresh"]').click()
@@ -380,6 +456,8 @@ test('login setup continues without credentials, times out safely, and accepts i
   assert.equal(await page.locator('[data-testid="apply-selection"]').isDisabled(), false)
   assert.doesNotMatch(await page.locator('[data-testid="assistant-panel"]').textContent(), /test-password/)
   await respond(setup, { ok: true, data: signedIn({ setupPending: false, message: '已准备就绪' }) })
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /正在同步/)
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.nativeStatus('synced'))
   assert.match(await page.locator('[data-testid="status-line"]').textContent(), /已准备就绪/)
   await fs.mkdir(output, { recursive: true })
   await page.locator('[data-testid="assistant-panel"]').screenshot({ path: path.join(output, 'assistant-login-setup.png') })
@@ -546,4 +624,54 @@ test('registration and email-code steps stay in the sidebar and fit narrow dark 
   await respond(await next('login'), { ok: true, data: signedIn({ username: 'new-user' }) })
   assert.equal(await page.locator('[data-testid="logged-out"]').isHidden(), true)
   assert.equal(await page.locator('[data-testid="username"]').textContent(), 'new-user')
+})
+
+test('group rows show optional ratios and mark cheaper routes', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond, open } = app
+  const data = signedIn({ groups: [
+    { value: 'auto', label: 'All', ratio: 1 }, { value: 'cn', label: 'cn', ratio: '0.2' }, { value: 'plain', label: 'plain' },
+    { value: 'free', label: 'free', ratio: 0 },
+  ] })
+  await respond(await next('status'), { ok: true, data })
+  await open(data)
+  const ratio = (value) => page.locator(`[data-testid="group-select"] [data-value="${value}"] .y-group__ratio`)
+  assert.equal(await ratio('auto').textContent(), '×1')
+  assert.equal(await ratio('cn').textContent(), '×0.2')
+  assert.equal(await ratio('cn').getAttribute('data-cheap'), 'true')
+  assert.equal(await ratio('plain').textContent(), '')
+  assert.equal(await ratio('free').textContent(), '免费')
+  assert.equal(await page.locator('[data-testid="status-line"]').textContent(), 'LIVE已准备就绪')
+})
+
+test('long group lists scroll to the current route and can be searched', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond, open } = app
+  const groups = Array.from({ length: 12 }, (_, index) => ({ value: `g${index}`, label: `线路 ${index}`, ratio: 1 }))
+  const data = signedIn({ groups, group: 'g10', groupLabel: '线路 10' })
+  await respond(await next('status'), { ok: true, data })
+  await open(data)
+  const list = page.locator('[data-testid="group-select"]')
+  const listBox = await list.boundingBox()
+  assert.ok(listBox.height <= 220, 'the route list stays compact')
+  const current = await page.locator('.y-group[data-value="g10"]').boundingBox()
+  assert.ok(current.y >= listBox.y && current.y + current.height <= listBox.y + listBox.height + 1,
+    'the current route is scrolled into view')
+  const search = page.locator('[data-testid="group-search"]')
+  assert.equal(await search.isVisible(), true)
+  await search.fill('线路 3')
+  assert.equal(await page.locator('[data-testid="group-select"] .y-group:visible').count(), 1)
+  await search.press('Enter')
+  assert.equal((await next('select')).group, 'g3')
+})
+
+test('short group lists do not show a search field', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  assert.equal(await page.locator('[data-testid="group-search"]').isHidden(), true)
 })

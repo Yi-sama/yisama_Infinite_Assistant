@@ -6,14 +6,413 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { createHash, webcrypto } from 'node:crypto'
+import { runInNewContext } from 'node:vm'
 import {
-  allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
+  adaptNativeFastSource, installNativeFast, syncNativeModels, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
   restartAssistant, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
 } from './codex-assistant.mjs'
 
 const generation = (letter) => letter.repeat(64)
 const marker = (letter) => ({ generation: generation(letter), updatedAt: '2026-10-29T02:30:00.000Z' })
 const closedPanel = () => ({ open: false, busy: false, unsent: false })
+
+const nativeSource = `function Jlo(e){let f=d,p;return t[7]!==u||t[8]!==f?p=f:p}
+function _fo(e,t,n,r,i){return {serviceTierAccess:R,serviceTierSettings:z,setServiceTier:P}}
+function D2(){return {select:({data:n})=>Vso({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})}}`
+
+test('native controls adapt only the inspected hook sites and reject missing or repeated matches', () => {
+  const adapted = adaptNativeFastSource(nativeSource)
+  assert.match(adapted, /__yisamaNativeFast\?\.access\(r,o\)/)
+  assert.match(adapted, /__yisamaNativeFast\?\.wrap\(u,S,P\)/)
+  assert.match(adapted, /__yisamaNativeFastSourceReady=true/)
+  assert.match(adapted, /__yisamaNativeReasoningSourceReady=true/)
+  assert.match(adapted, /__yisamaNativeFast\?\.modelOptions\(i,t,yisamaOptions,a\)/)
+  assert.doesNotThrow(() => new Function(adapted))
+  for (const source of ['', nativeSource + nativeSource, nativeSource.replace('function Jlo', 'function Other'),
+    nativeSource.replace('function D2', 'function Other'), nativeSource.replace('models:n,', 'models:Other,'),
+    nativeSource.replace('setServiceTier:P}', 'setServiceTier:Other}')]) {
+    assert.throws(() => adaptNativeFastSource(source), /does not support/)
+  }
+})
+
+function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true } = {}) {
+  const listeners = new Set()
+  const calls = []
+  const authCalls = []
+  const key = 'sk-isolated-native-fast-test-only'
+  const window = {
+    __yisamaNativeFastSourceReady: true,
+    __yisamaNativeReasoningSourceReady: true,
+    __yisamaInfiniteAssistant: { nativeStatus: (status) => calls.push({ status }) },
+    setTimeout, clearTimeout,
+    addEventListener(_name, listener) { listeners.add(listener) },
+    removeEventListener(_name, listener) { listeners.delete(listener) },
+    electronBridge: { async sendMessageFromView({ request }) {
+      authCalls.push(request.method)
+      queueMicrotask(() => {
+        for (const listener of listeners) listener({ data: { type: 'mcp-response', hostId: 'local',
+          message: { id: request.id, result: { authMethod: 'apikey', authToken: ownAuth ? key : 'sk-other-account' } },
+        } })
+      })
+    } },
+    yisamaAssistantCommand(payload) {
+      const request = JSON.parse(payload)
+      calls.push(request)
+      queueMicrotask(() => window.__yisamaNativeFast.receive({
+        id: request.id, ok: !serverFailure, data: { enabled: request.enabled },
+      }))
+    },
+  }
+  window.top = window
+  runInNewContext(`(${installNativeFast.toString()})()`, {
+    window, location: { href: CODEX_PAGE }, crypto: webcrypto, TextEncoder, Uint32Array, Uint8Array,
+  })
+  const controller = window.__yisamaNativeFast
+  controller.authorize({ apiKey: key, fastAvailable: true, fastEnabled: true })
+  const native = async (tier, source) => {
+    calls.push({ nativeTier: tier, source })
+    return !nativeFailure
+  }
+  return { window, controller, native, calls, authCalls, key }
+}
+
+test('native Fast waits for the server, delegates to the original setter, and preserves native account access', async () => {
+  const { controller, native, calls, authCalls, key, window } = fastFixture()
+  assert.equal(controller.access('local', 'apikey')?.fast, true)
+  assert.equal(controller.access('local', 'chatgpt'), null)
+  assert.equal(controller.access('remote', 'apikey'), null)
+  assert.equal(controller.wrap('local', 'chatgpt', native), native)
+  const wrapped = controller.wrap('local', 'apikey', native)
+  assert.equal(controller.wrap('local', 'apikey', native), wrapped)
+  assert.equal(await wrapped(null, 'composer_menu'), true)
+  assert.equal(calls[0].action, 'fast')
+  assert.equal(calls[0].enabled, false)
+  assert.equal(calls[0].keyFingerprint, createHash('sha256').update(key).digest('hex'))
+  assert.equal(calls[1].nativeTier, null)
+  assert.deepEqual(authCalls, ['getAuthStatus'])
+  assert.equal(JSON.stringify(calls).includes(key), false)
+  assert.equal(await wrapped('priority', 'composer_menu'), true)
+  assert.equal(calls[2].enabled, true)
+  assert.equal(calls[3].nativeTier, 'priority')
+  window.__yisamaNativeFastSourceReady = false
+  assert.equal(controller.access('local', 'apikey'), null)
+  controller.dispose()
+})
+
+test('native Fast rejects unverified accounts and rolls the server back when native persistence fails', async () => {
+  for (const options of [{ serverFailure: true }, { nativeFailure: true }, { ownAuth: false }]) {
+    const { controller, native, calls } = fastFixture(options)
+    assert.equal(await controller.wrap('local', 'apikey', native)(null, 'composer_menu'), false)
+    const changes = calls.filter((call) => call.action === 'fast')
+    assert.deepEqual(changes.map((call) => call.enabled),
+      options.ownAuth === false ? [] : options.nativeFailure ? [false, true] : [false])
+    assert.equal(calls.filter((call) => Object.hasOwn(call, 'nativeTier')).length, options.nativeFailure ? 1 : 0)
+    assert.equal(calls.at(-1).status, 'error')
+    controller.dispose()
+  }
+})
+
+test('native Fast does not alter an unowned API provider or enable Ultra Fast', async () => {
+  const { controller, native, calls } = fastFixture()
+  const wrapped = controller.wrap('local', 'apikey', native)
+  assert.equal(await wrapped('ultrafast', 'composer_menu'), false)
+  assert.equal(calls.length, 0)
+  controller.authorize(null)
+  assert.equal(await wrapped(null, 'composer_menu'), true)
+  assert.deepEqual(calls, [{ nativeTier: null, source: 'composer_menu' }])
+  controller.dispose()
+})
+
+test('native reasoning exposes catalog-backed Max and Ultra without Fast or changing original preferences', () => {
+  const { controller, window } = fastFixture()
+  const efforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+  const model = { model: 'gpt-6.1-sol',
+    supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort })) }
+  const original = { enabledReasoningEfforts: new Set(efforts.slice(0, 4)),
+    includeUltraReasoningEffort: false, models: [model] }
+  controller.authorize({ provider: 'yisama', fastAvailable: false,
+    modelSettings: { [model.model]: { reasoningEfforts: efforts } } })
+  const actual = controller.modelOptions('local', 'apikey', original)
+  assert.deepEqual([...actual.enabledReasoningEfforts], efforts)
+  assert.equal(actual.includeUltraReasoningEffort, true)
+  assert.deepEqual([...actual.models[0].supportedReasoningEfforts].map(({ reasoningEffort }) => reasoningEffort), efforts)
+  assert.deepEqual([...original.enabledReasoningEfforts], efforts.slice(0, 4))
+  assert.equal(original.includeUltraReasoningEffort, false)
+  assert.equal(controller.modelOptions('local', 'apikey', original, false).includeUltraReasoningEffort, false)
+  assert.equal(controller.access('local', 'apikey'), null)
+  window.__yisamaNativeReasoningSourceReady = false
+  assert.equal(controller.needsReload(), true, 'reasoning adaptation must load even when Fast is unavailable')
+  window.__yisamaNativeReasoningSourceReady = true
+  assert.equal(controller.needsReload(), false)
+  assert.equal(controller.modelOptions('remote', 'apikey', original), original)
+  assert.equal(controller.modelOptions('local', 'chatgpt', original), original)
+  controller.authorize({ provider: 'yisama', modelSettings: {} })
+  assert.deepEqual([...controller.modelOptions('local', 'apikey', original).enabledReasoningEfforts],
+    efforts.slice(0, 4), 'unsupported catalog levels must not be invented')
+  controller.authorize({ provider: 'yisama', fastAvailable: false,
+    modelSettings: { claude: { reasoningEfforts: ['low', 'medium', 'high'] } } })
+  const nonGpt = { enabledReasoningEfforts: new Set(), includeUltraReasoningEffort: false,
+    models: [{ model: 'claude', supportedReasoningEfforts: [] }] }
+  const nonGptOptions = controller.modelOptions('local', 'apikey', nonGpt)
+  assert.deepEqual([...nonGptOptions.enabledReasoningEfforts],
+    ['low', 'medium', 'high'], 'catalog-backed reasoning levels must work for non-GPT models')
+  assert.deepEqual([...nonGptOptions.models[0].supportedReasoningEfforts].map(({ reasoningEffort }) => reasoningEffort),
+    ['low', 'medium', 'high'], 'catalog-backed reasoning levels must be attached to non-GPT models')
+  controller.authorize(null)
+  assert.equal(controller.modelOptions('local', 'apikey', original), original)
+  controller.dispose()
+})
+
+function nativeSyncFixture() {
+  const listeners = new Set()
+  const calls = []
+  const state = { mounted: true, queryReady: true, loading: false, draft: '', panelOpen: false,
+    active: false, needsReload: true, catalog: [], invalidations: 0, updates: [] }
+  const settings = { version: 'test', apiKey: 'sk-native-test-only', provider: 'yisama', fastAvailable: true }
+  const props = { client: { getQueryCache() {}, async invalidateQueries() { state.invalidations++ } } }
+  const root = { get memoizedProps() { return state.queryReady ? props : null } }
+  const window = {
+    __yisamaInfiniteAssistant: { nativeStatus() {}, snapshot: () => ({ open: state.panelOpen }) },
+    __codexRoot: { _internalRoot: { get current() { return state.mounted ? root : null } } },
+    __yisamaNativeFast: {
+      authorize(value) { state.authorized = Boolean(value) },
+      isBusy: () => false,
+      needsReload: () => state.needsReload,
+    },
+    addEventListener(_name, listener) { listeners.add(listener) },
+    removeEventListener(_name, listener) { listeners.delete(listener) },
+    electronBridge: { async sendMessageFromView({ request }) {
+      calls.push(request.method)
+      if (request.method === 'thread/settings/update') state.updates.push(request.params)
+      const result = request.method === 'getAuthStatus'
+        ? state.loading ? { authMethod: null, isLoading: true }
+          : { authMethod: 'apikey', authToken: state.authToken ?? settings.apiKey }
+        : request.method === 'model/list' ? { data: state.catalog, nextCursor: null }
+          : request.method === 'thread/loaded/list' ? { data: Object.keys(state.threads || { 'test-thread': {} }), nextCursor: null }
+            : request.method === 'thread/read'
+              ? { thread: state.threads?.[request.params.threadId] || { status: { type: state.active ? 'active' : 'idle' } } } : {}
+      queueMicrotask(() => {
+        for (const listener of listeners) listener({ data: { type: 'mcp-response', hostId: 'local',
+          message: { id: request.id, result,
+            ...(state.failMethod === request.method ? { error: { message: 'isolated failure' } } : {}) } } })
+      })
+    } },
+  }
+  window.top = window
+  const sync = () => runInNewContext(`(${syncNativeModels.toString()})(settings)`, {
+    window, location: { href: CODEX_PAGE }, settings, crypto: webcrypto, setTimeout, clearTimeout,
+    document: { querySelectorAll: () => [{ isContentEditable: true, get textContent() { return state.draft } }] },
+  })
+  return { state, window, calls, sync, settings }
+}
+
+test('native Fast waits for initial mount and authentication without caching a startup error', async () => {
+  const { state, window, sync, calls } = nativeSyncFixture()
+  state.mounted = false
+  assert.equal((await sync()).status, 'pending')
+  assert.equal(calls.length, 0)
+  state.mounted = true
+  state.loading = true
+  assert.equal((await sync()).status, 'pending')
+  assert.equal(window.__yisamaNativeModelSync, undefined)
+  state.loading = false
+  state.needsReload = false
+  assert.equal((await sync()).status, 'synced')
+})
+
+test('renderer reload waits for the native query provider before starting catalog synchronization', async () => {
+  const { state, window, calls, sync } = nativeSyncFixture()
+  state.queryReady = false
+  assert.equal((await sync()).status, 'pending')
+  assert.equal(window.__yisamaNativeModelSync, undefined)
+  assert.deepEqual(calls, ['getAuthStatus'], 'a mounted React root does not mean its query provider is ready')
+  state.queryReady = true
+  state.needsReload = false
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(calls.filter((method) => method === 'account/login/start').length, 1)
+})
+
+test('a new synchronization revision recovers old startup errors but does not retry genuine catalog failures', async () => {
+  const { state, window, calls, sync, settings } = nativeSyncFixture()
+  window.__yisamaNativeModelSync = { version: 'old-revision', status: 'error', stage: 'query-cache' }
+  state.needsReload = false
+  assert.equal((await sync()).status, 'synced')
+  settings.version = 'catalog-failure-revision'
+  settings.models = ['missing-catalog-model']
+  assert.equal((await sync()).status, 'error')
+  assert.equal(window.__yisamaNativeModelSync.stage, 'catalog')
+  const before = calls.length
+  assert.equal((await sync()).status, 'error')
+  assert.equal(calls.length, before, 'real failures remain errors rather than causing repeated login requests')
+})
+
+test('Fast-only synchronization preserves the catalog, query cache, and owned threads', async () => {
+  const { state, window, calls, sync, settings } = nativeSyncFixture()
+  state.needsReload = false
+  Object.assign(settings, {
+    catalogVersion: 'catalog-a', model: 'gpt-owned', models: ['gpt-owned'], fastEnabled: true,
+    modelSettings: { 'gpt-owned': { fastAvailable: true, serviceTier: 'priority', effort: 'high' } },
+  })
+  state.catalog = [{ model: 'gpt-owned', serviceTiers: [{ id: 'priority' }], defaultServiceTier: 'priority' }]
+  state.threads = {
+    owned: { modelProvider: 'yisama', model: 'gpt-owned', status: { type: 'active' } },
+    foreign: { modelProvider: 'personal', model: 'gpt-personal' },
+  }
+  assert.equal((await sync()).status, 'synced')
+  for (const [index, serviceTier] of [null, 'priority', null].entries()) {
+    settings.version = `tier-${index}`
+    settings.fastEnabled = serviceTier === 'priority'
+    settings.modelSettings['gpt-owned'].serviceTier = serviceTier
+    const result = await sync()
+    assert.equal(result.status, 'synced')
+    assert.equal(result.reloadNativeFast, undefined)
+    assert.equal(state.updates.length, 1, 'a Fast click must not walk every loaded thread')
+    assert.equal(calls.filter((method) => method === 'account/login/start').length, 1,
+      'a Fast click must not log in again')
+    assert.equal(calls.filter((method) => method === 'model/list').length, 1)
+    assert.equal(state.invalidations, 1, 'a Fast click must not refetch models or invalidate the config cache')
+  }
+  assert.equal(state.updates.length, 1, 'other providers are never updated')
+  assert.equal(calls.filter((method) => method === 'getAuthStatus').length, 4)
+  assert.equal(window.__yisamaNativeModelSync.catalogVersion, settings.catalogVersion)
+  settings.catalogVersion = 'catalog-b'
+  settings.version = 'catalog-b'
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(calls.filter((method) => method === 'account/login/start').length, 2,
+    'an actual route or catalog change still requires full synchronization')
+  assert.equal(state.invalidations, 2)
+  assert.equal(state.updates.length, 2, 'a real catalog change still reconciles owned threads')
+  assert.deepEqual({ ...state.updates.at(-1) }, { threadId: 'owned', serviceTier: null })
+
+  settings.catalogVersion = 'catalog-failure'
+  settings.version = 'failed-tier-change'
+  state.failMethod = 'thread/settings/update'
+  assert.equal((await sync()).status, 'error')
+  assert.equal(window.__yisamaNativeModelSync.stage, 'thread-settings')
+  const failedCalls = calls.length
+  assert.equal((await sync()).status, 'error')
+  assert.equal(calls.length, failedCalls, 'failed tier updates must not become a retry loop')
+  state.failMethod = null
+  state.authToken = 'sk-foreign-native-account'
+  settings.version = 'foreign-account'
+  const updates = state.updates.length
+  assert.equal((await sync()).status, 'account-change')
+  assert.equal(state.updates.length, updates)
+  assert.equal(state.authorized, false)
+})
+
+test('Fast-only revisions do not scan active sessions when native controls are already loaded', async () => {
+  const { state, window, calls, sync, settings } = nativeSyncFixture()
+  window.__yisamaNativeFastSourceReady = true
+  window.__yisamaNativeReasoningSourceReady = true
+  state.needsReload = true
+  Object.assign(settings, {
+    catalogVersion: 'catalog-a',
+    model: 'gpt-owned',
+    models: ['gpt-owned'],
+    fastEnabled: true,
+    modelSettings: { 'gpt-owned': { fastAvailable: true, serviceTier: 'priority', effort: 'high' } },
+  })
+  state.threads = {
+    active: { modelProvider: 'yisama', model: 'gpt-owned', status: { type: 'active' } },
+  }
+  window.__yisamaNativeModelSync = {
+    version: 'before-fast', catalogVersion: 'catalog-a', status: 'synced',
+  }
+  settings.version = 'after-fast'
+
+  assert.equal((await sync()).status, 'synced')
+  assert.deepEqual(calls, ['getAuthStatus'])
+  assert.deepEqual(state.updates, [])
+})
+
+test('catalog switches preserve a thread model that is temporarily outside the group', async () => {
+  const { state, sync, settings } = nativeSyncFixture()
+  state.needsReload = false
+  state.threads = { conversation: { modelProvider: 'yisama', model: 'gpt-owned' } }
+  state.catalog = [{ model: 'gpt-owned', serviceTiers: [], defaultServiceTier: null }]
+  Object.assign(settings, {
+    catalogVersion: 'group-a', version: 'group-a', model: 'gpt-owned', models: ['gpt-owned'],
+    modelSettings: { 'gpt-owned': { serviceTier: null, effort: 'high' } },
+  })
+  assert.equal((await sync()).status, 'synced')
+
+  state.catalog = [{ model: 'claude-owned', serviceTiers: [], defaultServiceTier: null }]
+  Object.assign(settings, {
+    catalogVersion: 'group-b', version: 'group-b', model: 'claude-owned', models: ['claude-owned'],
+    modelSettings: { 'claude-owned': { serviceTier: null, effort: 'none' } },
+  })
+  const beforeUnavailableSwitch = state.updates.length
+  assert.equal((await sync()).status, 'synced')
+  assert.deepEqual(state.updates.slice(beforeUnavailableSwitch), [],
+    'an unavailable thread model must not receive a replacement settings update')
+  assert.equal(state.threads.conversation.model, 'gpt-owned',
+    'an unavailable model must remain on the thread instead of being replaced')
+
+  state.catalog = [{ model: 'gpt-owned', serviceTiers: [], defaultServiceTier: null }]
+  Object.assign(settings, {
+    catalogVersion: 'group-a-restored', version: 'group-a-restored', model: 'gpt-owned',
+    models: ['gpt-owned'], modelSettings: { 'gpt-owned': { serviceTier: null, effort: 'high' } },
+  })
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(state.threads.conversation.model, 'gpt-owned',
+    'switching back must recover the original conversation model')
+})
+
+test('native Fast requests one initial resource reload only after drafts, panel, and active replies clear', async () => {
+  const { state, sync, calls } = nativeSyncFixture()
+  for (const field of ['draft', 'panelOpen', 'active']) {
+    state[field] = field === 'draft' ? 'unsent' : true
+    const result = await sync()
+    assert.equal(result.status, 'pending')
+    assert.equal(result.reloadNativeFast, undefined)
+    state[field] = field === 'draft' ? '' : false
+  }
+  assert.equal((await sync()).reloadNativeFast, true)
+  assert.equal(calls.filter((method) => method === 'account/login/start').length, 1,
+    'waiting for safe resource loading must not repeatedly log in')
+  state.needsReload = false
+  assert.equal((await sync()).status, 'synced')
+})
+
+test('incompatible native Fast resources cannot cause a renderer reload loop', async () => {
+  const calls = []
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method) {
+      calls.push(method)
+      return { result: { value: { status: 'pending', reloadNativeFast: true } } }
+    },
+  }) })
+  target.allowed = true
+  target.mainFrameId = 'main'
+  target.contexts.set(1, { auxData: { isDefault: true, frameId: 'main' } })
+  assert.equal((await target.syncModels({})).status, 'pending')
+  await assert.rejects(target.syncModels({}), /native model controls did not load/)
+  assert.equal(calls.filter((method) => method === 'Page.reload').length, 1)
+})
+
+test('native asset interception is scoped, removes stale body headers, and releases incompatible modules', async () => {
+  const calls = []
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'Fetch.getResponseBody') return { body: nativeSource }
+      return {}
+    },
+  }) })
+  await target.adaptNativeScript({ requestId: 'valid', responseStatusCode: 200,
+    request: { url: 'app://-/assets/app-initial-438d1df57f70.js' },
+    responseHeaders: [{ name: 'Content-Length', value: '10' }, { name: 'Content-Type', value: 'text/javascript' }],
+  })
+  assert.deepEqual(calls.at(-1).params.responseHeaders, [{ name: 'Content-Type', value: 'text/javascript' }])
+  assert.equal(Buffer.from(calls.at(-1).params.body, 'base64').toString(), adaptNativeFastSource(nativeSource))
+  const before = calls.length
+  await assert.rejects(target.adaptNativeScript({ requestId: 'other', responseStatusCode: 200,
+    request: { url: 'https://example.com/app-initial-438d1df57f70.js' },
+  }), /could not be adapted/)
+  assert.deepEqual(calls.slice(before), [{ method: 'Fetch.continueRequest', params: { requestId: 'other' } }])
+})
 
 test('replacement detaches from the old helper and waits until spawning succeeds', async () => {
   let unreferenced = false
@@ -54,7 +453,7 @@ function sequence(values) {
   return async () => values[Math.min(index++, values.length - 1)]
 }
 
-function makeConnectionFactory({ state = closedPanel, onEnable } = {}) {
+function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus } = {}) {
   const connections = []
   return {
     connections,
@@ -73,6 +472,9 @@ function makeConnectionFactory({ state = closedPanel, onEnable } = {}) {
             onEnable?.(onEvent)
           }
           if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: `script-${connections.length}` }
+          if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function syncNativeModels')) {
+            return { result: { value: { status: syncStatus } } }
+          }
           if (method === 'Runtime.evaluate' && params.expression.includes('const runtime =')) {
             return { result: { value: state() } }
           }
@@ -244,6 +646,20 @@ test('invalid update markers never reload the helper', async () => {
     connectionFactory: factory,
   }))
   assert.equal(result, undefined)
+})
+
+test('only verified native synchronization acknowledges the pending configuration', async () => {
+  for (const syncStatus of ['synced', 'error', 'account-change']) {
+    const { factory } = makeConnectionFactory({ syncStatus })
+    const acknowledgments = []
+    let polls = 0
+    await runAssistant(assistantOptions({
+      isRunning: () => ++polls <= 1, connectionFactory: factory, readUpdate: async () => null,
+      nativeConfiguration: async () => ({ version: 'isolated-native-version', models: ['gpt-5.5'] }),
+      onNativeSynced: async (version) => { acknowledgments.push(version) },
+    }))
+    assert.deepEqual(acknowledgments, syncStatus === 'synced' ? ['isolated-native-version'] : [])
+  }
 })
 
 test('replacing a target releases old and final CDP connections', async () => {

@@ -8,12 +8,174 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { handleRequest, validateRequest } from './desktop-bridge.mjs'
 import { makeAssistantScript, REMOVE_ASSISTANT_SCRIPT } from './codex-panel.mjs'
-import { safeError, publicErrorCode, desktopNativeConfiguration } from './yisama.mjs'
+import { safeError, publicErrorCode, desktopNativeConfiguration, desktopNativeSynced } from './yisama.mjs'
 
 export const CODEX_PAGE = 'app://-/index.html'
 const BINDING = 'yisamaAssistantCommand'
 const ASSISTANT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 export const UPDATE_FILE = path.join(ASSISTANT_ROOT, 'update.json')
+const NATIVE_FAST_ASSET = 'app://-/assets/app-initial-438d1df57f70.js'
+
+// Match the inspected native build exactly. Neither UI markup nor authentication is replaced.
+export function adaptNativeFastSource(source) {
+  const access = 'let f=d,p;return t[7]!==u||t[8]!==f?'
+  const setter = 'serviceTierAccess:R,serviceTierSettings:z,setServiceTier:P}'
+  const modelOptions = '{additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels}'
+  const select = `select:({data:n})=>Vso(${modelOptions})`
+  if (source.split(access).length !== 2 || source.split(setter).length !== 2 ||
+    source.split(select).length !== 2 || !source.includes('function D2()') ||
+    !source.includes('function Jlo(e)') || !source.includes('function _fo(e,t,n,r,i)')) {
+    throw new ConnectionError('This Codex build does not support the native Fast adapter.')
+  }
+  return source.replace(access,
+    'let f=window.__yisamaNativeFast?.access(r,o)??d,p;return t[7]!==u||t[8]!==f?')
+    .replace(setter,
+      'serviceTierAccess:R,serviceTierSettings:z,setServiceTier:window.__yisamaNativeFast?.wrap(u,S,P)??P}')
+    .replace(select, `select:({data:n})=>{const yisamaOptions=${modelOptions};return Vso(window.__yisamaNativeFast?.modelOptions(i,t,yisamaOptions,a)??yisamaOptions)}`) +
+    '\nwindow.__yisamaNativeFastSourceReady=true;window.__yisamaNativeReasoningSourceReady=true;\n'
+}
+
+// Serialized into the renderer. The existing native setter still owns UI and persistence.
+export function installNativeFast() {
+  if (window !== window.top || location.href !== 'app://-/index.html') return
+  window.__yisamaNativeFast?.dispose()
+  let authorization = null
+  let busy = false
+  let disposed = false
+  const access = { fast: true, ultrafast: false }
+  const wrappers = new WeakMap()
+  const pending = new Map()
+  const nativeAuth = () => new Promise((resolve, reject) => {
+    const id = `yisama-fast-auth-${crypto.randomUUID()}`
+    const finish = (callback, value) => {
+      window.clearTimeout(timer)
+      window.removeEventListener('message', receive)
+      callback(value)
+    }
+    const receive = (event) => {
+      const data = event.data
+      if (data?.type !== 'mcp-response' || data.hostId !== 'local' || data.message?.id !== id) return
+      if (data.message.error) finish(reject, new Error('Native authentication failed.'))
+      else finish(resolve, data.message.result)
+    }
+    const timer = window.setTimeout(() => finish(reject, new Error('Native authentication timed out.')), 8000)
+    window.addEventListener('message', receive)
+    window.electronBridge.sendMessageFromView({ type: 'mcp-request', hostId: 'local',
+      request: { id, method: 'getAuthStatus', params: { includeToken: true, refreshToken: false } },
+      priority: 'critical',
+    }).catch(() => finish(reject, new Error('Native authentication failed.')))
+  })
+  const send = (enabled, keyFingerprint) => new Promise((resolve, reject) => {
+    const id = 1e12 + crypto.getRandomValues(new Uint32Array(1))[0]
+    const timer = window.setTimeout(() => {
+      pending.delete(id)
+      reject(new Error('Fast setting timed out.'))
+    }, 15000)
+    pending.set(id, { resolve, reject, timer })
+    try { window.yisamaAssistantCommand(JSON.stringify({ id, action: 'fast', enabled, keyFingerprint })) }
+    catch (error) { window.clearTimeout(timer); pending.delete(id); reject(error) }
+  })
+  const controller = {
+    authorize(settings) { authorization = settings ? { ...settings } : null },
+    needsReload() {
+      const catalogReasoning = authorization?.provider === 'yisama' &&
+        Object.values(authorization.modelSettings || {}).some((model) =>
+          model.reasoningEfforts?.length)
+      return !disposed && ((authorization?.fastAvailable === true && window.__yisamaNativeFastSourceReady !== true) ||
+        (catalogReasoning && window.__yisamaNativeReasoningSourceReady !== true))
+    },
+    access(host, method) {
+      return !disposed && window.__yisamaNativeFastSourceReady && authorization?.fastAvailable === true &&
+        host === 'local' && method === 'apikey' ? access : null
+    },
+    modelOptions(host, method, options, includeUltra = true) {
+      if (disposed || !window.__yisamaNativeReasoningSourceReady || authorization?.provider !== 'yisama' ||
+        host !== 'local' || method !== 'apikey') return options
+      const enabled = new Set(options.enabledReasoningEfforts)
+      const models = options.models.map((model) => {
+        const settings = authorization.modelSettings?.[model.model]
+        const supported = settings?.reasoningEfforts || []
+        const known = new Set((model.supportedReasoningEfforts || []).map(({ reasoningEffort }) => reasoningEffort))
+        const additions = supported.filter((reasoningEffort) => !known.has(reasoningEffort)).map((reasoningEffort) => ({
+          reasoningEffort,
+          description: settings.reasoningDescriptions?.[reasoningEffort] || `${reasoningEffort} effort`,
+        }))
+        return additions.length ? {
+          ...model,
+          supportedReasoningEfforts: [...(model.supportedReasoningEfforts || []), ...additions],
+        } : model
+      })
+      let ultra = false
+      for (const model of models) {
+        const supported = authorization.modelSettings?.[model.model]?.reasoningEfforts || []
+        for (const reasoningEffort of supported) {
+          enabled.add(reasoningEffort)
+          if (reasoningEffort === 'ultra' && includeUltra) ultra = true
+        }
+      }
+      return { ...options, models, enabledReasoningEfforts: enabled,
+        includeUltraReasoningEffort: options.includeUltraReasoningEffort || ultra }
+    },
+    isBusy() { return busy },
+    wrap(host, method, nativeSet) {
+      if (host !== 'local' || method !== 'apikey') return nativeSet
+      if (wrappers.has(nativeSet)) return wrappers.get(nativeSet)
+      const wrapped = async (tier, source) => {
+        if (!controller.access(host, method)) return nativeSet(tier, source)
+        if (busy || (tier !== null && tier !== 'priority')) return false
+        const own = authorization
+        busy = true
+        let changed = false
+        let fingerprint
+        try {
+          const auth = await nativeAuth()
+          if (auth.authMethod !== 'apikey' || auth.authToken !== own.apiKey) {
+            authorization = null
+            throw new Error('Fast account changed.')
+          }
+          const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(own.apiKey))
+          fingerprint = Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+          const enabled = tier === 'priority'
+          const response = await send(enabled, fingerprint)
+          changed = response.enabled === enabled
+          if (response.enabled !== enabled || authorization !== own || disposed) throw new Error('Fast account changed.')
+          // The preflight auth and server-side key ownership check cover this serialized click.
+          if (await nativeSet(tier, source) !== true) throw new Error('Native Fast setting failed.')
+          own.fastEnabled = enabled
+          return true
+        } catch {
+          if (changed) {
+            try {
+              await send(own.fastEnabled, fingerprint)
+            } catch { authorization = null }
+          }
+          window.__yisamaInfiniteAssistant?.nativeStatus?.('error')
+          return false
+        } finally { busy = false }
+      }
+      wrappers.set(nativeSet, wrapped)
+      return wrapped
+    },
+    receive(response) {
+      const entry = pending.get(response?.id)
+      if (!entry) return
+      pending.delete(response.id)
+      window.clearTimeout(entry.timer)
+      if (response.ok) entry.resolve(response.data)
+      else entry.reject(new Error('The server did not confirm Fast.'))
+    },
+    dispose() {
+      disposed = true
+      authorization = null
+      for (const entry of pending.values()) {
+        window.clearTimeout(entry.timer)
+        entry.reject(new Error('Fast adapter disconnected.'))
+      }
+      pending.clear()
+    },
+  }
+  window.__yisamaNativeFast = controller
+}
 
 class ConnectionError extends Error {}
 const connectionMessage = (error) => error instanceof ConnectionError ? error.message : safeError(error)
@@ -211,6 +373,7 @@ export class AssistantTarget {
     this.mainFrameId = null
     this.allowed = false
     this.disposed = false
+    this.nativeFastReloadAttempted = false
     this.replies = new Set()
     this.connection = connectionFactory(target.webSocketDebuggerUrl, (event) => this.onEvent(event))
   }
@@ -223,7 +386,11 @@ export class AssistantTarget {
   }
 
   onEvent(event) {
-    if (event.method === 'Runtime.executionContextCreated') {
+    if (event.method === 'Fetch.requestPaused') {
+      const reply = this.adaptNativeScript(event.params)
+      this.replies.add(reply)
+      reply.catch((error) => this.report(connectionMessage(error))).finally(() => this.replies.delete(reply))
+    } else if (event.method === 'Runtime.executionContextCreated') {
       this.contexts.set(event.params.context.id, event.params.context)
     } else if (event.method === 'Runtime.executionContextDestroyed') {
       this.contexts.delete(event.params.executionContextId)
@@ -244,6 +411,26 @@ export class AssistantTarget {
     return this.replies.size === 0
   }
 
+  async adaptNativeScript(params) {
+    try {
+      if (params.request.url !== NATIVE_FAST_ASSET || params.responseStatusCode !== 200) {
+        throw new ConnectionError('The native Fast module could not be adapted.')
+      }
+      const response = await this.connection.call('Fetch.getResponseBody', { requestId: params.requestId })
+      const source = response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body
+      const patched = adaptNativeFastSource(source)
+      await this.connection.call('Fetch.fulfillRequest', {
+        requestId: params.requestId, responseCode: 200,
+        responseHeaders: (params.responseHeaders || []).filter((header) =>
+          !['content-length', 'content-encoding'].includes(header.name.toLowerCase())),
+        body: Buffer.from(patched).toString('base64'),
+      })
+    } catch (error) {
+      await this.connection.call('Fetch.continueRequest', { requestId: params.requestId })
+      throw error
+    }
+  }
+
   async reloadState() {
     if (this.disposed || !this.allowed || !this.topContext()) return null
     const result = await this.connection.call('Runtime.evaluate', {
@@ -252,7 +439,7 @@ export class AssistantTarget {
         const state = runtime?.snapshot?.();
         const root = document.getElementById('yisama-infinite-assistant-ui');
         if (!state || !root) return { open: false, busy: false, unsent: false };
-        const value = (testId) => root.querySelector('[data-testid="' + testId + '"]')?.value || '';
+        const value = (testId) => root.querySelector('[data-testid="' + testId + '"]')?.dataset.value || '';
         const hasText = state.loggedIn !== true && [...root.querySelectorAll('input, textarea')]
           .some((element) => typeof element.value === 'string' && element.value.length > 0);
         return {
@@ -276,6 +463,7 @@ export class AssistantTarget {
     }
     await this.connection.call('Runtime.evaluate', {
       expression: `if (window === window.top && location.href === ${JSON.stringify(CODEX_PAGE)}) {
+        window.__yisamaNativeFast?.receive(${JSON.stringify(response)});
         window.__yisamaInfiniteAssistant?.receive(${JSON.stringify(response)});
       }`,
       contextId: executionContextId,
@@ -284,13 +472,22 @@ export class AssistantTarget {
   }
 
   async syncModels(settings) {
-    if (!settings || this.disposed || !this.allowed || !this.topContext()) return null
+    if (this.disposed || !this.allowed || !this.topContext()) return null
     const result = await this.connection.call('Runtime.evaluate', {
       expression: `(${syncNativeModels.toString()})(${JSON.stringify(settings)})`,
       contextId: this.topContext(), returnByValue: true, awaitPromise: true,
     }, { timeoutMs: 45000 })
     if (result.exceptionDetails) throw new ConnectionError('Native model synchronization failed.')
-    return result.result?.value
+    const synced = result.result?.value
+    if (synced?.reloadNativeFast === true) {
+      if (this.nativeFastReloadAttempted) {
+        throw new ConnectionError('The native model controls did not load. This Codex build may be incompatible.')
+      }
+      this.nativeFastReloadAttempted = true
+      await this.connection.call('Page.reload', { ignoreCache: true })
+      return { status: 'pending' }
+    }
+    return synced
   }
 
   async install() {
@@ -302,7 +499,10 @@ export class AssistantTarget {
     this.allowed = true
     await this.connection.call('Runtime.enable')
     await this.connection.call('Runtime.addBinding', { name: BINDING })
-    const source = makeAssistantScript()
+    await this.connection.call('Fetch.enable', {
+      patterns: [{ urlPattern: NATIVE_FAST_ASSET, requestStage: 'Response' }],
+    })
+    const source = `${makeAssistantScript()}\n;(${installNativeFast.toString()})();`
     const restored = await this.connection.call('Page.addScriptToEvaluateOnNewDocument', { source })
     this.scriptId = restored.identifier
     const result = await this.connection.call('Runtime.evaluate', {
@@ -316,10 +516,13 @@ export class AssistantTarget {
     if (this.allowed && this.connection.socket?.readyState === WebSocket.OPEN) {
       try {
         await this.connection.call('Runtime.removeBinding', { name: BINDING })
+        await this.connection.call('Fetch.disable')
         if (this.scriptId) {
           await this.connection.call('Page.removeScriptToEvaluateOnNewDocument', { identifier: this.scriptId })
         }
-        await this.connection.call('Runtime.evaluate', { expression: REMOVE_ASSISTANT_SCRIPT })
+        await this.connection.call('Runtime.evaluate', {
+          expression: `window.__yisamaNativeFast?.dispose();${REMOVE_ASSISTANT_SCRIPT}`,
+        })
       } catch {
         // Closing the app also closes its renderer connection.
       }
@@ -335,7 +538,8 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
   readUpdate = readUpdateMarker, reloadCheck = shouldReload,
   readEndpoint = async (file) => JSON.parse(await fs.readFile(file, 'utf8')),
   connectionFactory = (url, onEvent) => new CdpConnection(url, onEvent),
-  nativeConfiguration = handler === handleRequest ? desktopNativeConfiguration : async () => null } = {}) {
+  nativeConfiguration = handler === handleRequest ? desktopNativeConfiguration : async () => null,
+  onNativeSynced = nativeConfiguration === desktopNativeConfiguration ? desktopNativeSynced : async () => {} } = {}) {
   const clients = new Map()
   const request = createRequestQueue(handler)
   let generation = validateUpdateMarker(await readUpdate(updateFile))?.generation || null
@@ -370,14 +574,18 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
         if (!targets.length) throw new ConnectionError('No Codex workspace is ready for the assistant.')
         if (request.isIdle() && [...clients.values()].every((client) => client.isIdle())) {
           const settings = await nativeConfiguration() || [...clients.values()].find((client) => client.restoreSync)?.restoreSync
+          if (!settings) for (const client of clients.values()) await client.syncModels(null)
           if (settings) {
             request.quiesce()
             try {
               await request.drain()
+              let allSynced = true
               for (const client of clients.values()) {
                 const synced = await client.syncModels(settings)
                 if (synced?.status === 'synced') client.restoreSync = null
+                else allSynced = false
               }
+              if (allSynced) await onNativeSynced(settings.version)
             } finally {
               request.resume()
             }
@@ -420,16 +628,19 @@ export async function syncNativeModels(settings, options = {}) {
   if (window.top !== window || (location.href !== 'app://-/index.html' && options.allowTestLocation !== true)) return null
   const runtime = window.__yisamaInfiniteAssistant
   if (!runtime || !window.electronBridge?.sendMessageFromView) return { status: 'unavailable' }
+  const fast = window.__yisamaNativeFast
+  if (!settings) {
+    fast?.authorize(null)
+    return { status: 'unavailable' }
+  }
+  if (fast?.isBusy()) return { status: 'pending' }
+  if (!window.__codexRoot?._internalRoot?.current) return { status: 'pending' }
   const previous = window.__yisamaNativeModelSync
   if (previous?.version === settings.version && previous.status === 'error') {
     runtime.nativeStatus?.('error')
     return { status: 'error' }
   }
   if (previous?.version === settings.version && previous.nextCheckAt > Date.now()) return { status: 'pending' }
-  if (previous?.version === settings.version && previous.status === 'synced') {
-    runtime.nativeStatus?.('synced')
-    return { status: 'synced' }
-  }
   const rpc = (method, params) => new Promise((resolve, reject) => {
     const id = `yisama-sync-${crypto.randomUUID()}`
     const finish = (callback, value) => {
@@ -449,56 +660,151 @@ export async function syncNativeModels(settings, options = {}) {
       type: 'mcp-request', hostId: 'local', request: { id, method, params }, priority: 'critical',
     }).catch(() => finish(reject, new Error('Native request failed.')))
   })
+  const finish = async () => {
+    if (!fast?.needsReload?.()) {
+      runtime.nativeStatus?.('synced')
+      return { status: 'synced' }
+    }
+    runtime.nativeStatus?.('pending')
+    const hasUnsentChanges = () => {
+      const panel = runtime.snapshot?.()
+      return panel?.open || panel?.setupPending || [...document.querySelectorAll(
+        '[contenteditable=true],textarea,input:not([type]),input[type=text],input[type=password],input[type=email]',
+      )].some((node) => node.isContentEditable ? node.textContent.trim() : node.value?.trim())
+    }
+    if (hasUnsentChanges()) return { status: 'pending' }
+    let cursor = null
+    do {
+      const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
+      for (const threadId of loaded.data) {
+        const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
+        if (thread.status?.type !== 'idle') return { status: 'pending' }
+      }
+      cursor = loaded.nextCursor
+    } while (cursor)
+    return hasUnsentChanges() ? { status: 'pending' } : { status: 'pending', reloadNativeFast: true }
+  }
+  let stage = 'authentication'
   try {
     const auth = await rpc('getAuthStatus', { includeToken: true, refreshToken: false })
+    if (auth?.isLoading || auth?.authMethod == null) return { status: 'pending' }
     if (auth?.authMethod !== 'apikey' || typeof auth.authToken !== 'string' ||
       auth.authToken.length < 8) throw new Error('Native authentication unavailable.')
     if (typeof settings.apiKey === 'string' && settings.apiKey !== auth.authToken) {
+      fast?.authorize(null)
       window.__yisamaNativeModelSync = { version: settings.version, status: 'account-change',
         nextCheckAt: Date.now() + 5000 }
       runtime.nativeStatus?.('account-change')
       return { status: 'account-change' }
     }
+    fast?.authorize(settings.provider === 'yisama' && settings.apiKey === auth.authToken ? settings : null)
+    if (previous?.version === settings.version && previous.status === 'synced') {
+      return await finish()
+    }
+    const catalogChanged = !settings.catalogVersion || previous?.status !== 'synced' ||
+      previous.catalogVersion !== settings.catalogVersion
+    // Fast toggles change the native configuration revision without changing the
+    // already-loaded model catalog. The native setter has already updated the
+    // active thread, so do not wait on or enumerate every other session here.
+    const fastOnly = !catalogChanged && window.__yisamaNativeFastSourceReady === true &&
+      window.__yisamaNativeReasoningSourceReady === true
+    if (fastOnly) {
+      window.__yisamaNativeModelSync = {
+        version: settings.version, catalogVersion: settings.catalogVersion, status: 'synced',
+      }
+      runtime.nativeStatus?.('synced')
+      return { status: 'synced' }
+    }
     let queryClient
-    const nodes = [{ node: window.__codexRoot?._internalRoot?.current, depth: 0 }]
-    const visited = new Set()
-    while (nodes.length && visited.size < 300) {
-      const { node, depth } = nodes.shift()
-      if (!node || depth > 20 || visited.has(node)) continue
-      visited.add(node)
-      for (const key of ['client', 'value']) {
-        const value = node.memoizedProps?.[key]
-        if (typeof value?.getQueryCache === 'function' && typeof value?.invalidateQueries === 'function') {
-          queryClient = value
-          break
+    let models = settings.models
+    if (catalogChanged) {
+      stage = 'query-cache'
+      const nodes = [{ node: window.__codexRoot?._internalRoot?.current, depth: 0 }]
+      const visited = new Set()
+      while (nodes.length && visited.size < 300) {
+        const { node, depth } = nodes.shift()
+        if (!node || depth > 20 || visited.has(node)) continue
+        visited.add(node)
+        for (const key of ['client', 'value']) {
+          const value = node.memoizedProps?.[key]
+          if (typeof value?.getQueryCache === 'function' && typeof value?.invalidateQueries === 'function') {
+            queryClient = value
+            break
+          }
+        }
+        if (queryClient) break
+        if (node.child) nodes.push({ node: node.child, depth: depth + 1 })
+        if (node.sibling) nodes.push({ node: node.sibling, depth })
+      }
+      if (!queryClient) {
+        runtime.nativeStatus?.('pending')
+        return { status: 'pending' }
+      }
+      runtime.nativeStatus?.('syncing')
+      stage = 'catalog'
+      await rpc('account/login/start', { type: 'apiKey', apiKey: auth.authToken })
+      const catalog = []
+      let cursor = null
+      do {
+        const response = await rpc('model/list', { cursor, includeHidden: true, limit: 100 })
+        catalog.push(...response.data)
+        cursor = response.nextCursor
+      } while (cursor)
+      models = catalog.map((model) => model.model)
+      if (Array.isArray(settings.models) && (models.length !== settings.models.length ||
+        settings.models.some((model) => !models.includes(model)))) {
+        throw new Error('Native model catalog did not change.')
+      }
+      if (settings.modelSettings && settings.provider) {
+        stage = 'service-tiers'
+        for (const model of catalog) {
+          const expected = settings.modelSettings[model.model]
+          const supported = expected?.fastAvailable ?? Boolean(expected?.serviceTier)
+          if (expected?.reasoningEfforts?.some((effort) =>
+            !model.supportedReasoningEfforts?.some((item) => item.reasoningEffort === effort))) {
+            throw new Error('Native reasoning levels did not change.')
+          }
+          if (supported && (!model.serviceTiers?.some((item) => item.id === 'priority') ||
+            model.defaultServiceTier !== 'priority')) throw new Error('Native Fast tier did not change.')
+          if (!supported && model.serviceTiers?.length) throw new Error('Native ordinary tier did not change.')
         }
       }
-      if (queryClient) break
-      if (node.child) nodes.push({ node: node.child, depth: depth + 1 })
-      if (node.sibling) nodes.push({ node: node.sibling, depth })
     }
-    if (!queryClient) throw new Error('Native query cache unavailable.')
-    runtime.nativeStatus?.('syncing')
-    await rpc('account/login/start', { type: 'apiKey', apiKey: auth.authToken })
-    const models = []
-    let cursor = null
-    do {
-      const response = await rpc('model/list', { cursor, includeHidden: true, limit: 100 })
-      models.push(...response.data.map((model) => model.model))
-      cursor = response.nextCursor
-    } while (cursor)
-    if (Array.isArray(settings.models) && (models.length !== settings.models.length ||
-      settings.models.some((model) => !models.includes(model)))) {
-      throw new Error('Native model catalog did not change.')
+    if (catalogChanged && settings.modelSettings && settings.provider) {
+      // A catalog change can replace stale provider threads. Fast-only changes are
+      // already persisted by the native setter and must not walk every open thread.
+      // Other providers retain their own models and settings.
+      stage = 'thread-settings'
+      let cursor = null
+      do {
+        const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
+        for (const threadId of loaded.data) {
+          const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
+          if (thread.modelProvider !== settings.provider) continue
+          // Keep a thread's model when the new group does not provide it. Replacing
+          // it with the group default makes switching back unable to recover it.
+          if (!models.includes(thread.model)) continue
+          const next = settings.modelSettings[thread.model]
+          if (!next) throw new Error('Native thread model unavailable.')
+          await rpc('thread/settings/update', { threadId, serviceTier: next.serviceTier })
+        }
+        cursor = loaded.nextCursor
+      } while (cursor)
     }
-    await queryClient.invalidateQueries({
-      predicate: (query) => ['models', 'config', 'user-saved-config'].includes(query.queryKey[0]),
-    })
-    window.__yisamaNativeModelSync = { version: settings.version, status: 'synced' }
-    runtime.nativeStatus?.('synced')
-    return { status: 'synced' }
+    if (catalogChanged) {
+      stage = 'query-refresh'
+      await queryClient.invalidateQueries({
+        predicate: (query) => ['models', 'config', 'user-saved-config'].includes(query.queryKey[0]),
+      })
+    }
+    window.__yisamaNativeModelSync = {
+      version: settings.version, catalogVersion: settings.catalogVersion, status: 'synced',
+    }
+    stage = 'native-fast-readiness'
+    return await finish()
   } catch {
-    window.__yisamaNativeModelSync = { version: settings.version, status: 'error' }
+    fast?.authorize(null)
+    window.__yisamaNativeModelSync = { version: settings.version, status: 'error', stage }
     runtime.nativeStatus?.('error')
     return { status: 'error' }
   }

@@ -4,6 +4,8 @@ import { parse } from 'smol-toml'
 
 import {
   chooseGroup,
+  classifyPricing,
+  textModels,
   chooseModel,
   chooseReasoning,
   desktopRestartRequired,
@@ -71,6 +73,43 @@ test('native catalogs keep known model capabilities without inventing them for o
   assert.equal(catalog.models[1].supports_search_tool, false)
   assert.deepEqual(known, { slug: 'gpt-known', supported_reasoning_levels: [{ effort: 'high' }],
     default_reasoning_level: 'high', base_instructions: 'Known model instructions', context_window: 100000 })
+})
+
+test('native catalogs expose verified reasoning levels for every current GPT relay model', () => {
+  const models = [
+    'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra',
+    'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-reserve',
+  ]
+  const known = [{ slug: 'gpt-6.1-sol', default_reasoning_level: 'medium',
+    supported_reasoning_levels: [{ effort: 'xhigh', description: 'Existing metadata' }] }]
+  const catalog = makeModelCatalog(models, known)
+  const expected = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+  for (const model of catalog.models) {
+    assert.deepEqual(model.supported_reasoning_levels.map((level) => level.effort), expected)
+  }
+  assert.equal(catalog.models.find((model) => model.slug === 'gpt-6.1-sol')
+    .supported_reasoning_levels.find((level) => level.effort === 'xhigh').description, 'Existing metadata')
+  assert.equal(catalog.models.find((model) => model.slug === 'gpt-6.1-terra').default_reasoning_level, 'medium')
+})
+
+test('native Fast tiers follow the group and the relay model policy, not stale metadata', () => {
+  const known = [{ slug: 'gpt-5.5', service_tiers: [
+    { id: 'priority', name: 'Fast', description: 'Old description' },
+    { id: 'ultrafast', name: 'Ultra Fast', description: 'Not supported by this relay' },
+  ], additional_speed_tiers: ['fast', 'ultrafast'], default_service_tier: 'ultrafast' }]
+  const models = ['gpt-5.5', 'gpt-6.1-sol', 'gemini-3-flash', 'gpt-5-pro', 'Auto']
+  const enabled = makeModelCatalog(models, known, { fast: true })
+  for (const model of enabled.models.slice(0, 2)) {
+    assert.deepEqual(model.service_tiers.map((tier) => [tier.id, tier.name]), [['priority', 'Fast']])
+    assert.equal(model.default_service_tier, 'priority')
+    assert.deepEqual(model.additional_speed_tiers, ['fast'])
+  }
+  for (const model of [...enabled.models.slice(2), ...makeModelCatalog(models, known).models]) {
+    assert.deepEqual(model.service_tiers, [])
+    assert.deepEqual(model.additional_speed_tiers, [])
+    assert.equal(model.default_service_tier, null)
+  }
+  assert.equal(known[0].default_service_tier, 'ultrafast', 'source metadata must remain untouched')
 })
 
 test('preserves quoted tables, multiline strings, and updates the active profile', () => {
@@ -231,4 +270,22 @@ test('two-factor login reuses the returned flow token without retrying password 
     flow_token: 'flow-token',
     code: '123456',
   })
+})
+
+test('pricing classification keeps only chat models and hides media groups', () => {
+  const catalog = classifyPricing({ data: [
+    { model_name: 'gpt-x', quota_type: 0, supported_endpoint_types: ['openai'], enable_groups: ['plus', 'mixed'] },
+    { model_name: 'claude-x', quota_type: 0, supported_endpoint_types: ['anthropic', 'openai'], enable_groups: ['mixed'] },
+    { model_name: 'gpt-free-call', quota_type: 1, model_price: 0, supported_endpoint_types: ['openai'], enable_groups: ['plus'] },
+    { model_name: 'nano-banana', quota_type: 1, model_price: 0.2, supported_endpoint_types: ['openai'], enable_groups: ['images', 'mixed'] },
+    { model_name: 'pic', quota_type: 1, supported_endpoint_types: ['image-generation', 'openai'], enable_groups: ['images'] },
+    { model_name: 'seedance', quota_type: 1, supported_endpoint_types: ['openai', 'openai-video'], enable_groups: ['video'] },
+    { model_name: 'seedance-2', quota_type: 1, supported_endpoint_types: ['openai', 'openai-video'], enable_groups: ['video'] },
+    { model_name: 'chat-in-video', quota_type: 0, supported_endpoint_types: ['openai'], enable_groups: ['video'] },
+  ] })
+  assert.deepEqual([...catalog.mediaGroups].sort(), ['images', 'video'])
+  assert.deepEqual(textModels(['gpt-x', 'claude-x', 'gpt-free-call', 'nano-banana', 'pic', 'seedance', 'tts-1', 'unknown-llm'], catalog),
+    ['gpt-x', 'claude-x', 'gpt-free-call', 'unknown-llm'])
+  assert.deepEqual(textModels(['gpt-x', 'gpt-image-2'], classifyPricing(null)), ['gpt-x'],
+    'without pricing data the name-based filter still applies')
 })

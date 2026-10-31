@@ -72,146 +72,289 @@ export function installAssistantUI(options = {}) {
   const cleanText = (value, maximum = 240) => typeof value === 'string' ? value.slice(0, maximum) : ''
   const selectValues = (values, mapper) => Array.isArray(values) ? values.map(mapper).filter(Boolean) : []
 
+  const SVG_NS = 'http://www.w3.org/2000/svg'
+  const svg = (viewBox, paths, className) => {
+    const node = document.createElementNS(SVG_NS, 'svg')
+    node.setAttribute('viewBox', viewBox)
+    node.setAttribute('aria-hidden', 'true')
+    node.setAttribute('focusable', 'false')
+    if (className) node.setAttribute('class', className)
+    for (const attributes of paths) {
+      const path = document.createElementNS(SVG_NS, attributes.tag || 'path')
+      for (const [name, value] of Object.entries(attributes)) if (name !== 'tag') path.setAttribute(name, value)
+      node.appendChild(path)
+    }
+    return node
+  }
+  // The site's mark: two crescents around a four-point star. While requests run, the crescents orbit.
+  const brandMark = (className) => svg('0 0 24 24', [
+    { tag: 'g', class: 'y-mark__orbit' },
+    { d: 'M12 9.2Q12.5 11.5 14.8 12 12.5 12.5 12 14.8 11.5 12.5 9.2 12 11.5 11.5 12 9.2Z', class: 'y-mark__star' },
+  ], `y-mark ${className}`)
+  const fillMark = (node) => {
+    const orbit = node.querySelector('.y-mark__orbit')
+    for (const [d, fill] of [
+      ['M11.4 2.02A10 10 0 0 0 11.4 21.98 5.2 5.2 0 0 0 9.6 13.6 4.6 4.6 0 0 1 11.4 2.02Z', 'url(#yisama-grad-cool)'],
+      ['M12.6 21.98A10 10 0 0 0 12.6 2.02 5.2 5.2 0 0 0 14.4 10.4 4.6 4.6 0 0 1 12.6 21.98Z', 'url(#yisama-grad-warm)'],
+    ]) {
+      const path = document.createElementNS(SVG_NS, 'path')
+      path.setAttribute('d', d)
+      path.setAttribute('fill', fill)
+      orbit.appendChild(path)
+    }
+    return node
+  }
+  const defs = svg('0 0 0 0', [], 'y-defs')
+  defs.innerHTML = '<defs>'
+    + '<linearGradient id="yisama-grad-cool" x1="0" y1="0" x2=".4" y2="1"><stop offset="0" stop-color="#20d8f0"/><stop offset="1" stop-color="#8a4ff0"/></linearGradient>'
+    + '<linearGradient id="yisama-grad-warm" x1="1" y1="0" x2=".6" y2="1"><stop offset="0" stop-color="#ff7ab8"/><stop offset="1" stop-color="#e050c8"/></linearGradient>'
+    + '<linearGradient id="yisama-grad-star" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#20c0e0"/><stop offset="1" stop-color="#8060e0"/></linearGradient>'
+    + '</defs>'
+
   const root = el('div', { id: ROOT_ID, className: 'yisama-assistant-ui' })
   const style = el('style')
+  const R = `#${ROOT_ID}`
+  const GRAIN = `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>")`
+  // Always dark: the panel is a small piece of api.yisama.asia, using that site's own tokens.
   style.textContent = `
-    #${ROOT_ID}{position:fixed;inset:0;z-index:2147483000;pointer-events:none;color:#26312f;font:13px/1.45 "Segoe UI",system-ui,sans-serif}
-    #${ROOT_ID} *{box-sizing:border-box}
-    #${ROOT_ID} [hidden]{display:none!important}
-    #${ROOT_ID} button,#${ROOT_ID} select,#${ROOT_ID} input{font:inherit}
-    #${ROOT_ID} button{border:0;cursor:pointer}
-    #${ROOT_ID} button:focus-visible,#${ROOT_ID} select:focus-visible,#${ROOT_ID} input:focus-visible{outline:2px solid #2b796d;outline-offset:2px}
-    #${ROOT_ID} .yisama-badge{position:fixed;display:inline-flex;align-items:center;gap:6px;width:min(128px,calc(100vw - 16px));height:32px;padding:0 9px;border:1px solid rgba(39,77,70,.26);border-radius:6px;background:#f7fbf9;color:#173f39;box-shadow:0 3px 12px rgba(18,43,39,.15);font-size:12px;font-variant-numeric:tabular-nums;pointer-events:auto;touch-action:none;user-select:none;-webkit-app-region:no-drag}
-    #${ROOT_ID} .yisama-badge:hover{background:#edf7f3}
-    #${ROOT_ID} .yisama-badge[data-stale="true"]{border-color:#bd8a3b;color:#78531b;background:#fffaf0}
-    #${ROOT_ID} .yisama-badge__mark{display:grid;place-items:center;width:16px;height:16px;flex:0 0 auto;color:#287967;font-size:17px;line-height:1}
-    #${ROOT_ID} .yisama-badge__text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    #${ROOT_ID} .yisama-badge__stale{width:6px;height:6px;flex:0 0 auto;border-radius:50%;background:#b77e2b}
-    #${ROOT_ID} .yisama-panel{position:fixed;top:0;right:0;bottom:0;display:flex;width:min(368px,100vw);min-width:0;flex-direction:column;border:1px solid #c7d1ce;border-radius:0;background:#f8fbfa;box-shadow:-7px 0 24px rgba(21,42,38,.16);pointer-events:auto;overflow:hidden;-webkit-app-region:no-drag}
-    #${ROOT_ID} .yisama-panel[hidden]{display:none}
-    #${ROOT_ID} .yisama-header{padding:18px 20px 0;border-bottom:1px solid #d7dfdc;background:rgba(255,255,255,.45)}
-    #${ROOT_ID} .yisama-title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:38px}
-    #${ROOT_ID} .yisama-brand{display:flex;align-items:center;min-width:0;gap:9px}
-    #${ROOT_ID} .yisama-brand__mark{display:grid;place-items:center;width:30px;height:30px;border:1px solid #b9d2ca;border-radius:6px;background:#ecf7f2;color:#247462;font-size:20px;line-height:1}
-    #${ROOT_ID} .yisama-brand strong{display:block;overflow:hidden;font-size:16px;font-weight:650;line-height:1.25;text-overflow:ellipsis;white-space:nowrap}
-    #${ROOT_ID} .yisama-brand small{display:block;color:#65716e;font-size:10px;overflow-wrap:anywhere}
-    #${ROOT_ID} .yisama-header-actions{display:flex;gap:4px;flex:0 0 auto}
-    #${ROOT_ID} .yisama-icon{display:grid;place-items:center;width:30px;height:30px;padding:0;border-radius:5px;background:transparent;color:#52615d;font-size:18px;line-height:1}
-    #${ROOT_ID} .yisama-icon:hover{background:#e8f0ed;color:#173f39}
-    #${ROOT_ID} .yisama-status{display:flex;align-items:center;gap:6px;min-height:38px;margin-top:12px;color:#64716e;font-size:11px}
-    #${ROOT_ID} .yisama-status:before{width:6px;height:6px;border-radius:50%;background:#34836f;content:""}
-    #${ROOT_ID} .yisama-status[data-kind="warning"]:before{background:#ba8534}
-    #${ROOT_ID} .yisama-content{min-height:0;flex:1 1 auto;overflow:auto;padding:18px 20px}
-    #${ROOT_ID} .yisama-balance{padding:14px 0 16px;border-bottom:1px solid #d7dfdc}
-    #${ROOT_ID} .yisama-balance span{display:block;color:#65716e;font-size:11px}
-    #${ROOT_ID} .yisama-balance strong{display:block;margin-top:3px;overflow:hidden;color:#173f39;font-size:25px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.2;text-overflow:ellipsis;white-space:nowrap}
-    #${ROOT_ID} .yisama-balance small{display:block;margin-top:6px;color:#946722;font-size:11px}
-    #${ROOT_ID} .yisama-account{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid #d7dfdc}
-    #${ROOT_ID} .yisama-account span{color:#65716e;font-size:11px}
-    #${ROOT_ID} .yisama-account strong{min-width:0;color:#22302d;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    #${ROOT_ID} .yisama-fields{display:grid;gap:14px;padding:16px 0}
-    #${ROOT_ID} .yisama-field{display:grid;gap:6px}
-    #${ROOT_ID} .yisama-field label{color:#52615d;font-size:11px}
-    #${ROOT_ID} .yisama-field select{width:100%;height:34px;border:1px solid #c7d1ce;border-radius:5px;background:#fff;color:#22302d;padding:0 8px}
-    #${ROOT_ID} .yisama-field select:disabled{background:#eef2f0;color:#89938f;cursor:not-allowed}
-    #${ROOT_ID} .yisama-button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 11px;border:1px solid #b8cec6;border-radius:5px;background:#e8f4ef;color:#17463c;font-size:12px;font-weight:600}
-    #${ROOT_ID} .yisama-button:hover:not(:disabled){background:#dcefe8}
-    #${ROOT_ID} .yisama-button:disabled{opacity:.56;cursor:not-allowed}
-    #${ROOT_ID} .yisama-button--wide{width:100%}
-    #${ROOT_ID} .yisama-button--plain{border-color:#cbd4d1;background:#fff;color:#4b5c57}
-    #${ROOT_ID} .yisama-button--danger{border-color:#d6c3b8;background:#fff8f4;color:#7d4a32}
-    #${ROOT_ID} .yisama-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:2px}
-    #${ROOT_ID} .yisama-note{margin:0 0 14px;padding:9px 10px;border-left:3px solid #b98436;background:#fffaf1;color:#715421;font-size:11px;line-height:1.5}
-    #${ROOT_ID} .yisama-confirm{margin-top:14px;padding:12px;border:1px solid #d6c3b8;border-radius:5px;background:#fff8f4}
-    #${ROOT_ID} .yisama-confirm p{margin:0;color:#654d42;font-size:12px;line-height:1.5}
-    #${ROOT_ID} .yisama-confirm div{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}
-    #${ROOT_ID} .yisama-logged-out{display:grid;gap:14px;padding-top:4px}
-    #${ROOT_ID} .yisama-logged-out p{margin:0;color:#586762;font-size:12px;line-height:1.65}
-    #${ROOT_ID} .yisama-auth-tabs{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid #d7dfdc}
-    #${ROOT_ID} .yisama-auth-tabs button{min-height:36px;border-bottom:2px solid transparent;background:transparent;color:inherit}
-    #${ROOT_ID} .yisama-auth-tabs button[aria-selected="true"]{border-bottom-color:#287967;color:#287967;font-weight:600}
-    #${ROOT_ID} .yisama-auth-form{display:grid;gap:14px;margin:0}
-    #${ROOT_ID} .yisama-auth-form input{width:100%;min-width:0;height:36px;border:1px solid #c7d1ce;border-radius:5px;background:#fff;color:#22302d;padding:0 10px}
-    #${ROOT_ID} .yisama-auth-form input:disabled{opacity:.6}
-    #${ROOT_ID} .yisama-verification-row{display:grid;grid-template-columns:minmax(0,1fr) 106px;gap:8px}
-    #${ROOT_ID} .yisama-auth-form label{color:#52615d;font-size:12px}
-    #${ROOT_ID} .yisama-auth-form h2{margin:0;color:inherit;font-size:15px;font-weight:600}
-    @media (prefers-color-scheme:dark){#${ROOT_ID} .yisama-auth-form input{border-color:#4b625c;background:#273834;color:#e5efeb}#${ROOT_ID} .yisama-auth-form label{color:#aebdb7}#${ROOT_ID} .yisama-auth-tabs{border-color:#405450}#${ROOT_ID} .yisama-auth-tabs button[aria-selected="true"]{color:#91d0bb;border-bottom-color:#91d0bb}}
-    #${ROOT_ID} .yisama-footer{min-height:42px;padding:11px 20px;border-top:1px solid #d7dfdc;background:rgba(255,255,255,.38);color:#65716e;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
-    #${ROOT_ID} .yisama-footer[data-error="true"]{color:#8b5b21}
-    @media (max-width:380px){#${ROOT_ID} .yisama-header{padding-right:16px;padding-left:16px}#${ROOT_ID} .yisama-content{padding-right:16px;padding-left:16px}#${ROOT_ID} .yisama-footer{padding-right:16px;padding-left:16px}#${ROOT_ID} .yisama-actions{grid-template-columns:1fr}}
-    @media (max-height:500px){#${ROOT_ID} .yisama-header{padding-top:12px}#${ROOT_ID} .yisama-status{min-height:30px;margin-top:6px}#${ROOT_ID} .yisama-content{padding-top:12px;padding-bottom:12px}}
-    @media (prefers-color-scheme:dark){#${ROOT_ID}{color:#e7efec}#${ROOT_ID} .yisama-badge{border-color:#477068;background:#20312d;color:#e5f2ed;box-shadow:0 3px 14px rgba(0,0,0,.34)}#${ROOT_ID} .yisama-badge:hover{background:#294039}#${ROOT_ID} .yisama-badge[data-stale="true"]{border-color:#93713c;background:#382f20;color:#f4e7ca}#${ROOT_ID} .yisama-panel{border-color:#405450;background:#1f2d2a;box-shadow:-7px 0 24px rgba(0,0,0,.34)}#${ROOT_ID} .yisama-header,#${ROOT_ID} .yisama-footer{border-color:#405450;background:rgba(10,19,17,.2)}#${ROOT_ID} .yisama-icon{color:#b9c8c2}#${ROOT_ID} .yisama-icon:hover{background:#30433e;color:#eff8f4}#${ROOT_ID} .yisama-brand__mark{border-color:#427568;background:#29473f;color:#91d0bb}#${ROOT_ID} .yisama-brand small,#${ROOT_ID} .yisama-status,#${ROOT_ID} .yisama-balance span,#${ROOT_ID} .yisama-account span,#${ROOT_ID} .yisama-field label,#${ROOT_ID} .yisama-footer{color:#aebdb7}#${ROOT_ID} .yisama-balance,#${ROOT_ID} .yisama-account{border-color:#405450}#${ROOT_ID} .yisama-balance strong,#${ROOT_ID} .yisama-account strong{color:#e5efeb}#${ROOT_ID} .yisama-field select{border-color:#4b625c;background:#273834;color:#e5efeb}#${ROOT_ID} .yisama-field select:disabled{background:#26322f;color:#83908b}#${ROOT_ID} .yisama-button{border-color:#457367;background:#29463e;color:#dff3eb}#${ROOT_ID} .yisama-button:hover:not(:disabled){background:#33584d}#${ROOT_ID} .yisama-button--plain{border-color:#4b625c;background:#263632;color:#d2dfda}#${ROOT_ID} .yisama-button--danger{border-color:#805b4b;background:#382a25;color:#f4d9cb}#${ROOT_ID} .yisama-note{background:#362c1e;color:#ebd9b5}#${ROOT_ID} .yisama-confirm{border-color:#805b4b;background:#382a25}#${ROOT_ID} .yisama-confirm p{color:#f0d8ca}#${ROOT_ID} .yisama-logged-out p{color:#bdcbc6}}
-    @media (prefers-reduced-motion:reduce){#${ROOT_ID} *{scroll-behavior:auto!important;transition:none!important}}
+    ${R}{--y-bg:#07070b;--y-bg2:#0d0d13;--y-bg3:#15151e;--y-line:rgba(255,255,255,.08);--y-line2:rgba(255,255,255,.14);--y-fg:#f3efe8;--y-fg2:rgba(243,239,232,.66);--y-fg3:rgba(243,239,232,.42);--y-mag:#e060c0;--y-vio:#8060e0;--y-cyan:#20c0e0;--y-grad:linear-gradient(100deg,#e060c0 0%,#8060e0 48%,#20c0e0 100%);--y-amber:#f2b45c;--y-red:#ff8a7a;--y-ease:cubic-bezier(.16,1,.3,1);--y-sans:"Inter Tight","Noto Sans SC","PingFang SC","Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;--y-mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;position:fixed;inset:0;z-index:2147483000;pointer-events:none;color:var(--y-fg);font:13px/1.45 var(--y-sans);-webkit-font-smoothing:antialiased;color-scheme:dark}
+    ${R} *{box-sizing:border-box}
+    ${R} [hidden]{display:none!important}
+    ${R} button,${R} input{font:inherit;color:inherit}
+    ${R} button{margin:0;border:0;background:none;cursor:pointer}
+    ${R} button:disabled{cursor:not-allowed}
+    ${R} :focus-visible{outline:2px solid var(--y-cyan);outline-offset:2px}
+    ${R} .y-defs{position:absolute;width:0;height:0}
+    ${R} .y-mark{display:block;flex:0 0 auto;overflow:visible}
+    ${R} .y-mark__orbit{transform-origin:12px 12px}
+    ${R} .y-mark__star{fill:url(#yisama-grad-star);transform-origin:12px 12px}
+    ${R} [data-busy="true"] .y-mark__orbit{animation:y-orbit 1.6s var(--y-ease) infinite}
+    ${R} [data-busy="true"] .y-mark__star{animation:y-twinkle 1.6s ease-in-out infinite}
+    @keyframes y-orbit{to{transform:rotate(360deg)}}
+    @keyframes y-twinkle{50%{transform:scale(1.7) rotate(45deg);fill:#fff}}
+    ${R} .y-grad-text{background:var(--y-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+
+    ${R} .yisama-badge{position:fixed;display:inline-flex;align-items:center;gap:7px;max-width:min(128px,calc(100vw - 16px));height:32px;padding:0 12px 0 7px;border:1px solid transparent;border-radius:99px;background:linear-gradient(var(--y-bg2),var(--y-bg2)) padding-box,linear-gradient(var(--y-line2),var(--y-line2)) border-box;color:var(--y-fg);box-shadow:0 10px 30px -12px rgba(0,0,0,.7),0 0 0 1px rgba(0,0,0,.25);font:600 12px/1 var(--y-mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em;pointer-events:auto;touch-action:none;user-select:none;-webkit-app-region:no-drag;transition:transform .3s var(--y-ease),box-shadow .3s var(--y-ease),background .3s}
+    ${R} .yisama-badge:hover,${R} .yisama-badge[aria-expanded="true"]{background:linear-gradient(var(--y-bg2),var(--y-bg2)) padding-box,var(--y-grad) border-box;box-shadow:0 12px 34px -10px rgba(224,96,192,.55),0 0 0 1px rgba(0,0,0,.25)}
+    ${R} .yisama-badge:hover{transform:translateY(-1px)}
+    ${R} .yisama-badge .y-mark{width:19px;height:19px}
+    ${R} .yisama-badge .y-mark path[fill]{stroke:var(--y-bg2);stroke-width:1.1}
+    ${R} .yisama-badge[data-stale="true"]{color:var(--y-amber)}
+    ${R} .yisama-badge__text{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    ${R} .yisama-badge__stale{width:6px;height:6px;flex:0 0 auto;border-radius:50%;background:var(--y-amber);box-shadow:0 0 8px var(--y-amber)}
+
+    ${R} .yisama-panel{position:fixed;display:flex;width:min(320px,calc(100vw - 16px));flex-direction:column;border:1px solid var(--y-line2);border-radius:22px;background:radial-gradient(120% 60% at 85% -10%,rgba(128,96,224,.28),transparent 60%),radial-gradient(90% 50% at 0% 0%,rgba(224,96,192,.16),transparent 55%),var(--y-bg2);box-shadow:0 40px 80px -24px rgba(0,0,0,.8),0 30px 60px -30px rgba(224,96,192,.35),inset 0 1px 0 rgba(255,255,255,.06);pointer-events:auto;overflow:hidden;isolation:isolate;-webkit-app-region:no-drag}
+    ${R} .yisama-panel:before{position:absolute;inset:0;z-index:-1;background-image:${GRAIN};opacity:.07;mix-blend-mode:overlay;pointer-events:none;content:""}
+    ${R} .yisama-panel:after{position:absolute;top:0;left:22px;right:22px;height:1px;background:var(--y-grad);opacity:.85;box-shadow:0 0 18px 1px rgba(224,96,192,.6);content:""}
+    ${R} .y-head{display:flex;align-items:center;gap:9px;height:52px;padding:0 10px 0 16px;flex:0 0 auto}
+    ${R} .y-head .y-mark{width:24px;height:24px}
+    ${R} .y-head .y-mark path[fill]{stroke:var(--y-bg2);stroke-width:1}
+    ${R} .y-wordmark{display:flex;align-items:baseline;gap:7px;min-width:0;flex:1 1 auto;white-space:nowrap;overflow:hidden}
+    ${R} .y-wordmark strong{font-weight:750;font-size:15px;letter-spacing:-.02em}
+    ${R} .y-wordmark small{color:var(--y-fg3);font:500 10px/1 var(--y-mono);letter-spacing:.08em;text-transform:uppercase}
+    ${R} .y-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:99px;color:var(--y-fg3);transition:background .2s,color .2s,transform .4s var(--y-ease)}
+    ${R} .y-icon:hover:not(:disabled){background:rgba(255,255,255,.06);color:var(--y-fg)}
+    ${R} .y-icon:disabled{opacity:.35}
+    ${R} .y-icon[data-testid="refresh"]:active:not(:disabled){transform:rotate(-120deg)}
+    ${R} .y-icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+    ${R} .y-body{min-height:0;flex:1 1 auto;overflow:auto;padding:4px 16px 16px;scrollbar-width:thin;scrollbar-color:var(--y-line2) transparent}
+
+    ${R} .y-meter{padding:4px 2px 18px}
+    ${R} .y-kicker{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--y-fg3);font:500 10px/1.4 var(--y-mono);letter-spacing:.1em;text-transform:uppercase}
+    ${R} .y-kicker strong{min-width:0;overflow:hidden;color:var(--y-fg2);font-weight:500;letter-spacing:0;text-transform:none;text-overflow:ellipsis;white-space:nowrap}
+    ${R} .y-meter__value{display:flex;align-items:flex-end;gap:10px;min-width:0;margin-top:6px}
+    ${R} .y-balance{display:block;min-width:0;overflow:hidden;padding-bottom:2px;font:800 42px/1.05 var(--y-sans);font-variant-numeric:tabular-nums;letter-spacing:-.045em;white-space:nowrap;background:linear-gradient(100deg,#e060c0 0%,#8060e0 24%,#20c0e0 50%,#e060c0 75%,#8060e0 100%) 0 0/200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 6px 22px rgba(224,96,192,.28))}
+    ${R} .y-balance[data-long="true"]{font-size:22px;letter-spacing:-.02em}
+        ${R} .y-meter__value small{flex:0 0 auto;margin-bottom:8px;padding:2px 7px;border:1px solid rgba(242,180,92,.35);border-radius:99px;color:var(--y-amber);font:600 10px/1.4 var(--y-mono)}
+    ${R} .y-status{display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--y-fg2);font-size:12px}
+    ${R} .y-pill{flex:0 0 auto;padding:2px 8px;border-radius:99px;background:var(--y-grad);color:#fff;font:700 10px/1.4 var(--y-sans);letter-spacing:.04em}
+    ${R} .y-status[data-kind="busy"] .y-pill{background-size:200% 100%;animation:y-flow 1.2s linear infinite}
+    ${R} .y-status[data-kind="warning"] .y-pill{background:rgba(242,180,92,.16);color:var(--y-amber);box-shadow:inset 0 0 0 1px rgba(242,180,92,.35)}
+    ${R} .y-status[data-kind="off"] .y-pill{background:rgba(255,255,255,.08);color:var(--y-fg3)}
+    @keyframes y-flow{to{background-position:-200% 0}}
+
+    ${R} .y-section-label{display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 8px;color:var(--y-fg3);font:500 10px/1.4 var(--y-mono);letter-spacing:.1em;text-transform:uppercase}
+    ${R} .y-section-hint{letter-spacing:0;text-transform:none}
+    ${R} .y-groups{position:relative;max-height:216px;overflow:auto;overscroll-behavior:contain;border-top:1px solid var(--y-line);border-bottom:1px solid var(--y-line);scrollbar-width:thin;scrollbar-color:var(--y-line2) transparent}
+    ${R} .y-groups[data-edge="top"]{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 28px),transparent)}
+    ${R} .y-groups[data-edge="middle"]{-webkit-mask-image:linear-gradient(to bottom,transparent,#000 28px,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(to bottom,transparent,#000 28px,#000 calc(100% - 28px),transparent)}
+    ${R} .y-groups[data-edge="bottom"]{-webkit-mask-image:linear-gradient(to bottom,transparent,#000 28px);mask-image:linear-gradient(to bottom,transparent,#000 28px)}
+    ${R} .y-groups__track{position:relative;display:grid;gap:2px;padding:4px 0}
+    ${R} .y-groups__empty{padding:14px 10px 14px 30px;color:var(--y-fg3);font-size:12px}
+    ${R} .y-search{position:relative;margin-bottom:8px}
+    ${R} .y-search svg{position:absolute;top:50%;left:11px;width:14px;height:14px;margin-top:-7px;fill:none;stroke:var(--y-fg3);stroke-width:1.8;stroke-linecap:round;pointer-events:none}
+    ${R} .y-search input{width:100%;height:34px;padding:0 12px 0 32px;border:1px solid var(--y-line);border-radius:99px;background:rgba(255,255,255,.03);color:var(--y-fg);font-size:12.5px;transition:border-color .2s,box-shadow .2s}
+    ${R} .y-search input::-webkit-search-cancel-button{-webkit-appearance:none;appearance:none}
+    ${R} .y-search input::placeholder{color:var(--y-fg3)}
+    ${R} .y-search input:focus{outline:none;border-color:var(--y-vio);box-shadow:0 0 0 3px rgba(128,96,224,.22)}
+    ${R} .y-groups[aria-disabled="true"]{cursor:progress}
+    ${R} .y-rail{position:absolute;top:24px;bottom:24px;left:13px;width:1px;background:repeating-linear-gradient(to bottom,var(--y-line2) 0 3px,transparent 3px 7px);pointer-events:none}
+    ${R} .y-trail{position:absolute;left:12px;width:3px;border-radius:3px;background:linear-gradient(to bottom,var(--y-cyan),var(--y-vio),var(--y-mag));opacity:0;box-shadow:0 0 12px rgba(224,96,192,.7);pointer-events:none}
+    ${R} .y-comet{position:absolute;top:0;left:7.5px;width:12px;height:12px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#fff 0 18%,var(--y-mag) 45%,var(--y-vio) 100%);box-shadow:0 0 0 3px rgba(224,96,192,.18),0 0 16px 2px rgba(224,96,192,.75);pointer-events:none;z-index:1}
+    ${R} .y-comet:after{position:absolute;inset:-6px;border:1.5px solid var(--y-mag);border-radius:50%;opacity:0;content:""}
+    ${R} .y-comet[data-pending="true"]:after{animation:y-sonar 1.1s var(--y-ease) infinite}
+    ${R} .y-comet[data-landed="true"]:after{animation:y-sonar .7s var(--y-ease) 1}
+    @keyframes y-sonar{0%{opacity:.9;transform:scale(.5)}100%{opacity:0;transform:scale(2.1)}}
+    ${R} .y-group{position:relative;display:flex;align-items:center;gap:10px;min-height:38px;padding:0 10px 0 30px;border-radius:12px;text-align:left;color:var(--y-fg2);transition:color .25s,background .25s}
+    ${R} .y-group:hover:not(:disabled){background:rgba(255,255,255,.035);color:var(--y-fg)}
+    ${R} .y-group[aria-checked="true"]{background:linear-gradient(90deg,rgba(128,96,224,.16),rgba(128,96,224,0) 75%);color:var(--y-fg)}
+    ${R} .y-group__node{position:absolute;top:50%;left:10px;width:7px;height:7px;margin-top:-3.5px;border:1px solid var(--y-fg3);border-radius:50%;background:var(--y-bg2);transition:border-color .25s}
+    ${R} .y-group:hover .y-group__node{border-color:var(--y-fg2)}
+    ${R} .y-group__name{min-width:0;flex:1 1 auto;overflow:hidden;font-weight:550;text-overflow:ellipsis;white-space:nowrap}
+    ${R} .y-group[aria-checked="true"] .y-group__name{font-weight:700}
+    ${R} .y-group__ratio{flex:0 0 auto;color:var(--y-fg3);font:500 11px/1 var(--y-mono)}
+    ${R} .y-group[aria-checked="true"] .y-group__ratio{color:var(--y-fg2)}
+    ${R} .y-group__ratio[data-cheap="true"]{color:var(--y-cyan)}
+    ${R} .y-group__tag{flex:0 0 auto;font:600 10px/1 var(--y-mono);letter-spacing:.04em}
+    ${R} .y-group__tag:empty{display:none}
+    ${R} .y-group[data-state="current"] .y-group__tag{color:transparent;background:var(--y-grad);-webkit-background-clip:text;background-clip:text}
+    ${R} .y-group[data-state="pending"] .y-group__tag{color:var(--y-fg3);animation:y-blink 1s steps(2) infinite}
+    @keyframes y-blink{50%{opacity:.35}}
+    ${R} .y-group[data-failed="true"]{animation:y-shake .45s var(--y-ease)}
+    @keyframes y-shake{20%{transform:translateX(-5px)}40%{transform:translateX(5px)}60%{transform:translateX(-2px)}80%{transform:translateX(2px)}}
+
+    ${R} .y-notice{position:relative;margin:12px 0 0;padding:9px 12px 9px 14px;border-radius:12px;background:rgba(255,255,255,.04);color:var(--y-fg2);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+    ${R} .y-notice:before{position:absolute;top:10px;bottom:10px;left:0;width:2px;border-radius:2px;background:var(--y-grad);content:""}
+    ${R} .y-notice[data-error="true"]{background:rgba(242,180,92,.08);color:var(--y-amber)}
+    ${R} .y-notice[data-error="true"]:before{background:var(--y-amber)}
+    ${R} .y-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:42px;padding:0 16px;border-radius:99px;font-weight:650;font-size:13px;transition:transform .2s var(--y-ease),box-shadow .3s var(--y-ease),filter .2s,background .2s}
+    ${R} .y-button:active:not(:disabled){transform:scale(.97)}
+    ${R} .y-button:disabled{opacity:.45}
+    ${R} .y-button--primary{background:var(--y-fg);color:#0a0a0f;box-shadow:0 10px 40px -10px rgba(224,96,192,.55),inset 0 0 0 1px rgba(255,255,255,.2)}
+    ${R} .y-button--primary:disabled{opacity:1;background:rgba(255,255,255,.06);color:var(--y-fg3);box-shadow:inset 0 0 0 1px var(--y-line)}
+    ${R} .y-button--primary:hover:not(:disabled){box-shadow:0 14px 44px -8px rgba(224,96,192,.75),inset 0 0 0 1px rgba(255,255,255,.2)}
+    ${R} .y-button--primary svg{transition:transform .3s var(--y-ease)}
+    ${R} .y-button--primary:hover:not(:disabled) svg{transform:translate(2px,-2px)}
+    ${R} .y-button--accent{background:var(--y-grad);color:#fff;box-shadow:0 10px 30px -10px rgba(128,96,224,.8)}
+    ${R} .y-button--accent:hover:not(:disabled){filter:brightness(1.1)}
+    ${R} .y-button--quiet{border:1px solid var(--y-line2);background:rgba(255,255,255,.03);color:var(--y-fg)}
+    ${R} .y-button--quiet:hover:not(:disabled){background:rgba(255,255,255,.07)}
+    ${R} .y-button--wide{width:100%}
+    ${R} .y-button svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+    ${R} .y-apply{margin-top:12px}
+    ${R} .y-takeover{margin-top:12px}
+    ${R} .y-actions{display:grid;gap:6px;margin-top:16px}
+    ${R} .y-link{justify-self:center;padding:6px 10px;border-radius:99px;color:var(--y-fg3);font-size:11.5px;transition:color .2s}
+    ${R} .y-link:hover:not(:disabled){color:var(--y-red)}
+    ${R} .y-confirm{margin-top:14px;padding:14px;border:1px solid rgba(255,138,122,.3);border-radius:16px;background:rgba(255,138,122,.05)}
+    ${R} .y-confirm p{margin:0;color:var(--y-fg2);font-size:12px;line-height:1.55}
+    ${R} .y-confirm div{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+    ${R} .y-confirm .y-button{min-height:34px;padding:0 14px;font-size:12px}
+    ${R} .y-button--danger{background:var(--y-red);color:#1a0806}
+
+    ${R} .y-auth{display:grid;gap:14px;padding-top:6px}
+    ${R} .y-auth__intro h2{margin:0;font-size:26px;font-weight:850;letter-spacing:-.03em;line-height:1.15}
+    ${R} .y-auth__intro p{margin:6px 0 0;color:var(--y-fg3);font:500 11px/1.4 var(--y-mono)}
+    ${R} .y-tabs{position:relative;display:grid;grid-template-columns:1fr 1fr;padding:4px;border:1px solid var(--y-line);border-radius:99px;background:rgba(255,255,255,.025)}
+    ${R} .y-tabs:before{position:absolute;top:3px;bottom:3px;left:3px;width:calc(50% - 3px);border:1px solid rgba(224,96,192,.45);border-radius:99px;background:linear-gradient(100deg,rgba(224,96,192,.32),rgba(128,96,224,.32));content:"";transition:transform .45s var(--y-ease)}
+    ${R} .y-tabs[data-mode="register"]:before{transform:translateX(100%)}
+    ${R} .y-tabs button{position:relative;min-height:30px;border-radius:99px;color:var(--y-fg3);font-size:12.5px;font-weight:650;transition:color .25s}
+    ${R} .y-tabs button[aria-selected="true"]{color:var(--y-fg)}
+    ${R} .y-tabs button:disabled:not([aria-selected="true"]){opacity:.5}
+    ${R} .yisama-auth-form{display:grid;gap:12px;margin:0}
+    ${R} .yisama-auth-form h2{margin:0;font-size:18px;font-weight:800;letter-spacing:-.02em}
+    ${R} .yisama-field{display:grid;gap:6px}
+    ${R} .yisama-field label{color:var(--y-fg2);font-size:11.5px;font-weight:550}
+    ${R} .yisama-auth-form input{width:100%;min-width:0;height:40px;padding:0 13px;border:1px solid var(--y-line2);border-radius:12px;background:rgba(7,7,11,.6);color:var(--y-fg);transition:border-color .2s,box-shadow .2s}
+    ${R} .yisama-auth-form input:hover:not(:disabled){border-color:rgba(255,255,255,.22)}
+    ${R} .yisama-auth-form input:focus{outline:none;border-color:var(--y-vio);box-shadow:0 0 0 3px rgba(128,96,224,.25)}
+    ${R} .yisama-auth-form input:disabled{opacity:.5}
+    ${R} .yisama-verification-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+    ${R} .yisama-verification-row .y-button{min-height:40px;padding:0 13px;font-size:12px}
+    ${R} .yisama-auth-form .y-button--wide{margin-top:4px}
+    @media (max-height:540px){${R} .y-balance{font-size:32px}${R} .y-meter{padding-bottom:12px}${R} .y-group{min-height:34px}}
+    @media (prefers-reduced-motion:reduce){${R} *,${R} *:before,${R} *:after{animation:none!important;transition:none!important}}
   `
-  root.appendChild(style)
+  root.append(style, defs)
 
   const badge = el('button', {
     type: 'button', className: 'yisama-badge', 'aria-label': '打开 yisama 无限助手', 'aria-expanded': 'false',
     'data-testid': 'assistant-badge',
   })
-  const badgeMark = el('span', { className: 'yisama-badge__mark', 'aria-hidden': 'true' }, '∞')
   const badgeText = el('span', { className: 'yisama-badge__text', 'data-testid': 'badge-balance' }, '登录')
   const badgeStale = el('span', { className: 'yisama-badge__stale', hidden: '', title: '余额可能已过期', 'aria-label': '余额可能已过期', 'data-testid': 'badge-stale' })
-  badge.append(badgeMark, badgeText, badgeStale)
+  badge.append(fillMark(brandMark('yisama-badge__mark')), badgeText, badgeStale)
 
   const panel = el('aside', {
     className: 'yisama-panel', role: 'dialog', 'aria-label': 'yisama 无限助手', 'aria-modal': 'false',
     hidden: '', 'data-testid': 'assistant-panel',
   })
-  const header = el('header', { className: 'yisama-header' })
-  const titleRow = el('div', { className: 'yisama-title-row' })
-  const brand = el('div', { className: 'yisama-brand' })
-  brand.append(
-    el('span', { className: 'yisama-brand__mark', 'aria-hidden': 'true' }, '∞'),
-    el('span', {}, null),
-  )
-  const brandText = brand.lastChild
-  brandText.append(el('strong', { text: 'yisama 无限助手' }), el('small', { text: '与 api.yisama.asia 共用账户' }))
-  const headerActions = el('div', { className: 'yisama-header-actions' })
+  const header = el('header', { className: 'y-head' })
+  const wordmark = el('div', { className: 'y-wordmark' })
+  wordmark.append(el('strong', {}, 'YisamaAPI'), el('small', {}, '无限助手'))
   const refreshButton = el('button', {
-    type: 'button', className: 'yisama-icon', title: '刷新账户状态', 'aria-label': '刷新账户状态',
-    'data-testid': 'refresh',
-  }, '↻')
+    type: 'button', className: 'y-icon', title: '刷新账户状态', 'aria-label': '刷新账户状态', 'data-testid': 'refresh',
+  })
+  refreshButton.append(svg('0 0 24 24', [{ d: 'M20 11a8 8 0 1 0-2.3 5.7' }, { d: 'M20 5v6h-6' }]))
   const closeButton = el('button', {
-    type: 'button', className: 'yisama-icon', title: '关闭', 'aria-label': '关闭', 'data-testid': 'close',
-  }, '×')
-  headerActions.append(refreshButton, closeButton)
-  titleRow.append(brand, headerActions)
-  const statusLine = el('div', { className: 'yisama-status', 'data-testid': 'status-line' }, '正在读取账户状态')
-  header.append(titleRow, statusLine)
+    type: 'button', className: 'y-icon', title: '关闭', 'aria-label': '关闭', 'data-testid': 'close',
+  })
+  closeButton.append(svg('0 0 24 24', [{ d: 'M6 6l12 12M18 6L6 18' }]))
+  header.append(fillMark(brandMark('y-head__mark')), wordmark, refreshButton, closeButton)
 
-  const content = el('main', { className: 'yisama-content' })
-  const balance = el('section', { className: 'yisama-balance' })
-  const balanceLabel = el('span', {}, '账户余额')
-  const balanceValue = el('strong', { 'data-testid': 'panel-balance' }, '—')
+  const content = el('div', { className: 'y-body' })
+  const balance = el('section', { className: 'y-meter', 'aria-label': '账户' })
+  const meterTop = el('div', { className: 'y-kicker' })
+  const account = el('strong', { 'data-testid': 'username', title: '账号' })
+  meterTop.append(el('span', {}, 'Balance · 余额'), account)
+  const meterValue = el('div', { className: 'y-meter__value' })
+  const balanceValue = el('strong', { className: 'y-balance', 'data-testid': 'panel-balance' }, '—')
   const balanceStale = el('small', { hidden: '', 'data-testid': 'stale-note' }, '余额可能已过期')
-  balance.append(balanceLabel, balanceValue, balanceStale)
-  const account = el('section', { className: 'yisama-account', hidden: '' })
-  account.append(el('span', {}, '账号'), el('strong', { 'data-testid': 'username' }))
-  const fields = el('section', { className: 'yisama-fields', hidden: '' })
-  const groupField = el('div', { className: 'yisama-field' })
-  const groupLabel = el('label', { for: 'yisama-assistant-group' }, '分组')
-  const groupSelect = el('select', { id: 'yisama-assistant-group', 'data-testid': 'group-select' })
-  groupField.append(groupLabel, groupSelect)
+  meterValue.append(balanceValue, balanceStale)
+  const statusLine = el('div', { className: 'y-status', role: 'status', 'data-testid': 'status-line' })
+  const statusPill = el('span', { className: 'y-pill', 'aria-hidden': 'true' }, 'LIVE')
+  const statusText_ = el('span', {}, '正在读取账户状态')
+  statusLine.append(statusPill, statusText_)
+  balance.append(meterTop, meterValue, statusLine)
+
+  const fields = el('section', { className: 'y-fields', hidden: '' })
+  const groupLabel = el('div', { className: 'y-section-label', id: 'yisama-assistant-group-label' })
+  const groupCount = el('span', { className: 'y-section-hint' }, '点选即切换')
+  groupLabel.append(el('span', {}, 'Routes · 线路分组'), groupCount)
+  const groupSearch = el('label', { className: 'y-search', hidden: '' })
+  const groupSearchInput = el('input', { type: 'search', placeholder: '搜索线路', 'aria-label': '搜索线路', 'data-testid': 'group-search', autocomplete: 'off', maxlength: 60 })
+  groupSearch.append(svg('0 0 24 24', [{ d: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4' }]), groupSearchInput)
+  const groupSelect = el('div', {
+    className: 'y-groups', role: 'radiogroup', 'aria-labelledby': 'yisama-assistant-group-label',
+    'data-testid': 'group-select', 'data-value': '', 'aria-disabled': 'false',
+  })
+  const groupRail = el('span', { className: 'y-rail', 'aria-hidden': 'true' })
+  const groupTrail = el('span', { className: 'y-trail', 'aria-hidden': 'true' })
+  const groupComet = el('span', { className: 'y-comet', 'aria-hidden': 'true', hidden: '' })
+  const groupTrack = el('div', { className: 'y-groups__track' })
+  const groupEmpty = el('div', { className: 'y-groups__empty', hidden: '' }, '没有匹配的线路')
+  groupTrack.append(groupRail, groupTrail, groupComet)
+  groupSelect.append(groupTrack, groupEmpty)
   const applyButton = el('button', {
-    type: 'button', className: 'yisama-button yisama-button--wide', 'data-testid': 'apply-selection',
+    type: 'button', className: 'y-button y-button--accent y-button--wide y-apply', 'data-testid': 'apply-selection',
   }, '使用此分组')
-  fields.append(groupField, applyButton)
-  const actions = el('section', { className: 'yisama-actions', hidden: '' })
-  const rechargeButton = el('button', { type: 'button', className: 'yisama-button', 'data-testid': 'recharge' }, '充值')
-  const restoreButton = el('button', { type: 'button', className: 'yisama-button yisama-button--danger', 'data-testid': 'restore' }, '退出并恢复')
+  const takeoverButton = el('button', {
+    type: 'button', className: 'y-button y-button--accent y-button--wide y-takeover', 'data-testid': 'takeover',
+  }, '接管 Codex（重启后生效）')
+  takeoverButton.append(svg('0 0 24 24', [{ d: 'M5 12h13M13 6l6 6-6 6' }]))
+  fields.append(groupLabel, groupSearch, groupSelect, applyButton, takeoverButton)
+
+  const notice = el('div', { className: 'y-notice', role: 'status', hidden: '', 'data-testid': 'message' })
+
+  const actions = el('section', { className: 'y-actions', hidden: '' })
+  const rechargeButton = el('button', { type: 'button', className: 'y-button y-button--primary y-button--wide', 'data-testid': 'recharge' }, '充值')
+  rechargeButton.append(svg('0 0 24 24', [{ d: 'M8 16L16 8M9 8h7v7' }]))
+  const restoreButton = el('button', { type: 'button', className: 'y-link', 'data-testid': 'restore' }, '退出并恢复原配置')
   actions.append(rechargeButton, restoreButton)
-  const confirmation = el('section', { className: 'yisama-confirm', hidden: '', 'data-testid': 'restore-confirmation' })
-  const confirmationText = el('p', {}, '退出账户并恢复之前的 Codex 配置？')
+  const confirmation = el('section', { className: 'y-confirm', hidden: '', 'data-testid': 'restore-confirmation' })
+  const confirmationText = el('p', {}, '退出账户，并把 Codex 配置恢复到使用助手之前的状态？恢复后需要重启 Codex 才会生效。')
   const confirmationActions = el('div')
-  const cancelRestore = el('button', { type: 'button', className: 'yisama-button yisama-button--plain', 'data-testid': 'cancel-restore' }, '取消')
-  const confirmRestore = el('button', { type: 'button', className: 'yisama-button yisama-button--danger', 'data-testid': 'confirm-restore' }, '恢复')
+  const cancelRestore = el('button', { type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'cancel-restore' }, '取消')
+  const confirmRestore = el('button', { type: 'button', className: 'y-button y-button--danger', 'data-testid': 'confirm-restore' }, '退出并恢复')
   confirmationActions.append(cancelRestore, confirmRestore)
   confirmation.append(confirmationText, confirmationActions)
-  const loggedOut = el('section', { className: 'yisama-logged-out', 'data-testid': 'logged-out' })
-  const loggedOutText = el('p', {}, '与官方中转站 https://api.yisama.asia 账号互通。')
-  const authTabs = el('div', { className: 'yisama-auth-tabs', role: 'tablist', 'aria-label': '账号', 'data-testid': 'auth-tabs' })
+
+  const loggedOut = el('section', { className: 'y-auth', 'data-testid': 'logged-out' })
+  const authIntro = el('div', { className: 'y-auth__intro' })
+  const authTitle = el('h2')
+  authTitle.append(document.createTextNode('一个账号，'), el('br'), el('span', { className: 'y-grad-text' }, '通往所有模型。'))
+  authIntro.append(authTitle, el('p', {}, '与 api.yisama.asia 账号互通'))
+  const authTabs = el('div', { className: 'y-tabs', role: 'tablist', 'aria-label': '账号', 'data-testid': 'auth-tabs', 'data-mode': 'login' })
   const loginTab = el('button', { type: 'button', role: 'tab', 'aria-selected': 'true', 'data-testid': 'login-tab' }, '登录')
   const registerTab = el('button', { type: 'button', role: 'tab', 'aria-selected': 'false', 'data-testid': 'register-tab' }, '注册')
   authTabs.append(loginTab, registerTab)
@@ -223,26 +366,25 @@ export function installAssistantUI(options = {}) {
     field.append(el('label', { for: id }, label), input)
     return { field, input }
   }
-  const usernameField = inputField('username', '账号', { type: 'text', autocomplete: 'username', maxlength: 200, required: '' })
+  const usernameField = inputField('username', '用户名或邮箱', { type: 'text', autocomplete: 'username', maxlength: 200, required: '' })
   const passwordField = inputField('password', '密码', { type: 'password', autocomplete: 'current-password', maxlength: 1024, required: '' })
   const confirmField = inputField('confirm-password', '确认密码', { type: 'password', autocomplete: 'new-password', maxlength: 20 })
   const emailField = inputField('email', '邮箱', { type: 'email', autocomplete: 'email', maxlength: 254 })
   const verificationField = inputField('verification-code', '邮箱验证码', { type: 'text', autocomplete: 'one-time-code', inputmode: 'numeric', maxlength: 6 })
   const verificationRow = el('div', { className: 'yisama-verification-row' })
-  const sendVerificationButton = el('button', { type: 'button', className: 'yisama-button yisama-button--plain', 'data-testid': 'send-verification' }, '发送验证码')
+  const sendVerificationButton = el('button', { type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'send-verification' }, '发送验证码')
   verificationRow.append(verificationField.input, sendVerificationButton)
   verificationField.field.append(verificationRow)
-  const loginButton = el('button', { type: 'submit', className: 'yisama-button yisama-button--wide', 'data-testid': 'login' }, '登录')
+  const loginButton = el('button', { type: 'submit', className: 'y-button y-button--accent y-button--wide', 'data-testid': 'login' }, '登录')
   authForm.append(usernameField.field, passwordField.field, confirmField.field, emailField.field, verificationField.field, loginButton)
   const twoFactorForm = el('form', { className: 'yisama-auth-form', hidden: '', 'data-testid': 'two-factor-form' })
   const twoFactorField = inputField('two-factor', '二次验证码或备用码', { type: 'text', autocomplete: 'one-time-code', maxlength: 100, required: '' })
-  const twoFactorButton = el('button', { type: 'submit', className: 'yisama-button yisama-button--wide', 'data-testid': 'verify-login' }, '验证并登录')
-  const backToLogin = el('button', { type: 'button', className: 'yisama-button yisama-button--plain', 'data-testid': 'back-to-login' }, '返回登录')
+  const twoFactorButton = el('button', { type: 'submit', className: 'y-button y-button--accent y-button--wide', 'data-testid': 'verify-login' }, '验证并登录')
+  const backToLogin = el('button', { type: 'button', className: 'y-button y-button--quiet y-button--wide', 'data-testid': 'back-to-login' }, '返回登录')
   twoFactorForm.append(el('h2', {}, '二次验证'), twoFactorField.field, twoFactorButton, backToLogin)
-  loggedOut.append(loggedOutText, authTabs, authForm, twoFactorForm)
-  content.append(balance, account, fields, actions, confirmation, loggedOut)
-  const footer = el('footer', { className: 'yisama-footer', 'data-testid': 'message' })
-  panel.append(header, content, footer)
+  loggedOut.append(authIntro, authTabs, authForm, twoFactorForm)
+  content.append(balance, fields, notice, confirmation, loggedOut, actions)
+  panel.append(header, content)
   root.append(badge, panel)
   document.documentElement.appendChild(root)
 
@@ -256,7 +398,8 @@ export function installAssistantUI(options = {}) {
     groups: selectValues(data?.groups, (group) => {
       const value = cleanText(group?.value, 200)
       const label = cleanText(group?.label, 200)
-      return value && label ? { value, label } : null
+      const ratio = typeof group?.ratio === 'number' && Number.isFinite(group.ratio) ? String(group.ratio) : cleanText(group?.ratio, 16)
+      return value && label ? { value, label, ratio } : null
     }),
     model: cleanText(data?.model, 200),
     models: selectValues(data?.models, (model) => cleanText(model, 200)),
@@ -264,72 +407,251 @@ export function installAssistantUI(options = {}) {
     restartRequired: data?.restartRequired === true,
     setupPending: data?.setupPending === true,
   })
-  const setOptions = (select, values, selected) => {
-    select.replaceChildren()
-    for (const item of values) {
-      const option = el('option', { value: item.value ?? item })
-      option.textContent = item.label ?? item
-      option.selected = (item.value ?? item) === selected
-      select.appendChild(option)
-    }
-  }
   const quotaLabel = () => state.quota || '—'
+  // One place per kind of information: the status line carries the steady state,
+  // the notice carries errors and fresh messages, and is hidden when it would repeat the status line.
   const statusText = () => {
-    if (state.error) return state.error
-    if (state.nativeSync === 'pending') return '正在同步 Codex 模型。'
-    if (state.nativeSync === 'syncing') return '正在同步 Codex 模型。'
-    if (state.nativeSync === 'account-change') return 'Codex 仍使用原账号，助手尚未接管；未中断当前对话。'
+    if (state.nativeSync === 'pending' || state.nativeSync === 'syncing') return '正在同步 Codex 模型'
+    if (state.nativeSync === 'account-change') return '主实例尚未接管，当前对话未被中断。'
     if (state.nativeSync === 'error') return '配置已保存，Codex 模型尚未同步。'
-    if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置。'
-    if (state.message) return state.message
+    if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置'
+    if (state.pendingGroup) return '正在切换线路'
+    if (state.staleQuota) return '余额暂未刷新'
     if (state.loggedIn && state.configured) return '已准备就绪'
-    if (state.loggedIn) return '账户已登录'
+    if (state.loggedIn) return '账户已登录，尚未准备配置'
     return '未登录'
+  }
+  const statusKind = () => {
+    if (state.staleQuota || ['error', 'account-change'].includes(state.nativeSync)) return 'warning'
+    if (state.setupPending || state.pendingGroup || ['pending', 'syncing'].includes(state.nativeSync)) return 'busy'
+    return state.loggedIn && state.configured ? 'normal' : 'off'
+  }
+  const statusPillText = { normal: 'LIVE', busy: 'SYNC', warning: 'WAIT', off: 'IDLE' }
+  const noticeText = () => {
+    if (state.error) return state.error
+    if (state.nativeSync === 'account-change') {
+      return '重启并接管后，可使用当前线路和模型支持的 Ultra、Fast（1.5x 计费）等能力。'
+    }
+    // Steady-state phrases belong to the status line only; a pending switch makes older messages stale.
+    if (!state.message || state.pendingGroup) return ''
+    const plain = (text) => text.replace(/[。.]$/, '')
+    return ['已准备就绪', '账户已登录', plain(statusText())].includes(plain(state.message)) ? '' : state.message
   }
   const hasActivePending = (action) => [...pending.values()].some((entry) => entry.action === action && !entry.timedOut)
   const hasForegroundPending = () => [...pending.values()].some((entry) => entry.action !== 'status' && !entry.timedOut)
+  const reducedMotion = () => safe(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches, false)
+  const EASE = 'cubic-bezier(.16,1,.3,1)'
+  let shownQuota = null
+  const setBalance = (text) => {
+    if (text === shownQuota) return
+    const animate = shownQuota !== null && shownQuota !== '—' && !panel.hidden && !reducedMotion()
+    shownQuota = text
+    balanceValue.title = text
+    balanceValue.dataset.long = String(text.length > 11)
+    balanceValue.textContent = text
+    // Animate the whole number: per-character layers would escape the gradient text clip.
+    if (animate) balanceValue.animate?.([
+      { transform: 'translateY(30%)', opacity: 0, filter: 'blur(5px)', backgroundPosition: '100% 0' },
+      { transform: 'none', opacity: 1, filter: 'blur(0)', backgroundPosition: '0 0', offset: .55 },
+      { backgroundPosition: '-100% 0' },
+    ], { duration: 900, easing: EASE })
+  }
+  let groupKey = ''
+  let shownGroup = ''
+  let cometY = null
+  const groupOptions = () => [...groupTrack.querySelectorAll('.y-group')]
+  const SEARCH_AFTER = 7
+  const updateEdges = () => {
+    const scrollable = groupSelect.scrollHeight > groupSelect.clientHeight + 1
+    const atTop = groupSelect.scrollTop <= 1
+    const atBottom = groupSelect.scrollTop + groupSelect.clientHeight >= groupSelect.scrollHeight - 1
+    groupSelect.dataset.edge = !scrollable ? '' : atTop ? 'top' : atBottom ? 'bottom' : 'middle'
+  }
+  const applyGroupFilter = () => {
+    const query = groupSearch.hidden ? '' : groupSearchInput.value.trim().toLowerCase()
+    let visible = 0
+    for (const option of groupOptions()) {
+      const match = !query || option.title.toLowerCase().includes(query) || option.dataset.value.toLowerCase().includes(query)
+      option.hidden = !match
+      if (match) visible += 1
+    }
+    groupEmpty.hidden = visible > 0
+    groupRail.hidden = visible < 2
+  }
+  const ratioText = (ratio) => {
+    if (!ratio) return ''
+    if (Number(ratio) === 0) return '免费'
+    return /^[\d.]+$/.test(ratio) ? `×${ratio}` : ratio
+  }
+  // A light travels along the route rail from the current stop to the chosen one.
+  const moveComet = (target, instant) => {
+    groupComet.hidden = false
+    const to = `translateY(${target}px)`
+    if (instant || cometY === null || reducedMotion()) {
+      groupComet.style.transform = to
+      cometY = target
+      return
+    }
+    const from = cometY
+    if (Math.abs(target - from) < 1) return
+    cometY = target
+    groupComet.style.transform = to
+    const distance = Math.abs(target - from)
+    const duration = Math.min(720, 360 + distance * 2)
+    groupComet.animate?.([
+      { transform: `translateY(${from}px) scale(1)` },
+      { transform: `translateY(${(from + target) / 2}px) scale(.8,1.5)`, offset: .5 },
+      { transform: `${to} scale(1)` },
+    ], { duration, easing: EASE })
+    groupTrail.style.top = `${Math.min(from, target)}px`
+    groupTrail.style.height = `${distance}px`
+    groupTrail.style.transformOrigin = target > from ? 'top' : 'bottom'
+    groupTrail.animate?.([
+      { opacity: 0, transform: 'scaleY(0)' },
+      { opacity: 1, transform: 'scaleY(1)', offset: .55 },
+      { opacity: 0, transform: 'scaleY(1)' },
+    ], { duration: duration + 260, easing: EASE })
+  }
+  const renderGroups = (selected, locked) => {
+    const key = JSON.stringify(state.groups)
+    if (key !== groupKey) {
+      groupKey = key
+      groupTrack.replaceChildren(groupRail, groupTrail, groupComet)
+      for (const group of state.groups) {
+        const option = el('button', {
+          type: 'button', role: 'radio', className: 'y-group', 'data-value': group.value, title: group.label,
+        })
+        const ratio = el('span', { className: 'y-group__ratio' }, ratioText(group.ratio))
+        ratio.dataset.cheap = String(group.ratio !== '' && Number(group.ratio) < 1)
+        option.append(
+          el('span', { className: 'y-group__node', 'aria-hidden': 'true' }),
+          el('span', { className: 'y-group__name' }, group.label),
+          ratio,
+          el('span', { className: 'y-group__tag' }),
+        )
+        groupTrack.appendChild(option)
+      }
+      cometY = null
+    }
+    const searchable = state.groups.length > SEARCH_AFTER
+    if (groupSearch.hidden === searchable) {
+      groupSearch.hidden = !searchable
+      if (!searchable) groupSearchInput.value = ''
+    }
+    groupCount.textContent = searchable ? `共 ${state.groups.length} 条 · 点选即切换` : '点选即切换'
+    applyGroupFilter()
+    groupSelect.dataset.value = selected || ''
+    groupSelect.setAttribute('aria-disabled', String(locked))
+    let active = null
+    const options = groupOptions()
+    for (const option of options) {
+      const value = option.dataset.value
+      const checked = value === selected
+      const syncing = ['pending', 'syncing'].includes(state.nativeSync)
+      const stateName = value === state.pendingGroup || (syncing && value === state.group) ? 'pending'
+        : value === state.group && state.configured && !['error', 'account-change'].includes(state.nativeSync) ? 'current' : ''
+      option.setAttribute('aria-checked', String(checked))
+      option.tabIndex = checked || (!selected && option === options[0]) ? 0 : -1
+      option.disabled = locked
+      option.dataset.state = stateName
+      option.lastChild.textContent = stateName === 'pending' ? '切换中' : stateName === 'current' ? '使用中' : ''
+      if (checked) active = option
+    }
+    groupComet.dataset.pending = String(Boolean(state.pendingGroup))
+    if (!active || active.hidden || panel.hidden) {
+      groupComet.hidden = true
+      cometY = null
+      if (panel.hidden) { shownGroup = ''; groupSearchInput.value = '' }
+      updateEdges()
+      return
+    }
+    if (!shownGroup) groupSelect.scrollTop = Math.max(0, active.offsetTop + active.offsetHeight / 2 - groupSelect.clientHeight / 2)
+    moveComet(active.offsetTop + active.offsetHeight / 2 - 6, !shownGroup || cometY === null)
+    updateEdges()
+    if (shownGroup && shownGroup !== selected && !state.pendingGroup) {
+      groupComet.dataset.landed = 'true'
+      window.setTimeout(() => { delete groupComet.dataset.landed }, 750)
+    }
+    if (!state.pendingGroup) shownGroup = selected
+  }
+  const flagFailedGroup = (value) => {
+    const option = groupOptions().find((node) => node.dataset.value === value)
+    if (!option) return
+    option.dataset.failed = 'true'
+    window.setTimeout(() => { delete option.dataset.failed }, 500)
+  }
+  const placePanel = () => {
+    if (panel.hidden) return
+    const margin = 8
+    const gap = 12
+    const anchor = badge.getBoundingClientRect()
+    const width = panel.offsetWidth
+    const above = anchor.top + anchor.height / 2 > window.innerHeight / 2
+    const room = above ? anchor.top - gap - margin : window.innerHeight - anchor.bottom - gap - margin
+    panel.style.maxHeight = `${Math.round(Math.max(Math.min(340, window.innerHeight - margin * 2), Math.min(room, window.innerHeight - margin * 2)))}px`
+    const height = panel.offsetHeight
+    const left = clamp(anchor.right - width, margin, Math.max(margin, window.innerWidth - width - margin))
+    const top = clamp(above ? anchor.top - gap - height : anchor.bottom + gap, margin,
+      Math.max(margin, window.innerHeight - height - margin))
+    panel.style.left = `${Math.round(left)}px`
+    panel.style.top = `${Math.round(top)}px`
+    panel.style.transformOrigin = `${Math.round(clamp(anchor.left + anchor.width / 2 - left, 0, width))}px ${above ? '100%' : '0'}`
+  }
   const render = () => {
     const quota = quotaLabel()
-    const badgeLabel = state.loggedIn ? `余额 ${quota}` : '登录'
+    const busy = hasForegroundPending()
+    const badgeLabel = state.loggedIn ? quota : '登录'
     badgeText.textContent = badgeLabel
-    badgeText.title = badgeLabel
+    badgeText.title = state.loggedIn ? `余额 ${quota}` : '登录'
     badgeStale.hidden = !(state.staleQuota && Boolean(state.quota))
     badge.dataset.stale = String(state.staleQuota && Boolean(state.quota))
+    badge.dataset.busy = String(busy || state.setupPending || ['pending', 'syncing'].includes(state.nativeSync))
     badge.setAttribute('aria-label', state.staleQuota && state.quota
-      ? `${badgeLabel}，余额可能已过期。打开 yisama 无限助手`
-      : `${badgeLabel}。打开 yisama 无限助手`)
+      ? `余额 ${badgeLabel}，余额可能已过期。打开 yisama 无限助手`
+      : `${state.loggedIn ? '余额 ' : ''}${badgeLabel}。打开 yisama 无限助手`)
     badge.setAttribute('aria-expanded', String(state.open))
+    const opening = state.open && panel.hidden
     panel.hidden = !state.open
-    balanceValue.textContent = quota
+    header.dataset.busy = String(busy || hasActivePending('status'))
+    if (opening) shownQuota = null
+    setBalance(quota)
     balance.hidden = !state.loggedIn
     balanceStale.hidden = !(state.staleQuota && Boolean(state.quota))
-    statusLine.textContent = statusText()
-    statusLine.dataset.kind = state.error || state.staleQuota ? 'warning' : 'normal'
-    footer.textContent = state.error || state.message || ''
-    footer.dataset.error = String(Boolean(state.error))
-    account.hidden = !state.loggedIn
+    const kind = statusKind()
+    statusText_.textContent = statusText()
+    statusPill.textContent = statusPillText[kind]
+    statusLine.dataset.kind = kind
+    const message = noticeText()
+    notice.textContent = message
+    notice.hidden = !message
+    notice.dataset.error = String(Boolean(state.error))
     fields.hidden = !state.loggedIn
     actions.hidden = !state.loggedIn
     loggedOut.hidden = state.loggedIn
     confirmation.hidden = confirmation.dataset.open !== 'true' || !state.loggedIn
+    restoreButton.hidden = !confirmation.hidden
     if (state.loggedIn) {
       const selectedGroup = state.pendingGroup || state.group
-      setOptions(groupSelect, state.groups, selectedGroup)
-      groupSelect.disabled = hasForegroundPending() || !state.groups.length
+      groupLabel.hidden = !state.groups.length
+      groupSelect.hidden = !state.groups.length
+      renderGroups(selectedGroup, busy || !state.groups.length)
+      const accountMismatch = state.nativeSync === 'account-change' && state.configured
       applyButton.hidden = state.configured
+      takeoverButton.hidden = !accountMismatch
       applyButton.textContent = state.groups.length ? '使用此分组' : '重试准备'
-      applyButton.disabled = hasForegroundPending() || Boolean(state.pendingGroup)
-        || (state.groups.length > 0 && !selectedGroup)
-      account.lastChild.textContent = state.username || '—'
-      rechargeButton.disabled = hasForegroundPending()
-      restoreButton.disabled = hasForegroundPending()
-      confirmRestore.disabled = hasForegroundPending()
+      applyButton.disabled = busy || Boolean(state.pendingGroup) || (state.groups.length > 0 && !selectedGroup)
+      takeoverButton.disabled = busy || Boolean(state.pendingGroup) || hasActivePending('reconfigure')
+      account.textContent = state.username || '—'
+      rechargeButton.disabled = busy
+      restoreButton.disabled = busy
+      confirmRestore.disabled = busy
     }
     refreshButton.disabled = hasActivePending('status')
     const registering = state.authMode === 'register'
-    const busy = hasForegroundPending()
     const secondStep = Boolean(state.loginId)
+    authIntro.hidden = secondStep
     authTabs.hidden = secondStep
+    authTabs.dataset.mode = state.authMode
     authForm.hidden = secondStep
     twoFactorForm.hidden = !secondStep
     loginTab.setAttribute('aria-selected', String(!registering))
@@ -358,6 +680,16 @@ export function installAssistantUI(options = {}) {
     const retryAfter = Math.max(0, Math.ceil((state.verificationRetryAt - Date.now()) / 1000))
     sendVerificationButton.disabled = busy || retryAfter > 0
     sendVerificationButton.textContent = hasActivePending('sendVerification') ? '正在发送…' : retryAfter ? `${retryAfter}s 后重发` : '发送验证码'
+    placePanel()
+    if (opening && !reducedMotion()) {
+      panel.animate?.([
+        { opacity: 0, transform: 'translateY(10px) scale(.92)', filter: 'blur(6px)' },
+        { opacity: 1, transform: 'none', filter: 'none' },
+      ], { duration: 420, easing: EASE })
+      ;[header, ...content.children].filter((node) => !node.hidden).forEach((node, index) => node.animate?.([
+        { opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' },
+      ], { duration: 520, delay: 60 + index * 45, easing: EASE, fill: 'backwards' }))
+    }
   }
   const applyData = (data, preserveDrafts = false) => {
     const next = publicState(data)
@@ -391,10 +723,13 @@ export function installAssistantUI(options = {}) {
     } else if (entry.action === 'sendVerification') {
       state.error = '验证码发送失败，请检查邮箱或稍后重试。'
     } else if (entry.action === 'select') {
+      flagFailedGroup(state.pendingGroup)
       state.pendingGroup = ''
       state.error = code === 'GROUP_NO_TEXT_MODEL'
         ? '此分组没有可自动选择的对话模型，原分组未改动。'
         : '切换未完成，原分组未改动，请重试。'
+    } else if (entry.action === 'reconfigure') {
+      state.error = '接管准备未完成，原配置未改动，请重试。'
     } else {
       state.error = '操作未完成，请稍后重试。'
     }
@@ -500,6 +835,7 @@ export function installAssistantUI(options = {}) {
     badgePosition.top = clamp(badgePosition.top, 8, Math.max(8, window.innerHeight - height - 8))
     badge.style.left = `${Math.round(badgePosition.left)}px`
     badge.style.top = `${Math.round(badgePosition.top)}px`
+    placePanel()
   }
   const saveBadgePosition = () => safe(() => window.localStorage.setItem(storageKey, JSON.stringify(badgePosition)))
 
@@ -586,13 +922,45 @@ export function installAssistantUI(options = {}) {
   addListener(loggedOut, 'keydown', (event) => {
     if (event.key !== 'Escape') event.stopPropagation()
   })
-  addListener(groupSelect, 'change', () => {
-    if (groupSelect.value && groupSelect.value !== state.group) request('select', { group: groupSelect.value })
+  const chooseGroup = (value) => {
+    if (!value || hasForegroundPending()) return
+    if (value !== state.group) request('select', { group: value })
+    else if (!state.configured) render()
+  }
+  addListener(groupSelect, 'click', (event) => {
+    const option = event.target.closest?.('.y-group')
+    if (option && !option.disabled) chooseGroup(option.dataset.value)
+  })
+  addListener(groupSelect, 'scroll', updateEdges, { passive: true })
+  addListener(groupSearchInput, 'input', () => render())
+  addListener(groupSearchInput, 'keydown', (event) => {
+    if (event.key === 'Escape' && groupSearchInput.value) {
+      event.stopPropagation()
+      groupSearchInput.value = ''
+      render()
+    } else if (event.key === 'ArrowDown' || event.key === 'Enter') {
+      event.preventDefault()
+      const first = groupOptions().find((option) => !option.hidden)
+      if (event.key === 'Enter' && first && groupOptions().filter((option) => !option.hidden).length === 1) first.click()
+      else first?.focus()
+    }
+  })
+  addListener(groupSelect, 'keydown', (event) => {
+    const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key]
+    if (!step) return
+    event.preventDefault()
+    const options = groupOptions().filter((option) => !option.hidden)
+    const index = options.indexOf(document.activeElement)
+    options[(index + step + options.length) % options.length]?.focus()
   })
   addListener(applyButton, 'click', () => {
     if (state.configured || state.pendingGroup) return
     if (!state.groups.length) request('login')
-    else if (groupSelect.value) request('select', { group: groupSelect.value })
+    else if (groupSelect.dataset.value) request('select', { group: groupSelect.dataset.value })
+  })
+  addListener(takeoverButton, 'click', () => {
+    if (state.nativeSync !== 'account-change' || !state.configured || hasForegroundPending()) return
+    request('reconfigure')
   })
   addListener(rechargeButton, 'click', () => request('recharge'))
   addListener(restoreButton, 'click', () => {
@@ -605,6 +973,11 @@ export function installAssistantUI(options = {}) {
     render()
   })
   addListener(confirmRestore, 'click', () => request('restore'))
+  addListener(document, 'pointerdown', (event) => {
+    // A popover dismisses on outside clicks, except while a login draft would be lost.
+    if (!state.open || !state.loggedIn || panel.contains(event.target) || badge.contains(event.target)) return
+    setOpen(false)
+  }, true)
   addListener(document, 'keydown', (event) => {
     if (event.key === 'Escape' && state.open) {
       event.preventDefault()
@@ -630,6 +1003,7 @@ export function installAssistantUI(options = {}) {
       if (disposed || !['pending', 'syncing', 'synced', 'error', 'account-change'].includes(status)) return
       if (state.nativeSync === status) return
       state.nativeSync = status
+      if (status === 'synced') state.restartRequired = false
       render()
     },
     receive(response) {
@@ -664,6 +1038,7 @@ export function installAssistantUI(options = {}) {
           state.message = '验证码已发送，请查看邮箱。'
         } else {
           applyData(data, entry.action === 'status')
+          if (data.configured && ['select', 'login'].includes(entry.action)) state.nativeSync = 'pending'
           startSetup = entry.action === 'login' && !entry.setup && state.loggedIn && state.setupPending
           if (startSetup) state.message = '登录成功，正在准备配置。'
         }

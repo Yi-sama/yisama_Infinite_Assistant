@@ -200,12 +200,44 @@ export async function restoreCodex(files, state) {
   }
 }
 
-export function makeModelCatalog(models, known = []) {
+// Match the relay's text-model Fast policy; group permission is checked separately.
+const FAST_MODEL = /^(gpt-(4o|4\.1)(-mini)?|gpt-5(\.[0-9]+)?(-mini|-codex|-codex-mini|-codex-max|-sol|-terra|-luna)?|gpt-6(\.[0-9]+)?(-sol|-astra|-luna)?|o3(-mini)?|o4-mini)(-[0-9]{4}-[0-9]{2}-[0-9]{2})?$/
+const VERIFIED_REASONING_MODELS = new Set([
+  'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
+  'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol',
+  'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-reserve',
+])
+const VERIFIED_REASONING_LEVELS = [
+  ['low', 'Fast responses with lighter reasoning'],
+  ['medium', 'Balances speed and reasoning depth for everyday tasks'],
+  ['high', 'Greater reasoning depth for complex problems'],
+  ['xhigh', 'Extra high reasoning depth for complex problems'],
+  ['max', 'Maximum reasoning depth'],
+  ['ultra', 'Maximum reasoning with extended context'],
+]
+
+function verifiedReasoningMetadata(slug, existing) {
+  if (!VERIFIED_REASONING_MODELS.has(slug)) return existing
+  const levels = new Map((existing?.supported_reasoning_levels || [])
+    .filter((level) => level && typeof level.effort === 'string')
+    .map((level) => [level.effort, level]))
+  for (const [effort, description] of VERIFIED_REASONING_LEVELS) {
+    if (!levels.has(effort)) levels.set(effort, { effort, description })
+  }
+  return {
+    ...existing,
+    default_reasoning_level: existing?.default_reasoning_level || 'medium',
+    supported_reasoning_levels: VERIFIED_REASONING_LEVELS.map(([effort]) => levels.get(effort)),
+  }
+}
+
+export function makeModelCatalog(models, known = [], { fast = false } = {}) {
   const metadata = new Map(known.map((model) => [model.slug, model]))
   return { models: models
     .filter((id) => !/(?:^|[-_.])(?:image|imagen|audio|tts|video|embedding|rerank)(?:$|[-_.])/i.test(id))
     .map((slug, index) => {
-      const existing = metadata.get(slug)
+      const existing = verifiedReasoningMetadata(slug, metadata.get(slug))
+      const supportsFast = fast && FAST_MODEL.test(slug)
       return {
         default_reasoning_level: 'none', supported_reasoning_levels: [],
         shell_type: 'shell_command', additional_speed_tiers: [], availability_nux: null, upgrade: null,
@@ -220,6 +252,11 @@ export function makeModelCatalog(models, known = []) {
         ...existing,
         slug, display_name: existing?.display_name || slug, description: existing?.description || slug,
         visibility: 'list', supported_in_api: true, priority: index,
+        service_tiers: supportsFast ? [
+          { id: 'priority', name: 'Fast', description: 'Priority processing, 1.5x usage' },
+        ] : [],
+        additional_speed_tiers: supportsFast ? ['fast'] : [],
+        default_service_tier: supportsFast ? 'priority' : null,
       }
     }) }
 }

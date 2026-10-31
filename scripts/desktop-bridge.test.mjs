@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import fs from 'node:fs/promises'
 import http from 'node:http'
@@ -9,7 +10,8 @@ import process from 'node:process'
 import readline from 'node:readline'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { parse } from 'smol-toml'
+import { promisify } from 'node:util'
+import { parse, stringify } from 'smol-toml'
 
 const bridgeScript = fileURLToPath(new URL('./desktop-bridge.mjs', import.meta.url))
 const apiKey = 'sk-bridge-test-key-that-must-never-reach-stdio'
@@ -101,10 +103,17 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
     }
     if (url.pathname === '/api/token/' && req.method === 'POST') {
       state.keys.push({ ...body, id: state.keys.length + 1, status: 1,
+        user_id: state.account.id,
         fast_mode_available: !state.fastUnavailableGroups.includes(body.group) })
       return reply({ success: true })
     }
     if (url.pathname === '/api/token/' && req.method === 'PUT') {
+      if (url.searchParams.get('fast_mode_only') === 'true') {
+        if (state.fastUpdateFailure) return reply({ success: false }, 503)
+        const key = state.keys.find((item) => item.id === body.id)
+        if (!state.ignoreFastUpdate) key.fast_mode = body.fast_mode
+        return reply({ success: true, data: { ...key } })
+      }
       Object.assign(state.keys.find((item) => item.id === body.id), body)
       return reply({ success: true })
     }
@@ -113,7 +122,7 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
     }
     if (/^\/api\/token\/\d+$/.test(url.pathname)) {
       const key = state.keys.find((item) => item.id === Number(url.pathname.split('/').at(-1)))
-      return reply({ success: true, data: { ...key, fast_mode: true,
+      return reply({ success: true, data: { ...key,
         fast_mode_available: !state.fastUnavailableGroups.includes(key.group) } })
     }
     return reply({ success: false }, 404)
@@ -202,7 +211,7 @@ test('desktop bridge projects only public state over serialized stdio requests',
   assert.equal(initial.data.loggedIn, true)
   assert.equal(initial.data.configured, false)
   assert.equal(initial.data.quota, '$12.50')
-  assert.deepEqual(initial.data.groups, [{ value: 'auto', label: 'All' }, { value: 'premium', label: 'premium' }])
+  assert.deepEqual(initial.data.groups, [{ value: 'auto', label: 'All' }, { value: 'premium', label: 'premium', ratio: 2 }])
   assert.deepEqual(initial.data.models, [])
 
   const login = await bridge.request({ id: 2, action: 'login' })
@@ -221,17 +230,22 @@ test('desktop bridge projects only public state over serialized stdio requests',
   assert.equal(config.model_reasoning_effort, 'ultra')
   assert.equal(state.keys[0].fast_mode, true)
 
+  const takeover = await bridge.request({ id: 3, action: 'reconfigure' })
+  assert.equal(takeover.ok, true)
+  assert.equal(takeover.data.restartRequired, true)
+  assert.match(takeover.data.message, /Ultra、Fast/)
+
   const externalConfig = (await fs.readFile(files.config, 'utf8')).replace(
     'model_provider = "yisama"', 'model_provider = "custom"',
   )
   await fs.writeFile(files.config, externalConfig, 'utf8')
-  const drifted = await bridge.request({ id: 3, action: 'status' })
+  const drifted = await bridge.request({ id: 4, action: 'status' })
   assert.equal(drifted.ok, true)
   assert.equal(drifted.data.configured, false)
   assert.deepEqual(drifted.data.models, [])
   assert.equal(await fs.readFile(files.config, 'utf8'), externalConfig)
 
-  const selected = await bridge.request({ id: 4, action: 'select', group: 'premium', model: 'gpt-5' })
+  const selected = await bridge.request({ id: 5, action: 'select', group: 'premium', model: 'gpt-5' })
   assert.equal(selected.ok, true)
   assert.equal(selected.data.group, 'premium')
   assert.equal(selected.data.model, 'gpt-5')
@@ -248,11 +262,11 @@ test('desktop bridge projects only public state over serialized stdio requests',
     error: '操作未完成，请检查网络或联系管理员；未输出账号敏感信息。',
   })
 
-  const badGroup = await bridge.request({ id: 5, action: 'select', group: 'missing' })
+  const badGroup = await bridge.request({ id: 6, action: 'select', group: 'missing' })
   assert.equal(badGroup.ok, false)
   assert.doesNotMatch(badGroup.error, /sk-|dashboard|Authorization|Bearer/i)
 
-  const restored = await bridge.request({ id: 6, action: 'restore' })
+  const restored = await bridge.request({ id: 7, action: 'restore' })
   assert.equal(restored.ok, true)
   assert.equal(restored.data.loggedIn, false)
   assert.equal(restored.data.configured, false)
@@ -260,7 +274,7 @@ test('desktop bridge projects only public state over serialized stdio requests',
   assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
   await assert.rejects(fs.readFile(files.session, 'utf8'), { code: 'ENOENT' })
   const callsBeforeOfflineStatus = state.calls.length
-  const offline = await bridge.request({ id: 7, action: 'status' })
+  const offline = await bridge.request({ id: 8, action: 'status' })
   assert.equal(offline.ok, true)
   assert.equal(offline.data.loggedIn, false)
   assert.equal(offline.data.configured, false)
@@ -269,7 +283,7 @@ test('desktop bridge projects only public state over serialized stdio requests',
   const closed = await bridge.close()
   assert.equal(closed.code, 0)
   assert.equal(closed.stderr, '')
-  const publicOutput = JSON.stringify([initial, login, drifted, selected, invalid, badGroup, restored, offline, closed])
+  const publicOutput = JSON.stringify([initial, login, takeover, drifted, selected, invalid, badGroup, restored, offline, closed])
   assert.doesNotMatch(publicOutput, /sk-bridge-test-key|dashboard-token|Authorization|Bearer/i)
 })
 
@@ -292,6 +306,101 @@ test('desktop login defaults to the first available group when All is unavailabl
   assert.equal(closed.stderr, '')
 })
 
+test('native Fast changes only the owned key flag and preserves capability after Standard is saved', async (t) => {
+  const { state, env, files } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  const before = await fs.readFile(files.config, 'utf8')
+  const keyBefore = structuredClone(state.keys[0])
+  const beforeFast = state.calls.length
+  const off = await bridge.request({ id: 2, action: 'fast', enabled: false, keyFingerprint: saved.keyFingerprint })
+  assert.deepEqual(off, { id: 2, ok: true, data: { enabled: false } })
+  assert.equal(state.calls.slice(beforeFast).filter((call) => call.path === '/api/user/self').length, 0,
+    'Fast uses the local session and verifies ownership through the assistant key')
+  assert.equal(state.calls.slice(beforeFast).filter((call) =>
+    call.path === `/api/token/${saved.keyId}` && call.method === 'GET').length, 1,
+  'Fast confirms ownership once and validates the update response instead of rereading the key')
+  assert.deepEqual(state.keys[0], { ...keyBefore, fast_mode: false })
+  assert.deepEqual(state.calls.filter((call) => call.method === 'PUT').at(-1).body,
+    { id: saved.keyId, fast_mode: false })
+  assert.equal(await fs.readFile(files.config, 'utf8'), before, 'the native setter owns local persistence')
+  await fs.writeFile(files.config, before.replace('service_tier = "fast"', 'service_tier = "standard"'), 'utf8')
+  assert.equal((await bridge.request({ id: 3, action: 'status' })).ok, true)
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, 'standard')
+  const catalog = JSON.parse(await fs.readFile(saved.catalogPath, 'utf8'))
+  assert.ok(catalog.models.every((model) => model.service_tiers.some((tier) => tier.id === 'priority')))
+  const on = await bridge.request({ id: 4, action: 'fast', enabled: true, keyFingerprint: saved.keyFingerprint })
+  assert.deepEqual(on, { id: 4, ok: true, data: { enabled: true } })
+  assert.deepEqual(state.keys[0], keyBefore)
+  assert.doesNotMatch(JSON.stringify([off, on]), new RegExp(apiKey))
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('native Fast cannot change foreign credentials or claim an unconfirmed server update', async (t) => {
+  const { state, env, files } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  const fingerprint = createHash('sha256').update('sk-foreign').digest('hex')
+  assert.equal((await bridge.request({ id: 2, action: 'fast', enabled: false, keyFingerprint: fingerprint })).ok, false)
+  assert.equal(state.keys[0].fast_mode, true)
+  assert.equal(state.calls.filter((call) => call.method === 'PUT').length, 0)
+  state.ignoreFastUpdate = true
+  assert.equal((await bridge.request({ id: 3, action: 'fast', enabled: false,
+    keyFingerprint: saved.keyFingerprint })).ok, false)
+  state.ignoreFastUpdate = false
+  state.fastUpdateFailure = true
+  assert.equal((await bridge.request({ id: 4, action: 'fast', enabled: false,
+    keyFingerprint: saved.keyFingerprint })).ok, false)
+  assert.equal(state.keys[0].fast_mode, true)
+  state.fastUpdateFailure = false
+  const before = await fs.readFile(files.config, 'utf8')
+  await fs.writeFile(files.config, before.replace('model_provider = "yisama"', 'model_provider = "other"'), 'utf8')
+  const writes = state.calls.filter((call) => call.method === 'PUT').length
+  assert.equal((await bridge.request({ id: 5, action: 'fast', enabled: false,
+    keyFingerprint: saved.keyFingerprint })).ok, false)
+  assert.equal(state.calls.filter((call) => call.method === 'PUT').length, writes)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('status refreshes Fast permission changes without switching groups, rewriting keys or escalating reasoning', async (t) => {
+  const { state, env, files } = await fixture(t)
+  state.fastUnavailableGroups = ['auto']
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const original = parse(await fs.readFile(files.config, 'utf8'))
+  const before = state.calls.length
+  const disabled = await bridge.request({ id: 2, action: 'status' })
+  assert.match(disabled.data.message, /未开放 Fast/)
+  state.fastUnavailableGroups = []
+  assert.equal((await bridge.request({ id: 3, action: 'status' })).ok, true)
+  let saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  let catalog = JSON.parse(await fs.readFile(saved.catalogPath, 'utf8'))
+  assert.equal(saved.fastAvailable, true)
+  assert.ok(catalog.models.every((model) => model.service_tiers.some((tier) => tier.id === 'priority')))
+  let config = parse(await fs.readFile(files.config, 'utf8'))
+  assert.equal(config.service_tier, 'fast')
+  assert.equal(config.model_reasoning_effort, original.model_reasoning_effort)
+  state.fastUnavailableGroups = ['auto']
+  assert.equal((await bridge.request({ id: 4, action: 'status' })).ok, true)
+  saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  catalog = JSON.parse(await fs.readFile(saved.catalogPath, 'utf8'))
+  assert.equal(saved.fastAvailable, false)
+  assert.ok(catalog.models.every((model) => model.service_tiers.length === 0))
+  config = parse(await fs.readFile(files.config, 'utf8'))
+  assert.equal(config.service_tier, undefined)
+  assert.equal(config.model_reasoning_effort, original.model_reasoning_effort)
+  assert.equal(saved.group, 'auto')
+  assert.ok(state.calls.slice(before).every((call) => call.method === 'GET'))
+  assert.equal(state.keys.length, 1)
+  assert.equal(state.keys[0].fast_mode, true)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
 test('rapid group changes keep one credential and reconcile the server on every switch', async (t) => {
   const { state, env, files } = await fixture(t)
   state.groupModels = { auto: ['gpt-5-codex'], premium: ['claude-opus-4-6'] }
@@ -305,6 +414,7 @@ test('rapid group changes keep one credential and reconcile the server on every 
     const selected = await bridge.request({ id: index + 2, action: 'select', group })
     assert.equal(selected.ok, true, selected.error)
     assert.equal(selected.data.group, group)
+    assert.equal(selected.data.restartRequired, true, 'saved settings stay pending until native verification')
     assert.equal(state.keys.length, 1)
     assert.equal(state.keys[0].group, group, 'a cached selection must not skip the server mutation')
     assert.equal(await fs.readFile(authFile, 'utf8'), auth)
@@ -313,6 +423,25 @@ test('rapid group changes keep one credential and reconcile the server on every 
       .map((model) => model.slug), state.groupModels[group])
     assert.equal(await fs.readFile(path.join(env.PLUGIN_DATA, 'backups/config.original.toml'), 'utf8'), original)
   }
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('group changes restore each group last selected model', async (t) => {
+  const { state, env, files } = await fixture(t)
+  state.groupModels = {
+    auto: ['gpt-5-codex', 'gpt-5'],
+    premium: ['claude-opus-4-6', 'claude-sonnet-4'],
+  }
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).data.model, 'gpt-5-codex')
+  assert.equal((await bridge.request({ id: 2, action: 'select', group: 'auto', model: 'gpt-5' })).data.model, 'gpt-5')
+  assert.equal((await bridge.request({ id: 3, action: 'select', group: 'premium' })).data.model, 'claude-opus-4-6')
+  const restored = await bridge.request({ id: 4, action: 'select', group: 'auto' })
+  assert.equal(restored.ok, true, restored.error)
+  assert.equal(restored.data.model, 'gpt-5')
+  const saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  assert.deepEqual(saved.modelByGroup, { auto: 'gpt-5', premium: 'claude-opus-4-6' })
   assert.equal((await bridge.close()).stderr, '')
 })
 
@@ -337,6 +466,9 @@ test('text groups without Fast switch and persist their own model catalog and or
     assert.deepEqual(selected.data.models, state.groupModels[group])
     assert.match(selected.data.message, /普通模式/)
     assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, undefined)
+    const catalog = JSON.parse(await fs.readFile(parse(await fs.readFile(files.config, 'utf8')).model_catalog_json, 'utf8'))
+    assert.ok(catalog.models.every((model) => model.service_tiers.length === 0 &&
+      model.default_service_tier === null), 'ordinary groups must not inherit Fast from previous metadata')
     assert.equal(JSON.parse(await fs.readFile(files.state, 'utf8')).group, group)
     const catalogPath = parse(await fs.readFile(files.config, 'utf8')).model_catalog_json
     assert.ok(catalogPath.startsWith(env.PLUGIN_DATA))
@@ -359,6 +491,72 @@ test('text groups without Fast switch and persist their own model catalog and or
   const fast = await bridge.request({ id: 7, action: 'select', group: 'auto' })
   assert.equal(fast.data.group, 'auto')
   assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, 'fast')
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('native acknowledgment clears restart state only for the verified configuration version', async (t) => {
+  const { env, files } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const config = parse(await fs.readFile(files.config, 'utf8'))
+  const catalog = JSON.parse(await fs.readFile(config.model_catalog_json, 'utf8'))
+  assert.ok(catalog.models.every((model) => model.default_service_tier === 'priority'))
+  const moduleUrl = new URL('./yisama.mjs', import.meta.url).href
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', `
+    import { desktopNativeConfiguration, desktopNativeSynced } from ${JSON.stringify(moduleUrl)};
+    const current = await desktopNativeConfiguration();
+    const rejected = await desktopNativeSynced('outdated-version');
+    const accepted = await desktopNativeSynced(current.version);
+    console.log(JSON.stringify({ rejected, accepted }));
+  `], { env, windowsHide: true, timeout: 10000 })
+  assert.deepEqual(JSON.parse(stdout), { rejected: false, accepted: true })
+  assert.equal(JSON.parse(await fs.readFile(files.state, 'utf8')).restartRequired, false)
+  assert.equal((await bridge.request({ id: 2, action: 'status' })).data.restartRequired, false)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('native synchronization ignores model preferences but still tracks Fast and group changes', async (t) => {
+  const { env, files } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const moduleUrl = new URL('./yisama.mjs', import.meta.url).href
+  const snapshot = async () => {
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', `
+      import { desktopNativeConfiguration } from ${JSON.stringify(moduleUrl)};
+      const settings = await desktopNativeConfiguration();
+      console.log(JSON.stringify({ version: settings.version, catalogVersion: settings.catalogVersion, model: settings.model,
+        fastEnabled: settings.fastEnabled }));
+    `], { env, windowsHide: true, timeout: 10000 })
+    return JSON.parse(stdout)
+  }
+  const initial = await snapshot()
+  const config = parse(await fs.readFile(files.config, 'utf8'))
+  config.service_tier = 'priority'
+  await fs.writeFile(files.config, stringify(config), 'utf8')
+  assert.equal((await snapshot()).version, initial.version,
+    'native priority and the legacy fast alias must not cause two synchronizations')
+  for (const preference of [{ model: 'gpt-5' }, { model_reasoning_effort: 'low' }]) {
+    Object.assign(config, preference)
+    await fs.writeFile(files.config, stringify(config), 'utf8')
+    const current = await snapshot()
+    assert.equal(current.version, initial.version, 'native preferences must not reload the catalog')
+    assert.equal(current.catalogVersion, initial.catalogVersion)
+    assert.equal(current.model, config.model, 'the current model is still available as the group fallback')
+  }
+  config.service_tier = 'default'
+  await fs.writeFile(files.config, stringify(config), 'utf8')
+  const standard = await snapshot()
+  assert.notEqual(standard.version, initial.version, 'Fast changes still synchronize thread settings')
+  assert.equal(typeof initial.catalogVersion, 'string')
+  assert.equal(standard.catalogVersion, initial.catalogVersion, 'Fast toggles do not change catalog capability')
+  assert.equal(standard.fastEnabled, false)
+  assert.equal((await bridge.request({ id: 2, action: 'select', group: 'premium' })).ok, true)
+  const grouped = await snapshot()
+  assert.equal(grouped.fastEnabled, initial.fastEnabled)
+  assert.notEqual(grouped.version, initial.version, 'group changes still refresh the catalog')
+  assert.notEqual(grouped.catalogVersion, initial.catalogVersion)
   assert.equal((await bridge.close()).stderr, '')
 })
 
