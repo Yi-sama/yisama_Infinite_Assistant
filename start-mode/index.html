@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>YisamaAPI · 简洁模式</title>
+<link rel="icon" href="/site/media/logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"></span>YisamaAPI</a>
+  <span class="pill">简洁模式</span>
+  <div class="top__right">
+    <a class="ghost market-link" href="/pricing">模型广场</a>
+    <button class="ghost" data-open="settings">设置</button>
+    <a class="ghost ghost--pro" href="/console" data-mode-switch="pro">专业模式 <span aria-hidden="true">→</span></a>
+  </div>
+</header>
+
+<!-- ============ 首页：一屏看完所有需要的东西 ============ -->
+<main class="hub" id="hub">
+
+  <!-- ===== 还没有 Key：先问两个问题 ===== -->
+  <section class="ask" id="ask" aria-labelledby="ask-title">
+    <p class="eyebrow">创建你的 API Key · 两个问题</p>
+    <h1 class="title" id="ask-title">你主要想用哪家的模型？</h1>
+    <div class="vendors js-vendors" role="radiogroup" aria-label="模型厂商"></div>
+
+    <div class="ask__q2" hidden>
+      <h2 class="ask__h2">打算用在哪儿？</h2>
+      <div class="uses js-uses" role="radiogroup" aria-label="使用场景"></div>
+    </div>
+
+    <div class="ask__go" hidden>
+      <p class="ask__sum js-ask-sum"></p>
+      <button class="btn btn--primary js-make-key">生成我的 API Key</button>
+      <p class="fine-print">之后可以在“设置”里随时换。不清楚就直接点，默认值适合大多数人。</p>
+    </div>
+  </section>
+
+  <!-- ===== 有 Key 之后：单列，像话费查询一样一眼看懂 ===== -->
+  <div class="ready" hidden>
+    <!-- 1. 一句话回答“我现在还好吗” -->
+    <section class="status" aria-label="连接状态">
+      <p class="status__badge js-badge"><span class="status__dot"></span><span class="js-badge-text">未接通</span></p>
+      <h1 class="status__title js-headline">还差一步</h1>
+      <p class="status__sub js-conn-state"></p>
+      <div class="conn">
+        <div class="conn__node conn__node--a"><i></i><span class="js-app-name">你的软件</span></div>
+        <div class="conn__wire w1"><span class="conn__live"></span><span class="conn__spark"></span></div>
+        <div class="conn__node conn__node--b"><i></i><span>YisamaAPI</span></div>
+        <div class="conn__wire w2"><span class="conn__live"></span><span class="conn__spark"></span></div>
+        <div class="conn__node conn__node--c"><i></i><span>大模型服务</span></div>
+      </div>
+    </section>
+
+    <!-- 2. 两个大数字：余额（话费） / 用了多少 Token（流量） -->
+    <section class="meters" aria-label="余额和用量">
+      <div class="meter meter--balance">
+        <div class="meter__head">
+          <h2>余额</h2>
+        </div>
+        <div class="balance-row">
+          <p class="balance"><span class="balance__cur">¥</span><span class="js-balance">0.00</span></p>
+          <button class="btn-sm btn-sm--lg" data-open="topup">充值</button>
+        </div>
+        <p class="meter__sub js-balance-hint"></p>
+        <p class="low js-low" hidden>余额不多了。用完后会直接报错停止，不会欠费。</p>
+      </div>
+      <div class="meter meter--usage">
+        <div class="meter__head">
+          <h2>已用 Token</h2>
+          <div class="usage__ranges js-usage-ranges" role="tablist" aria-label="Token 用量时间范围">
+            <button class="usage__range is-on" role="tab" aria-selected="true" data-usage-range="today">今天</button>
+            <button class="usage__range" role="tab" aria-selected="false" data-usage-range="3d">3天</button>
+            <button class="usage__range" role="tab" aria-selected="false" data-usage-range="7d">7天</button>
+            <button class="usage__range" role="tab" aria-selected="false" data-usage-range="month">30天</button>
+            <button class="usage__range" role="tab" aria-selected="false" data-usage-range="all">全部</button>
+          </div>
+        </div>
+        <p class="usage__amount"><b class="odo js-token-total">0</b><small><span class="js-token-unit"></span>Token</small></p>
+        <p class="meter__sub"><span class="js-token-feel"></span> <span class="q" tabindex="0" data-tip="按 1 Token ≈ 0.75 个汉字粗略换算。包括 AI 读你的文件、对话记录，以及它写出来的内容。">?</span></p>
+        <p class="usage__meta js-usage-meta"><span class="js-call-total">0</span> 次调用<span class="usage__meta-sep">·</span><span class="js-week-cost"></span></p>
+      </div>
+    </section>
+
+    <!-- 3–5. 次要内容放进同一个列表，用分隔线不用一堆卡片 -->
+    <div class="list">
+    <!-- 接入：没接通时是三步；接通后收成 Key 一行 -->
+    <section class="panel access" aria-labelledby="access-title">
+      <div class="panel__head">
+        <h2 id="access-title">接入信息</h2>
+        <span class="tag js-group-tag"></span>
+      </div>
+      <p class="step-h" data-n="1">复制 Key 和地址</p>
+      <dl class="creds">
+        <div class="cred cred--key">
+          <dt>API Key</dt>
+          <dd><code class="js-key" data-masked="1">正在创建…</code>
+            <button class="eye" aria-label="显示或隐藏 Key">显示</button>
+            <button class="copy" data-copy-key>复制</button></dd>
+        </div>
+        <div class="cred">
+          <dt>Base URL</dt>
+          <dd><code class="js-base">https://api.yisama.asia/v1</code><button class="copy" data-copy=".js-base">复制</button></dd>
+        </div>
+      </dl>
+
+      <div class="access__more">
+        <p class="step-h js-step2" data-n="2">填进 Codex</p>
+        <p class="step-tip js-step2-tip" hidden></p>
+        <details class="snippet js-snippet">
+          <summary><span class="js-snippet-title">Codex 配置片段</span> <code class="js-snippet-file">config.toml</code></summary>
+          <pre class="code"><code class="js-toml"></code></pre>
+          <div class="snippet__row">
+            <button class="copy" data-copy=".js-toml">复制配置</button>
+            <span class="muted js-snippet-note"></span>
+          </div>
+        </details>
+
+        <div class="help">
+          <span>不会填？看图文教程：</span>
+          <button class="chip" data-guide="cli">命令行版</button>
+          <button class="chip" data-guide="desktop">桌面版</button>
+        </div>
+        <div class="step3">
+          <p class="step-h js-step3" data-n="3">在 Codex 里发一句“你好”</p>
+          <p class="wait"><span class="wait__dot"></span>正在等你的第一句话。收到后，这一页会自动变成“一切正常”。</p>
+        </div>
+      </div>
+      <button class="access__toggle js-access-toggle" type="button" aria-expanded="true" hidden>查看 Base URL、配置和教程</button>
+    </section>
+
+    <!-- 4. 无限助手：一直推 -->
+    <a class="assist" href="#" data-assist>
+      <span class="assist__orb" aria-hidden="true">∞</span>
+      <span class="assist__text">
+        <b class="js-assist-title">配置太麻烦？试试无限助手</b>
+        <span class="assist__tags"><em>一键配置</em><em>本地 Codex 随意 1.5x</em><em>Ultra / Max 思考</em></span>
+      </span>
+      <span class="assist__cta">下载 <span aria-hidden="true">↓</span></span>
+    </a>
+
+    <!-- 5. 其余收起来：要的人点开 -->
+    <details class="fold reach-panel js-reach-fold">
+      <summary><b>换个模型，能用多少次</b><span class="fold__peek js-reach-peek"></span></summary>
+      <div class="fold__body">
+        <div class="scene js-scenes" role="radiogroup" aria-label="按什么内容估算"></div>
+        <p class="scene__desc js-scene-desc"></p>
+        <ol class="reach__list js-reach"></ol>
+        <button class="reach__more js-reach-more" hidden></button>
+        <p class="fine-print js-reach-foot"></p>
+      </div>
+    </details>
+    </div>
+
+    <!-- 6. 站内应用：一排小入口 -->
+    <section class="apps" aria-labelledby="apps-title">
+      <h2 id="apps-title">除了写代码，还能玩这些</h2>
+      <div class="apps__row">
+        <a class="app" href="/image-studio" style="--img:url(/site/media/s1-city.jpg)">
+          <span class="app__shade"></span>
+          <b>工作站</b><span>画图、改图</span>
+        </a>
+        <a class="app" href="/tavern" style="--img:url(/site/media/s3-tavern.jpg)">
+          <span class="app__shade"></span>
+          <b>酒馆</b><span>角色扮演</span>
+        </a>
+        <a class="app" href="/video-studio" style="--img:url(/site/media/s2-whale.jpg)">
+          <span class="app__shade"></span>
+          <b>视频创作</b><span>一句话出镜头</span>
+        </a>
+      </div>
+    </section>
+  </div>
+
+</main>
+
+<!-- ============ 教程（可选，从首页点进来） ============ -->
+<main class="guide" id="guide" hidden>
+  <button class="back" data-home><span aria-hidden="true">←</span> 返回首页</button>
+  <div class="flow">
+    <aside class="rail" aria-label="教程进度">
+      <svg class="rail__svg" viewBox="0 0 40 600" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <linearGradient id="g-live" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="600">
+            <stop offset="0" stop-color="#e060c0" />
+            <stop offset=".5" stop-color="#8060e0" />
+            <stop offset="1" stop-color="#20c0e0" />
+          </linearGradient>
+        </defs>
+        <line class="rail__base" x1="20" y1="0" x2="20" y2="600" />
+        <line class="rail__live" x1="20" y1="0" x2="20" y2="600" pathLength="1" />
+      </svg>
+      <span class="rail__spark" aria-hidden="true"></span>
+      <ol class="stations">
+        <li class="station"><i></i><span>安装与检查</span></li>
+        <li class="station"><i></i><span>填进 Codex</span></li>
+        <li class="station"><i></i><span>问它一句话</span></li>
+      </ol>
+      <div class="rail__end"><i></i><span class="js-model-inline">gpt-6-luna</span></div>
+    </aside>
+
+    <section class="stage" aria-live="polite">
+      <article class="step" data-step="0">
+        <p class="eyebrow">第 1 步 · 共 3 步</p>
+        <h1 class="title">先确认 Codex 已装好</h1>
+        <div class="choices">
+          <button class="choice" data-pick="cli" aria-pressed="true">
+            <div class="choice__art choice__art--cli" aria-hidden="true">
+              <span class="term-dots"><i></i><i></i><i></i></span>
+              <code><b>PS&gt;</b> <span class="typed" data-text="codex"></span><span class="caret"></span></code>
+            </div>
+            <strong>命令行 CLI</strong>
+            <span>在 PowerShell 里输入 <code>codex</code> 使用</span>
+          </button>
+          <button class="choice" data-pick="desktop" aria-pressed="false">
+            <div class="choice__art choice__art--app" aria-hidden="true">
+              <span class="win-bar"><i></i><i></i><i></i></span>
+              <span class="win-side"></span>
+              <span class="win-bubble b1"></span><span class="win-bubble b2"></span><span class="win-bubble b3"></span>
+            </div>
+            <strong>桌面版 Desktop</strong>
+            <span>像普通软件一样，有窗口、能点按钮</span>
+          </button>
+        </div>
+        <p class="hint">不确定？如果你是双击图标打开的，就是桌面版。</p>
+        <div data-install="cli">
+          <ol class="howto">
+            <li>按 <kbd>Win</kbd> 键，输入 <b>PowerShell</b>，回车打开，运行：
+              <div class="cmd"><code class="js-version">codex --version</code><button class="copy" data-copy=".js-version">复制</button></div>
+            </li>
+            <li>如果提示“无法识别 codex”，先按 <a href="https://developers.openai.com/codex/cli/" target="_blank" rel="noopener noreferrer">官方 Windows CLI 安装说明</a>完成安装，再重新打开 PowerShell，运行同一条命令。</li>
+            <li>看到 <code>codex-cli</code> 和版本号后再继续。本站不会自动检测你电脑上的安装状态。</li>
+          </ol>
+        </div>
+        <div data-install="desktop" hidden>
+          <ol class="howto">
+            <li>还没安装？从 <a href="https://developers.openai.com/codex/app/windows" target="_blank" rel="noopener noreferrer">Codex 官方 Windows 页面</a>下载桌面版并完成安装。</li>
+            <li>从开始菜单打开 <b>Codex</b>，确认软件窗口能正常启动。已经能打开就不用重复安装。</li>
+            <li>安装或启动报错时，先按官方页面排查，再回来配置本站接入。本站不会自动检测你电脑上的安装状态。</li>
+          </ol>
+        </div>
+        <div class="actions">
+          <button class="btn btn--primary js-install-next" data-next>我已看到 Codex 版本号，继续</button>
+        </div>
+      </article>
+
+      <article class="step" data-step="1" hidden>
+        <p class="eyebrow">第 2 步 · 共 3 步</p>
+        <h1 class="title js-cfg-title">把它填进 Codex</h1>
+        <div>
+          <ol class="howto">
+            <li>打开 <code>%USERPROFILE%\.codex\config.toml</code>。如果设置过 <code>CODEX_HOME</code>，请打开该目录里的 <code>config.toml</code>。已有文件先复制一份备份，<b>不要直接把整段配置追加到末尾</b>。
+              <details class="fine">
+                <summary>没有旧文件：新建配置</summary>
+                <p>新建 <code>.codex</code> 文件夹和 <code>config.toml</code> 文件，将下面完整内容保存进去。文件名不要带 <code>.txt</code> 后缀。</p>
+                <pre class="code"><code class="js-toml"></code></pre>
+                <button class="copy copy--block" data-copy=".js-toml">复制新文件配置</button>
+              </details>
+              <details class="fine">
+                <summary>已有配置：只合并需要的字段</summary>
+                <ol class="howto">
+                  <li>在文件顶部、第一个 <code>[表名]</code> 之前，找到并替换根级的 <code>model_provider</code> 和 <code>model</code>；缺少的才新增。每个字段只保留一份，不要放进其他表内。
+                    <pre class="code"><code class="js-root-toml"></code></pre>
+                    <button class="copy copy--block" data-copy=".js-root-toml">复制根级字段</button>
+                  </li>
+                  <li>如果已有 <code>[model_providers.yisama]</code>，在原位置更新下面四个字段，每个只保留一份；其他字段保留。没有这个表才在文件末尾新增整段，不要重复创建同名表，也不要删除其他配置。
+                    <pre class="code"><code class="js-provider-toml"></code></pre>
+                    <button class="copy copy--block" data-copy=".js-provider-toml">复制服务商配置</button>
+                  </li>
+                </ol>
+                <p>如果使用了 <code>[profiles.名称]</code>，检查启动时选中的 profile；它里面的 <code>model</code>、<code>model_provider</code> 也需要同步修改，否则可能覆盖根级设置。</p>
+              </details>
+            </li>
+            <li>在 PowerShell 里运行这一行，保存 API Key：
+              <div class="cmd"><code class="js-setx"></code><button class="copy" data-copy=".js-setx">复制</button></div>
+            </li>
+            <li>关掉 PowerShell 再重新打开，设置才会生效。</li>
+          </ol>
+        </div>
+        <div class="desk-note js-desk-note" hidden>
+          <b>桌面版额外一步：</b>右键任务栏里的 Codex 图标 → <b>退出</b>，再重新打开。只关窗口不够。
+        </div>
+        <div class="actions">
+          <button class="btn btn--primary" data-next>我做完了</button>
+          <button class="link" data-back>上一步</button>
+        </div>
+      </article>
+
+      <article class="step" data-step="2" hidden>
+        <p class="eyebrow">最后一步</p>
+        <h1 class="title js-ask-title">打开 Codex，随便问它一句话</h1>
+        <p class="lead">比如“你好，你是谁？”。收到了这边会告诉你。</p>
+        <div class="listen">
+          <div class="sonar" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
+          <div><strong class="js-listen-state">正在等你的第一句话…</strong><span>一般几秒钟就能收到</span></div>
+        </div>
+        <details class="fine">
+          <summary>等了很久没反应？</summary>
+          <ul>
+            <li><b>提示 401 / 无效的 Key</b>：检查 Key 是否完整，回上一步重新运行保存 Key 的命令，然后<em>重新打开</em> PowerShell 或 Codex。</li>
+            <li><b>提示模型不存在</b>：确认配置里的模型是 <code class="js-model-inline">gpt-6-luna</code>。</li>
+            <li><b>还在用以前的账号</b>：确认配置里有 <code>model_provider = "yisama"</code> 这一行。</li>
+            <li>都不行？<a href="/site/media/qq.png" target="_blank">加 QQ 群</a>，截图发过来。</li>
+          </ul>
+        </details>
+        <div class="actions"><button class="link" data-back>回上一步看看</button></div>
+      </article>
+
+      <article class="step step--done" data-step="3" hidden>
+        <h1 class="done-title"><span>通</span><span>了</span><span>。</span></h1>
+        <p class="lead">收到了你的第一句话，用时 <b class="js-latency">1.2s</b>。以后直接打开 Codex 用就行。</p>
+        <button class="btn btn--primary" data-home>回到首页</button>
+      </article>
+    </section>
+  </div>
+</main>
+
+<!-- ============ 首次选择 ============ -->
+<dialog class="gate" id="gate" aria-labelledby="gate-title">
+  <h2 id="gate-title">欢迎来到 YisamaAPI，<br />你想用哪种界面？</h2>
+  <div class="doors">
+    <button class="door door--guide" data-mode="simple">
+      <span class="door__glyph" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M8 52 C 24 52, 20 12, 56 12" /><circle cx="56" cy="12" r="4" /></svg></span>
+      <strong>简洁模式</strong>
+      <span>一页看完 Key、余额和用量，需要时有教程</span>
+      <em>适合大多数人 →</em>
+    </button>
+    <button class="door door--pro" data-mode="pro">
+      <span class="door__glyph" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M10 18h44M10 32h30M10 46h38" /></svg></span>
+      <strong>专业模式</strong>
+      <span>多个 Key、分组、模型列表、详细日志</span>
+      <em>进入完整控制台 →</em>
+    </button>
+  </div>
+  <p class="gate__foot">不确定就选简洁模式。以后随时可以在右上角切换。</p>
+</dialog>
+
+<!-- ============ 充值 ============ -->
+<dialog class="sheet" id="topup" aria-labelledby="topup-title">
+  <form method="dialog" class="sheet__close"><button aria-label="关闭">×</button></form>
+  <h2 id="topup-title" tabindex="-1" autofocus>充值</h2>
+  <p class="muted">¥1 = 1 元额度，按实际使用扣费。</p>
+  <div class="amounts js-amounts"></div>
+  <label class="custom"><span class="custom__cur">¥</span><input class="js-custom" type="number" min="1" step="1" inputmode="numeric" placeholder="其他金额，最少 1" aria-label="其他金额" /></label>
+  <button class="btn btn--primary btn--wide js-pay"><span class="alipay" aria-hidden="true">支</span><span>用支付宝支付 ¥<span class="js-pay-amt">30</span></span></button>
+  <p class="fine-print">余额用完后 Codex 会直接报错停止，不会欠费，也不会自动扣款。“约 N 句”是按平均用量估算的，长对话会花得更多。</p>
+  <details class="redeem">
+    <summary>有兑换码？</summary>
+    <div class="redeem__row"><input class="js-code" placeholder="粘贴兑换码" /><button class="btn js-redeem">兑换</button></div>
+  </details>
+  <div class="paid" hidden><span class="paid__check"></span><b>已到账 ¥<span class="js-paid">30</span></b></div>
+</dialog>
+
+<!-- ============ 设置 ============ -->
+<dialog class="drawer" id="settings" aria-labelledby="settings-title">
+  <form method="dialog" class="sheet__close"><button aria-label="关闭">×</button></form>
+  <h2 id="settings-title">设置</h2>
+  <fieldset>
+    <legend>厂商</legend>
+    <div class="vendors vendors--sm js-set-vendors" role="radiogroup" aria-label="模型厂商"></div>
+  </fieldset>
+  <fieldset>
+    <legend>模型</legend>
+    <div class="js-set-models"></div>
+  </fieldset>
+  <fieldset>
+    <legend>线路</legend>
+    <div class="js-set-groups"></div>
+  </fieldset>
+  <p class="fine-print">换厂商或线路会用同一个 Key 改分组，不用重新复制 Key；换模型后，记得在软件里也改一下模型名。</p>
+</dialog>
+
+<div class="toast" role="status" aria-live="polite"></div>
+
+<nav class="demo" hidden aria-label="原型控制">
+  <b>原型</b>
+  <button data-demo="gate">新用户弹窗</button>
+  <button data-demo="reset">重来（新用户）</button>
+  <button data-demo="ping">模拟第一次调用</button>
+  <button data-demo="low">余额低</button>
+</nav>
+
+<script src="app.js"></script>
+</body>
+</html>
