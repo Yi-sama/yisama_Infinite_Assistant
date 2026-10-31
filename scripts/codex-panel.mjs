@@ -38,7 +38,7 @@ export function installAssistantUI(options = {}) {
     loginId: '',
     verificationRetryAt: 0,
     nativeSync: '',
-    rechargeOpen: false,
+    view: 'main',
     rechargeInfo: null,
     rechargeAmount: '',
     rechargePaymentMethod: '',
@@ -150,6 +150,7 @@ export function installAssistantUI(options = {}) {
     ${R} .yisama-badge__stale{width:6px;height:6px;flex:0 0 auto;border-radius:50%;background:var(--y-amber);box-shadow:0 0 8px var(--y-amber)}
 
     ${R} .yisama-panel{position:fixed;display:flex;width:min(320px,calc(100vw - 16px));flex-direction:column;border:1px solid var(--y-line2);border-radius:22px;background:radial-gradient(120% 60% at 85% -10%,rgba(128,96,224,.28),transparent 60%),radial-gradient(90% 50% at 0% 0%,rgba(224,96,192,.16),transparent 55%),var(--y-bg2);box-shadow:0 40px 80px -24px rgba(0,0,0,.8),0 30px 60px -30px rgba(224,96,192,.35),inset 0 1px 0 rgba(255,255,255,.06);pointer-events:auto;overflow:hidden;isolation:isolate;-webkit-app-region:no-drag}
+    ${R} .yisama-panel[data-view="wallet"]{width:min(430px,calc(100vw - 16px))}
     ${R} .yisama-panel:before{position:absolute;inset:0;z-index:-1;background-image:${GRAIN};opacity:.07;mix-blend-mode:overlay;pointer-events:none;content:""}
     ${R} .yisama-panel:after{position:absolute;top:0;left:22px;right:22px;height:1px;background:var(--y-grad);opacity:.85;box-shadow:0 0 18px 1px rgba(224,96,192,.6);content:""}
     ${R} .y-head{display:flex;align-items:center;gap:9px;height:52px;padding:0 10px 0 16px;flex:0 0 auto}
@@ -164,6 +165,17 @@ export function installAssistantUI(options = {}) {
     ${R} .y-icon[data-testid="refresh"]:active:not(:disabled){transform:rotate(-120deg)}
     ${R} .y-icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
     ${R} .y-body{min-height:0;flex:1 1 auto;overflow:auto;padding:4px 16px 16px;scrollbar-width:thin;scrollbar-color:var(--y-line2) transparent}
+    ${R} .y-view[hidden]{display:none}
+    ${R} .y-wallet{display:grid;gap:18px;padding:8px 0 4px}
+    ${R} .y-wallet__head{display:flex;align-items:flex-start;gap:10px}
+    ${R} .y-wallet__back{flex:0 0 auto;margin-top:-3px}
+    ${R} .y-wallet__title{min-width:0}
+    ${R} .y-wallet__title h2{margin:0;font-size:24px;line-height:1.1;letter-spacing:-.02em}
+    ${R} .y-wallet__title p{margin:6px 0 0;color:var(--y-fg3);font-size:11px;line-height:1.5}
+    ${R} .y-wallet__balance{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:16px;border:1px solid var(--y-line);border-radius:16px;background:rgba(255,255,255,.035)}
+    ${R} .y-wallet__balance-label{color:var(--y-fg3);font:500 10px/1.4 var(--y-mono);letter-spacing:.1em;text-transform:uppercase}
+    ${R} .y-wallet__balance strong{display:block;margin-top:5px;color:var(--y-fg);font:750 22px/1 var(--y-sans);font-variant-numeric:tabular-nums}
+    ${R} .y-wallet__account{max-width:150px;overflow:hidden;color:var(--y-fg3);font:500 11px/1.4 var(--y-mono);text-overflow:ellipsis;white-space:nowrap}
 
     ${R} .y-meter{padding:4px 2px 18px}
     ${R} .y-kicker{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--y-fg3);font:500 10px/1.4 var(--y-mono);letter-spacing:.1em;text-transform:uppercase}
@@ -240,7 +252,7 @@ export function installAssistantUI(options = {}) {
     ${R} .y-apply{margin-top:12px}
     ${R} .y-takeover{margin-top:12px}
     ${R} .y-actions{display:grid;gap:6px;margin-top:16px}
-    ${R} .y-recharge{display:grid;gap:10px;margin-top:4px;padding:12px;border:1px solid var(--y-line);border-radius:14px;background:rgba(255,255,255,.025)}
+    ${R} .y-recharge{display:grid;gap:10px;padding:16px;border:1px solid var(--y-line);border-radius:16px;background:rgba(255,255,255,.025)}
     ${R} .y-recharge__title{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;font-weight:700}
     ${R} .y-recharge__hint{color:var(--y-fg3);font:500 10px/1.4 var(--y-mono)}
     ${R} .y-recharge__presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
@@ -382,7 +394,7 @@ export function installAssistantUI(options = {}) {
   rechargePanel.append(rechargeTitle, rechargePresets, rechargeAmountInput, rechargeMethodSelect,
     rechargeEstimate, rechargeSubmit, rechargePayment)
   const restoreButton = el('button', { type: 'button', className: 'y-link', 'data-testid': 'restore' }, '退出并恢复原配置')
-  actions.append(rechargeButton, rechargePanel, restoreButton)
+  actions.append(rechargeButton, restoreButton)
   const confirmation = el('section', { className: 'y-confirm', hidden: '', 'data-testid': 'restore-confirmation' })
   const confirmationText = el('p', {}, '退出账户，并把 Codex 配置恢复到使用助手之前的状态？恢复后需要重启 Codex 才会生效。')
   const confirmationActions = el('div')
@@ -425,7 +437,26 @@ export function installAssistantUI(options = {}) {
   const backToLogin = el('button', { type: 'button', className: 'y-button y-button--quiet y-button--wide', 'data-testid': 'back-to-login' }, '返回登录')
   twoFactorForm.append(el('h2', {}, '二次验证'), twoFactorField.field, twoFactorButton, backToLogin)
   loggedOut.append(authIntro, authTabs, authForm, twoFactorForm)
-  content.append(balance, fields, notice, confirmation, loggedOut, actions)
+  const mainView = el('section', { className: 'y-view', 'data-testid': 'main-view' })
+  mainView.append(balance, fields, notice, confirmation, loggedOut, actions)
+  const walletView = el('section', { className: 'y-view y-wallet', hidden: '', 'data-testid': 'wallet-page' })
+  const walletHead = el('div', { className: 'y-wallet__head' })
+  const walletBackButton = el('button', {
+    type: 'button', className: 'y-icon y-wallet__back', title: '返回助手', 'aria-label': '返回助手', 'data-testid': 'wallet-back',
+  })
+  walletBackButton.append(svg('0 0 24 24', [{ d: 'M19 12H5M11 6l-6 6 6 6' }]))
+  const walletTitle = el('div', { className: 'y-wallet__title' })
+  walletTitle.append(el('h2', {}, '钱包'), el('p', {}, '在本地选择金额并创建充值订单'))
+  walletHead.append(walletBackButton, walletTitle)
+  const walletBalance = el('div', { className: 'y-wallet__balance' })
+  const walletBalanceDetails = el('div')
+  walletBalanceDetails.append(el('div', { className: 'y-wallet__balance-label' }, 'Current balance'))
+  const walletBalanceValue = el('strong', { 'data-testid': 'wallet-balance' }, '—')
+  walletBalanceDetails.append(walletBalanceValue)
+  const walletAccount = el('span', { className: 'y-wallet__account', 'data-testid': 'wallet-account' })
+  walletBalance.append(walletBalanceDetails, walletAccount)
+  walletView.append(walletHead, walletBalance, rechargePanel)
+  content.append(mainView, walletView)
   panel.append(header, content)
   root.append(badge, panel)
   document.documentElement.appendChild(root)
@@ -629,7 +660,7 @@ export function installAssistantUI(options = {}) {
   const rechargeMethod = () => state.rechargePaymentMethod || state.rechargeInfo?.paymentMethods?.[0]?.type || ''
   const renderRecharge = (locked) => {
     const info = state.rechargeInfo
-    rechargePanel.hidden = !state.rechargeOpen
+    rechargePanel.hidden = state.view !== 'wallet'
     if (!info) {
       rechargePresets.replaceChildren()
       rechargeMethodSelect.replaceChildren()
@@ -676,7 +707,8 @@ export function installAssistantUI(options = {}) {
     const width = panel.offsetWidth
     const above = anchor.top + anchor.height / 2 > window.innerHeight / 2
     const room = above ? anchor.top - gap - margin : window.innerHeight - anchor.bottom - gap - margin
-    panel.style.maxHeight = `${Math.round(Math.max(Math.min(340, window.innerHeight - margin * 2), Math.min(room, window.innerHeight - margin * 2)))}px`
+    const preferredHeight = state.view === 'wallet' ? 620 : 340
+    panel.style.maxHeight = `${Math.round(Math.max(Math.min(preferredHeight, window.innerHeight - margin * 2), Math.min(room, window.innerHeight - margin * 2)))}px`
     const height = panel.offsetHeight
     const left = clamp(anchor.right - width, margin, Math.max(margin, window.innerWidth - width - margin))
     const top = clamp(above ? anchor.top - gap - height : anchor.bottom + gap, margin,
@@ -688,6 +720,7 @@ export function installAssistantUI(options = {}) {
   const render = () => {
     const quota = quotaLabel()
     const busy = hasForegroundPending()
+    const walletOpen = state.view === 'wallet'
     const badgeLabel = state.loggedIn ? quota : '登录'
     badgeText.textContent = badgeLabel
     badgeText.title = state.loggedIn ? `余额 ${quota}` : '登录'
@@ -700,10 +733,13 @@ export function installAssistantUI(options = {}) {
     badge.setAttribute('aria-expanded', String(state.open))
     const opening = state.open && panel.hidden
     panel.hidden = !state.open
+    panel.dataset.view = state.view
     header.dataset.busy = String(busy || hasActivePending('status'))
     if (opening) shownQuota = null
     setBalance(quota)
     balance.hidden = !state.loggedIn
+    walletBalanceValue.textContent = quota
+    walletAccount.textContent = state.username || '—'
     balanceStale.hidden = !(state.staleQuota && Boolean(state.quota))
     const kind = statusKind()
     statusText_.textContent = statusText()
@@ -716,9 +752,11 @@ export function installAssistantUI(options = {}) {
     fields.hidden = !state.loggedIn
     actions.hidden = !state.loggedIn
     loggedOut.hidden = state.loggedIn
+    mainView.hidden = walletOpen
+    walletView.hidden = !walletOpen || !state.loggedIn
     confirmation.hidden = confirmation.dataset.open !== 'true' || !state.loggedIn
     restoreButton.hidden = !confirmation.hidden
-    rechargePanel.hidden = !state.loggedIn || !state.rechargeOpen
+    rechargePanel.hidden = !walletOpen || !state.loggedIn
     if (state.loggedIn) {
       const selectedGroup = state.pendingGroup || state.group
       groupLabel.hidden = !state.groups.length
@@ -732,7 +770,6 @@ export function installAssistantUI(options = {}) {
       takeoverButton.disabled = busy || Boolean(state.pendingGroup) || hasActivePending('reconfigure')
       account.textContent = state.username || '—'
       rechargeButton.disabled = busy && !hasActivePending('rechargeInfo')
-      rechargeButton.textContent = state.rechargeOpen ? '收起充值' : '充值'
       renderRecharge(busy)
       restoreButton.disabled = busy
       confirmRestore.disabled = busy
@@ -786,7 +823,10 @@ export function installAssistantUI(options = {}) {
     const next = publicState(data)
     const drafts = { pendingGroup: preserveDrafts ? state.pendingGroup : '' }
     Object.assign(state, next, drafts, { staleQuota: false, error: '' })
-    if (!state.loggedIn) confirmation.dataset.open = 'false'
+    if (!state.loggedIn) {
+      confirmation.dataset.open = 'false'
+      state.view = 'main'
+    }
     if (state.loggedIn) {
       clearAuthSecrets()
       state.loginId = ''
@@ -920,7 +960,10 @@ export function installAssistantUI(options = {}) {
   const setOpen = (open) => {
     const opening = open && !state.open
     state.open = open
-    if (!open) clearAuthSecrets()
+    if (!open) {
+      clearAuthSecrets()
+      state.view = 'main'
+    }
     render()
     if (opening) request('status')
     if (open) window.setTimeout(() => closeButton.focus(), 0)
@@ -973,6 +1016,12 @@ export function installAssistantUI(options = {}) {
     setOpen(!state.open)
   })
   addListener(closeButton, 'click', () => setOpen(false))
+  addListener(walletBackButton, 'click', () => {
+    state.view = 'main'
+    state.rechargePayment = null
+    state.error = ''
+    render()
+  })
   addListener(refreshButton, 'click', () => {
     if (state.nativeSync === 'error') delete window.__yisamaNativeModelSync
     request('status')
@@ -1067,12 +1116,12 @@ export function installAssistantUI(options = {}) {
   })
   addListener(rechargeButton, 'click', () => {
     if (hasForegroundPending() && !hasActivePending('rechargeInfo')) return
-    state.rechargeOpen = !state.rechargeOpen
+    state.view = 'wallet'
     state.rechargePayment = null
     state.error = ''
     render()
-    if (state.rechargeOpen && !state.rechargeInfo) request('rechargeInfo')
-    else if (state.rechargeOpen && rechargeValue() && rechargeMethod()) {
+    if (!state.rechargeInfo) request('rechargeInfo')
+    else if (rechargeValue() && rechargeMethod()) {
       request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
     }
   })
@@ -1206,7 +1255,7 @@ export function installAssistantUI(options = {}) {
           state.message = '验证码已发送，请查看邮箱。'
         } else if (entry.action === 'rechargeInfo') {
           state.rechargeInfo = data
-          state.rechargeOpen = true
+          state.view = 'wallet'
           state.rechargeAmount = String(data.amountOptions?.[0] || data.minTopup || '')
           state.rechargePaymentMethod = data.paymentMethods?.[0]?.type || ''
           state.rechargePaymentAmount = ''

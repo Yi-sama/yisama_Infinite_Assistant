@@ -119,8 +119,24 @@ test('badge, sidebar actions, stale state, and screenshots', async (t) => {
   assert.equal(await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot().restartRequired), false)
 
   await page.locator('[data-testid="recharge"]').click()
-  const recharge = await next('recharge')
-  await respond(recharge, { ok: true, data: signedIn({ group: 'premium', groupLabel: 'premium', models: ['gpt-5.1'], model: 'gpt-5.1' }) })
+  const recharge = await next('rechargeInfo')
+  await respond(recharge, {
+    ok: true,
+    data: {
+      amountOptions: [10, 20, 50],
+      paymentMethods: [{ name: '支付宝', type: 'alipay', minTopup: 1 }],
+      minTopup: 1,
+      currency: 'USD',
+    },
+  })
+  const rechargeAmount = await next('rechargeAmount')
+  await respond(rechargeAmount, { ok: true, data: { paymentAmount: 10 } })
+  assert.equal(await page.locator('[data-testid="wallet-page"]').isVisible(), true)
+  assert.equal(await page.locator('[data-testid="main-view"]').isHidden(), true)
+  assert.equal(await page.locator('[data-testid="wallet-balance"]').textContent(), '$12.50')
+  await page.locator('[data-testid="wallet-back"]').click()
+  assert.equal(await page.locator('[data-testid="wallet-page"]').isHidden(), true)
+  assert.equal(await page.locator('[data-testid="main-view"]').isVisible(), true)
   await page.locator('[data-testid="refresh"]').click()
   const failedStatus = await next('status')
   await respond(failedStatus, { ok: false, error: 'Bearer sk-should-not-be-shown' })
