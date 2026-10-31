@@ -123,12 +123,14 @@ test('badge, sidebar actions, stale state, and screenshots', async (t) => {
   await respond(recharge, {
     ok: true,
     data: {
-      amountOptions: [10, 20, 50],
       paymentMethods: [{ name: '支付宝', type: 'alipay', minTopup: 1 }],
       minTopup: 1,
       currency: 'USD',
     },
   })
+  assert.equal(await page.locator('[data-testid="recharge-amount"]').inputValue(), '')
+  await page.locator('[data-testid="recharge-amount"]').fill('10')
+  await page.locator('[data-testid="recharge-amount"]').dispatchEvent('change')
   const rechargeAmount = await next('rechargeAmount')
   await respond(rechargeAmount, { ok: true, data: { paymentAmount: 10 } })
   assert.equal(await page.locator('[data-testid="wallet-page"]').isVisible(), true)

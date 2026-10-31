@@ -254,10 +254,7 @@ export function installAssistantUI(options = {}) {
     ${R} .y-actions{display:grid;gap:6px;margin-top:16px}
     ${R} .y-recharge{display:grid;gap:10px;padding:16px;border:1px solid var(--y-line);border-radius:16px;background:rgba(255,255,255,.025)}
     ${R} .y-recharge__title{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;font-weight:700}
-    ${R} .y-recharge__hint{color:var(--y-fg3);font:500 10px/1.4 var(--y-mono)}
-    ${R} .y-recharge__presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
-    ${R} .y-recharge__preset{min-width:0;min-height:32px;padding:0 6px;border:1px solid var(--y-line2);border-radius:9px;color:var(--y-fg2);font:600 11px/1 var(--y-mono)}
-    ${R} .y-recharge__preset:hover,${R} .y-recharge__preset[data-selected="true"]{border-color:var(--y-vio);background:rgba(128,96,224,.16);color:var(--y-fg)}
+    ${R} .y-recharge__field{display:grid;gap:6px;color:var(--y-fg3);font:500 10px/1.4 var(--y-mono)}
     ${R} .y-recharge__input,${R} .y-recharge__select{width:100%;height:36px;padding:0 10px;border:1px solid var(--y-line2);border-radius:10px;background:rgba(7,7,11,.6);color:var(--y-fg);font-size:12px}
     ${R} .y-recharge__input:focus,${R} .y-recharge__select:focus{outline:none;border-color:var(--y-vio);box-shadow:0 0 0 3px rgba(128,96,224,.2)}
     ${R} .y-recharge__estimate{display:flex;justify-content:space-between;gap:8px;color:var(--y-fg3);font-size:11px}
@@ -371,13 +368,16 @@ export function installAssistantUI(options = {}) {
   rechargeButton.append(svg('0 0 24 24', [{ d: 'M8 16L16 8M9 8h7v7' }]))
   const rechargePanel = el('section', { className: 'y-recharge', hidden: '', 'data-testid': 'recharge-panel' })
   const rechargeTitle = el('div', { className: 'y-recharge__title' })
-  rechargeTitle.append(el('span', {}, '充值'), el('span', { className: 'y-recharge__hint' }, '本地下单'))
-  const rechargePresets = el('div', { className: 'y-recharge__presets', 'data-testid': 'recharge-presets' })
+  rechargeTitle.append(el('span', {}, '充值'))
   const rechargeAmountInput = el('input', {
-    className: 'y-recharge__input', type: 'number', min: '1', step: '1', placeholder: '输入充值金额',
+    className: 'y-recharge__input', type: 'number', min: '1', step: '1', placeholder: '请输入充值额度',
     'aria-label': '充值金额', 'data-testid': 'recharge-amount',
   })
+  const rechargeAmountField = el('label', { className: 'y-recharge__field' })
+  rechargeAmountField.append(el('span', {}, '充值额度'), rechargeAmountInput)
   const rechargeMethodSelect = el('select', { className: 'y-recharge__select', 'aria-label': '支付方式', 'data-testid': 'recharge-method' })
+  const rechargeMethodField = el('label', { className: 'y-recharge__field' })
+  rechargeMethodField.append(el('span', {}, '支付方式'), rechargeMethodSelect)
   const rechargeEstimate = el('div', { className: 'y-recharge__estimate' })
   const rechargeEstimateLabel = el('span', {}, '预计支付')
   const rechargeEstimateValue = el('strong', { 'data-testid': 'recharge-payment-amount' }, '—')
@@ -391,7 +391,7 @@ export function installAssistantUI(options = {}) {
     type: 'button', className: 'y-button y-button--quiet y-button--wide', 'data-testid': 'continue-payment',
   }, '继续支付')
   rechargePayment.append(rechargePaymentText, rechargePaymentButton)
-  rechargePanel.append(rechargeTitle, rechargePresets, rechargeAmountInput, rechargeMethodSelect,
+  rechargePanel.append(rechargeTitle, rechargeAmountField, rechargeMethodField,
     rechargeEstimate, rechargeSubmit, rechargePayment)
   const restoreButton = el('button', { type: 'button', className: 'y-link', 'data-testid': 'restore' }, '退出并恢复原配置')
   actions.append(rechargeButton, restoreButton)
@@ -446,7 +446,7 @@ export function installAssistantUI(options = {}) {
   })
   walletBackButton.append(svg('0 0 24 24', [{ d: 'M19 12H5M11 6l-6 6 6 6' }]))
   const walletTitle = el('div', { className: 'y-wallet__title' })
-  walletTitle.append(el('h2', {}, '钱包'), el('p', {}, '在本地选择金额并创建充值订单'))
+  walletTitle.append(el('h2', {}, '钱包'), el('p', {}, '输入充值额度并完成支付'))
   walletHead.append(walletBackButton, walletTitle)
   const walletBalance = el('div', { className: 'y-wallet__balance' })
   const walletBalanceDetails = el('div')
@@ -662,21 +662,12 @@ export function installAssistantUI(options = {}) {
     const info = state.rechargeInfo
     rechargePanel.hidden = state.view !== 'wallet'
     if (!info) {
-      rechargePresets.replaceChildren()
       rechargeMethodSelect.replaceChildren()
       rechargeEstimateValue.textContent = '—'
       rechargeSubmit.disabled = true
       rechargePayment.hidden = true
       return
     }
-    const amountOptions = Array.isArray(info.amountOptions) ? info.amountOptions : []
-    rechargePresets.replaceChildren(...amountOptions.slice(0, 9).map((amount) => {
-      const option = el('button', {
-        type: 'button', className: 'y-recharge__preset', 'data-amount': String(amount),
-      }, String(amount))
-      option.dataset.selected = String(Number(state.rechargeAmount) === amount)
-      return option
-    }))
     const methodOptions = Array.isArray(info.paymentMethods) ? info.paymentMethods : []
     const selectedMethod = rechargeMethod()
     rechargeMethodSelect.replaceChildren(...methodOptions.map((method) =>
@@ -1125,20 +1116,15 @@ export function installAssistantUI(options = {}) {
       request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
     }
   })
-  addListener(rechargePresets, 'click', (event) => {
-    const button = event.target.closest?.('[data-amount]')
-    if (!button || hasForegroundPending()) return
-    state.rechargeAmount = button.dataset.amount || ''
-    state.rechargePayment = null
-    state.rechargePaymentAmount = ''
-    render()
-    request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
-  })
   addListener(rechargeAmountInput, 'input', () => {
     state.rechargeAmount = rechargeAmountInput.value
     state.rechargePayment = null
     state.rechargePaymentAmount = ''
     render()
+  })
+  addListener(rechargeAmountInput, 'change', () => {
+    if (hasForegroundPending() || !rechargeValue() || !rechargeMethod()) return
+    request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
   })
   addListener(rechargeMethodSelect, 'change', () => {
     if (hasForegroundPending()) return
@@ -1256,7 +1242,7 @@ export function installAssistantUI(options = {}) {
         } else if (entry.action === 'rechargeInfo') {
           state.rechargeInfo = data
           state.view = 'wallet'
-          state.rechargeAmount = String(data.amountOptions?.[0] || data.minTopup || '')
+          state.rechargeAmount = ''
           state.rechargePaymentMethod = data.paymentMethods?.[0]?.type || ''
           state.rechargePaymentAmount = ''
           state.rechargePayment = null
