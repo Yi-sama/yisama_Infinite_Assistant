@@ -94,7 +94,10 @@ export function installNativeFast() {
       const enabled = new Set(options.enabledReasoningEfforts)
       const models = options.models.map((model) => {
         const settings = authorization.modelSettings?.[model.model]
-        const supported = settings?.reasoningEfforts || []
+        const supported = [...new Set([
+          ...(model.supportedReasoningEfforts || []).map(({ reasoningEffort }) => reasoningEffort),
+          ...(settings?.reasoningEfforts || []),
+        ].filter(Boolean))]
         const known = new Set((model.supportedReasoningEfforts || []).map(({ reasoningEffort }) => reasoningEffort))
         const additions = supported.filter((reasoningEffort) => !known.has(reasoningEffort)).map((reasoningEffort) => ({
           reasoningEffort,
@@ -107,7 +110,10 @@ export function installNativeFast() {
       })
       let ultra = false
       for (const model of models) {
-        const supported = authorization.modelSettings?.[model.model]?.reasoningEfforts || []
+        const supported = [...new Set([
+          ...(model.supportedReasoningEfforts || []).map(({ reasoningEffort }) => reasoningEffort),
+          ...(authorization.modelSettings?.[model.model]?.reasoningEfforts || []),
+        ].filter(Boolean))]
         for (const reasoningEffort of supported) {
           enabled.add(reasoningEffort)
           if (reasoningEffort === 'ultra' && includeUltra) ultra = true
@@ -139,9 +145,11 @@ export function installNativeFast() {
             setLocalFast(previousEnabled)
           } catch { authorization = null }
         }
+        let nativeResult
         try {
-          // Let the native control paint immediately; remote ownership is confirmed below.
-          if (await nativeSet(tier, source) !== true) throw new Error('Native Fast setting failed.')
+          // Start the native setter now, but do not make the picker await its persistence.
+          nativeResult = nativeSet(tier, source)
+          if (nativeResult === false) throw new Error('Native Fast setting failed.')
           nativeChanged = true
           setLocalFast(enabled)
         } catch {
@@ -153,6 +161,7 @@ export function installNativeFast() {
           let changed = false
           let fingerprint
           try {
+            if (await nativeResult !== true) throw new Error('Native Fast setting failed.')
             const auth = await nativeAuth()
             if (auth.authMethod !== 'apikey' || auth.authToken !== own.apiKey ||
               authorization?.apiKey !== own.apiKey || disposed) {

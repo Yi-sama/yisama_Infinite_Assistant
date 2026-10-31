@@ -88,7 +88,7 @@ test('native Fast updates the native UI before the server and preserves native a
   const wrapped = controller.wrap('local', 'apikey', native)
   assert.equal(controller.wrap('local', 'apikey', native), wrapped)
   assert.equal(await wrapped(null, 'composer_menu'), true)
-  await delay(10)
+  await delay(50)
   assert.equal(calls[0].nativeTier, null)
   const firstServerCall = calls.find((call) => call.action === 'fast')
   assert.equal(firstServerCall.enabled, false)
@@ -108,16 +108,25 @@ test('native Fast rolls the optimistic native setting back when server confirmat
   for (const options of [{ serverFailure: true }, { nativeFailure: true }, { ownAuth: false }]) {
     const { controller, native, calls } = fastFixture(options)
     const result = await controller.wrap('local', 'apikey', native)(null, 'composer_menu')
-    await delay(10)
-    assert.equal(result, options.nativeFailure ? false : true)
+    await delay(50)
+    assert.equal(result, true)
     const changes = calls.filter((call) => call.action === 'fast')
     assert.deepEqual(changes.map((call) => call.enabled),
       options.ownAuth === false || options.nativeFailure ? [] : [false])
     assert.equal(calls.filter((call) => Object.hasOwn(call, 'nativeTier')).length,
-      options.nativeFailure ? 1 : 2)
+      2)
     assert.equal(calls.at(-1).status, 'error')
     controller.dispose()
   }
+})
+
+test('native Fast rejects a synchronous native setter failure before painting', async () => {
+  const { controller, calls } = fastFixture()
+  const native = () => false
+  assert.equal(await controller.wrap('local', 'apikey', native)(null, 'composer_menu'), false)
+  assert.equal(calls.some((call) => call.action === 'fast'), false)
+  assert.equal(controller.isBusy(), false)
+  controller.dispose()
 })
 
 test('native Fast returns before a delayed server confirmation completes', async () => {
@@ -128,6 +137,24 @@ test('native Fast returns before a delayed server confirmation completes', async
   await delay(60)
   assert.equal(controller.isBusy(), false)
   assert.equal(calls.find((call) => call.action === 'fast').enabled, false)
+  controller.dispose()
+})
+
+test('native Fast returns before delayed native persistence completes', async () => {
+  const { controller, calls } = fastFixture()
+  const native = (tier, source) => new Promise((resolve) => {
+    calls.push({ nativeTier: tier, source })
+    setTimeout(() => resolve(true), 60)
+  })
+  const started = Date.now()
+  assert.equal(await controller.wrap('local', 'apikey', native)(null, 'composer_menu'), true)
+  assert.ok(Date.now() - started < 40, 'the picker must not wait for native persistence')
+  assert.equal(calls[0].nativeTier, null)
+  assert.equal(calls.some((call) => call.action === 'fast'), false)
+  assert.equal(controller.isBusy(), true)
+  await delay(90)
+  assert.equal(calls.find((call) => call.action === 'fast').enabled, false)
+  assert.equal(controller.isBusy(), false)
   controller.dispose()
 })
 
@@ -166,7 +193,9 @@ test('native reasoning exposes catalog-backed Max and Ultra without Fast or chan
   assert.equal(controller.modelOptions('remote', 'apikey', original), original)
   assert.equal(controller.modelOptions('local', 'chatgpt', original), original)
   controller.authorize({ provider: 'yisama', modelSettings: {} })
-  assert.deepEqual([...controller.modelOptions('local', 'apikey', original).enabledReasoningEfforts],
+  const nativeFourLevel = { ...original, models: [{ ...model,
+    supportedReasoningEfforts: efforts.slice(0, 4).map((reasoningEffort) => ({ reasoningEffort })) }] }
+  assert.deepEqual([...controller.modelOptions('local', 'apikey', nativeFourLevel).enabledReasoningEfforts],
     efforts.slice(0, 4), 'unsupported catalog levels must not be invented')
   controller.authorize({ provider: 'yisama', fastAvailable: false,
     modelSettings: { claude: { reasoningEfforts: ['low', 'medium', 'high'] } } })
@@ -177,6 +206,12 @@ test('native reasoning exposes catalog-backed Max and Ultra without Fast or chan
     ['low', 'medium', 'high'], 'catalog-backed reasoning levels must work for non-GPT models')
   assert.deepEqual([...nonGptOptions.models[0].supportedReasoningEfforts].map(({ reasoningEffort }) => reasoningEffort),
     ['low', 'medium', 'high'], 'catalog-backed reasoning levels must be attached to non-GPT models')
+  controller.authorize({ provider: 'yisama', modelSettings: {} })
+  const nativeNonGpt = { enabledReasoningEfforts: new Set(), includeUltraReasoningEffort: false,
+    models: [{ model: 'claude', supportedReasoningEfforts: ['low', 'medium', 'high']
+      .map((reasoningEffort) => ({ reasoningEffort })) }] }
+  assert.deepEqual([...controller.modelOptions('local', 'apikey', nativeNonGpt).enabledReasoningEfforts],
+    ['low', 'medium', 'high'], 'native non-GPT reasoning metadata must remain selectable')
   controller.authorize(null)
   assert.equal(controller.modelOptions('local', 'apikey', original), original)
   controller.dispose()
