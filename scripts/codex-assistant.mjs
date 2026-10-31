@@ -559,7 +559,7 @@ export class AssistantTarget {
 export async function runAssistant({ endpointFile, processId, signal, handler = handleRequest,
   discover = discoverCodexTargets, isRunning = (pid) => {
     try { process.kill(pid, 0); return true } catch { return false }
-  }, onReady = () => {}, report = console.error, pollMs = 2000, updateFile = UPDATE_FILE,
+  }, onReady = () => {}, report = console.error, pollMs = 250, updateFile = UPDATE_FILE,
   readUpdate = readUpdateMarker, reloadCheck = shouldReload,
   readEndpoint = async (file) => JSON.parse(await fs.readFile(file, 'utf8')),
   connectionFactory = (url, onEvent) => new CdpConnection(url, onEvent),

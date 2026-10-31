@@ -71,7 +71,7 @@ function Quote-StartArgument {
 function Get-WallpaperLauncher {
     $direct = Join-Path $env:LOCALAPPDATA 'CodexWallpaperEngineSkin\launch-codex-with-skin.ps1'
     if (Test-Path -LiteralPath $direct -PathType Leaf) {
-        return @{ FilePath = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'); Arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', (Quote-StartArgument $direct)) }
+        return @{ FilePath = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'); Arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', (Quote-StartArgument $direct)); Port = 9222 }
     }
 
     $shell = New-Object -ComObject WScript.Shell
@@ -87,7 +87,10 @@ function Get-WallpaperLauncher {
                 $scriptPath = [IO.Path]::GetFullPath($match.Groups['path'].Value)
                 if ([IO.Path]::GetFileName($scriptPath) -ne 'launch-codex-with-skin.ps1' -or
                     [IO.Path]::GetFileName((Split-Path -Parent $scriptPath)) -ne 'CodexWallpaperEngineSkin') { continue }
-                return @{ FilePath = $shortcut.TargetPath; Arguments = $shortcut.Arguments }
+                $port = 9222
+                $portMatch = [regex]::Match([string]$shortcut.Arguments, '(?i)(?:-Port|--remote-debugging-port)(?:\s+|=)(?<port>[0-9]{1,5})')
+                if ($portMatch.Success) { $port = [int]$portMatch.Groups['port'].Value }
+                return @{ FilePath = $shortcut.TargetPath; Arguments = $shortcut.Arguments; Port = $port }
             }
             finally { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) | Out-Null }
         }
@@ -217,17 +220,16 @@ try {
     $wallpaper = Get-WallpaperLauncher
     if ($wallpaper) {
         Start-Process -FilePath $wallpaper.FilePath -ArgumentList $wallpaper.Arguments -WindowStyle Hidden | Out-Null
-        $deadline = [DateTime]::UtcNow.AddSeconds($startupTimeoutSeconds)
-        $endpoint = $null
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $codexProcess = $null
         do {
-            foreach ($process in Get-CodexDesktopProcesses) {
-                try { $endpoint = Get-VerifiedEndpoint -ProcessId $process.Id } finally { $process.Dispose() }
-                if ($endpoint) { break }
-            }
-            if ($endpoint) { break }
+            $codexProcess = @(Get-CodexDesktopProcesses | Sort-Object StartTime | Select-Object -First 1)
+            if ($codexProcess) { break }
             Start-Sleep -Milliseconds 300
         } while ([DateTime]::UtcNow -lt $deadline)
-        if (-not $endpoint) { throw 'The existing Codex Wallpaper Skin launcher did not start a verified Codex workspace.' }
+        if (-not $codexProcess) { throw 'The existing Codex Wallpaper Skin launcher did not start Codex.' }
+        $endpoint = @{ port = [int]$wallpaper.Port; processId = $codexProcess[0].Id }
+        $codexProcess[0].Dispose()
     }
     else {
         $executable = Find-CodexExecutable
@@ -241,7 +243,6 @@ try {
     $readyLog = Join-Path $dataRoot ("assistant-$($endpoint.processId).stdout.log")
     $errorLog = Join-Path $dataRoot ("assistant-$($endpoint.processId).stderr.log")
     $assistant = Start-Process -FilePath $runtime -ArgumentList @((Quote-StartArgument $assistantScript), '--endpoint-file', (Quote-StartArgument $endpointFile), '--process-id', $endpoint.processId) -WorkingDirectory $appRoot -WindowStyle Hidden -RedirectStandardOutput $readyLog -RedirectStandardError $errorLog -PassThru
-    Wait-AssistantReady -Process $assistant -ReadyLog $readyLog -ErrorLog $errorLog -CodexProcessId $endpoint.processId
 }
 catch {
     if (-not $ValidateOnly) {
