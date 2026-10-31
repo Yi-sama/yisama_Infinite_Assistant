@@ -5,7 +5,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-Add-Type -AssemblyName System.Net.Http
 
 $appRoot = Split-Path -Parent $PSScriptRoot
 $runtime = Join-Path $appRoot 'runtime\node.exe'
@@ -99,60 +98,6 @@ function Get-WallpaperLauncher {
     return $null
 }
 
-function Get-LoopbackListeningPorts {
-    param([int]$ProcessId)
-    try {
-        return @(Get-NetTCPConnection -State Listen -OwningProcess $ProcessId -ErrorAction Stop |
-            Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1') } |
-            Select-Object -ExpandProperty LocalPort -Unique)
-    }
-    catch {
-        $ports = @()
-        foreach ($line in (& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p tcp 2>$null)) {
-            $match = [regex]::Match($line, '^\s*TCP\s+(?<address>127\.0\.0\.1|\[::1\]):(?<port>[0-9]+)\s+\S+\s+LISTENING\s+(?<pid>[0-9]+)\s*$')
-            if ($match.Success -and [int]$match.Groups['pid'].Value -eq $ProcessId) { $ports += [int]$match.Groups['port'].Value }
-        }
-        return @($ports | Select-Object -Unique)
-    }
-}
-
-function Get-VerifiedEndpoint {
-    param([int]$ProcessId)
-    $ports = @(Get-LoopbackListeningPorts -ProcessId $ProcessId)
-    if (-not $ports) { return $null }
-    $handler = [Net.Http.HttpClientHandler]::new()
-    $handler.UseProxy = $false
-    $client = [Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [TimeSpan]::FromSeconds(1)
-    try {
-        foreach ($port in $ports) {
-            foreach ($address in @('127.0.0.1', '[::1]')) {
-                try {
-                    $targets = $client.GetStringAsync("http://${address}:$port/json").GetAwaiter().GetResult() | ConvertFrom-Json
-                    $page = @($targets | Where-Object {
-                        $_.type -eq 'page' -and $_.url -ceq 'app://-/index.html' -and
-                        $_.webSocketDebuggerUrl -match ('^ws://(?:127\.0\.0\.1|\[::1\]):' + [regex]::Escape([string]$port) + '/devtools/page/[^/]+$')
-                    } | Select-Object -First 1)
-                    if ($page.Count -eq 1) { return @{ port = [int]$port; processId = $ProcessId } }
-                } catch { }
-            }
-        }
-    }
-    finally { $client.Dispose(); $handler.Dispose() }
-    return $null
-}
-
-function Wait-VerifiedEndpoint {
-    param([int]$ProcessId, [int]$TimeoutSeconds = $startupTimeoutSeconds)
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    do {
-        $endpoint = Get-VerifiedEndpoint -ProcessId $ProcessId
-        if ($endpoint) { return $endpoint }
-        Start-Sleep -Milliseconds 300
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'Codex did not expose its loopback-only debug page. Close Codex and launch it again with Codex - yisama.'
-}
-
 function Read-RequestedDebugPort {
     param([string]$LogPath)
     if (-not (Test-Path -LiteralPath $LogPath)) { return $null }
@@ -164,17 +109,14 @@ function Read-RequestedDebugPort {
 
 function Wait-OwnEndpoint {
     param([Diagnostics.Process]$Process, [string]$LogPath)
-    $deadline = [DateTime]::UtcNow.AddSeconds(25)
+    $deadline = [DateTime]::UtcNow.AddSeconds($startupTimeoutSeconds)
     do {
         $port = Read-RequestedDebugPort -LogPath $LogPath
-        if ($port) {
-            $endpoint = Get-VerifiedEndpoint -ProcessId $Process.Id
-            if ($endpoint -and $endpoint.port -eq $port) { return $endpoint }
-        }
+        if ($port) { return @{ port = $port; processId = $Process.Id } }
         if ($Process.HasExited) { throw "Codex exited before its debug endpoint was ready. See $LogPath." }
         Start-Sleep -Milliseconds 300
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Codex did not report a usable loopback debug endpoint. See $LogPath."
+    throw "Codex did not report its loopback debug port. See $LogPath."
 }
 
 function Write-EndpointFile {
@@ -184,24 +126,6 @@ function Write-EndpointFile {
     $json = @{ port = $Endpoint.port; processId = $Endpoint.processId } | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($partial, $json, [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $partial -Destination $endpointFile -Force
-}
-
-function Wait-AssistantReady {
-    param([Diagnostics.Process]$Process, [string]$ReadyLog, [string]$ErrorLog, [int]$CodexProcessId)
-    $deadline = [DateTime]::UtcNow.AddSeconds(20)
-    do {
-        if (Test-Path -LiteralPath $ReadyLog) {
-            foreach ($line in Get-Content -LiteralPath $ReadyLog -Encoding UTF8) {
-                try {
-                    $value = $line | ConvertFrom-Json
-                    if ($value.ready -eq $true -and $value.processId -eq $CodexProcessId) { return }
-                } catch { }
-            }
-        }
-        if ($Process.HasExited) { throw "The yisama bridge exited before it was ready. See $ErrorLog." }
-        Start-Sleep -Milliseconds 200
-    } while ([DateTime]::UtcNow -lt $deadline)
-    throw "The yisama bridge did not become ready. See $ErrorLog."
 }
 
 try {
