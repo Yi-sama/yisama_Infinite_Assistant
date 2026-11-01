@@ -389,7 +389,7 @@ test('native catalogs reload immediately without restarting or hiding a failed s
   const takeover = await next('reconfigure')
   assert.equal(takeover.action, 'reconfigure')
   await respond(takeover, { ok: true, data: signedIn({
-    message: '接管配置已准备。请重启 Codex 后使用 Ultra、Fast 等能力。',
+    message: '接管配置已准备，正在自动重启 Codex…',
     restartRequired: true,
   }) })
   assert.match(await page.locator('[data-testid="message"]').textContent(), /Ultra.*Fast/)

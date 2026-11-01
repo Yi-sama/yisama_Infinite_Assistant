@@ -1,6 +1,8 @@
 ﻿[CmdletBinding()]
 param(
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    # Sent by the assistant after a takeover: close Codex without asking, then reopen it.
+    [switch]$Restart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -231,6 +233,7 @@ try {
         exit 0
     }
 
+    if ($Restart) { Get-CodexDesktopProcesses | Stop-Process -Force -ErrorAction SilentlyContinue }
     if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
         # Closing the window can leave Codex running in the system tray.
         if (-not (Confirm-LauncherAction 'Codex 仍在后台运行（可能在右下角托盘里）。要结束它，再用 yisama 重新打开吗？')) { exit 0 }

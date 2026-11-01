@@ -238,7 +238,7 @@ test('desktop bridge projects only public state over serialized stdio requests',
   const takeover = await bridge.request({ id: 3, action: 'reconfigure' })
   assert.equal(takeover.ok, true)
   assert.equal(takeover.data.restartRequired, true)
-  assert.match(takeover.data.message, /Ultra、Fast/)
+  assert.match(takeover.data.message, /自动重启 Codex/)
 
   const externalConfig = (await fs.readFile(files.config, 'utf8')).replace(
     'model_provider = "yisama"', 'model_provider = "custom"',

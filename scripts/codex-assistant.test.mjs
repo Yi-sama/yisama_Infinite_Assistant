@@ -10,7 +10,7 @@ import { createHash, webcrypto } from 'node:crypto'
 import { runInNewContext } from 'node:vm'
 import {
   adaptNativeFastSource, installNativeFast, syncNativeModels, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
-  restartAssistant, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
+  restartAssistant, restartCodex, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
 } from './codex-assistant.mjs'
 
 const generation = (letter) => letter.repeat(64)
@@ -488,6 +488,21 @@ test('replacement detaches from the old helper and waits until spawning succeeds
   }), /spawn failed/)
 })
 
+test('Codex restart runs the packaged launcher detached with -Restart', async () => {
+  let unreferenced = false
+  await restartCodex((executable, args, options) => {
+    assert.equal(path.basename(executable).toLowerCase(), 'powershell.exe')
+    assert.equal(path.basename(args[args.indexOf('-File') + 1]), 'launch-codex.ps1')
+    assert.equal(args.at(-1), '-Restart')
+    assert.deepEqual(options, { detached: true, stdio: 'ignore', windowsHide: true })
+    const child = new EventEmitter()
+    child.unref = () => { unreferenced = true }
+    queueMicrotask(() => child.emit('spawn'))
+    return child
+  })
+  assert.equal(unreferenced, true)
+})
+
 test('Codex start time uses the verified desktop PID without WMI or a visible shell', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -689,6 +704,24 @@ test('an in-flight UI reply prevents reload until its response has been sent', a
     readUpdate: sequence([null, marker('d'), marker('d'), marker('d')]), connectionFactory: factory,
   }))
   assert.equal(result.reload, true)
+})
+
+test('a takeover restarts Codex once its reply has been sent', async () => {
+  for (const [action, expected] of [['reconfigure', { restartCodex: true }], ['status', undefined]]) {
+    const { factory } = makeConnectionFactory({
+      onEnable(onEvent) {
+        onEvent({ method: 'Runtime.bindingCalled', params: {
+          name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
+        } })
+      },
+    })
+    let polls = 0
+    const result = await runAssistant(assistantOptions({
+      handler: async () => ({ loggedIn: true }), restartDelayMs: 0,
+      isRunning: () => ++polls <= 5, connectionFactory: factory,
+    }))
+    assert.deepEqual(result, expected, action)
+  }
 })
 
 test('invalid update markers never reload the helper', async () => {

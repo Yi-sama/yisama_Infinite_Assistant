@@ -1138,7 +1138,7 @@ export async function desktopReconfigure() {
   })
   return {
     ...result,
-    message: '接管配置已准备。请重启 Codex 后使用 Ultra、Fast 等能力。',
+    message: '接管配置已准备，正在自动重启 Codex…',
     restartRequired: true,
   }
 }

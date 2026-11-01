@@ -232,6 +232,16 @@ export async function restartAssistant(args, spawnChild = spawn) {
   child.unref()
 }
 
+export async function restartCodex(spawnChild = spawn) {
+  const launcher = fileURLToPath(new URL('./launch-codex.ps1', import.meta.url))
+  const child = spawnChild(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', launcher, '-Restart'], {
+      detached: true, stdio: 'ignore', windowsHide: true,
+    })
+  await once(child, 'spawn')
+  child.unref()
+}
+
 export function validateEndpoint(value) {
   if (!value || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 ||
     !Number.isSafeInteger(value.processId) || value.processId <= 0) {
@@ -569,19 +579,28 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
   discover = discoverCodexTargets, isRunning = (pid) => {
     try { process.kill(pid, 0); return true } catch { return false }
   }, onReady = () => {}, report = console.error, pollMs = 250, updateFile = UPDATE_FILE,
-  readUpdate = readUpdateMarker, reloadCheck = shouldReload,
+  readUpdate = readUpdateMarker, reloadCheck = shouldReload, restartDelayMs = 1500,
   readEndpoint = async (file) => JSON.parse(await fs.readFile(file, 'utf8')),
   connectionFactory = (url, onEvent) => new CdpConnection(url, onEvent),
   nativeConfiguration = handler === handleRequest ? desktopNativeConfiguration : async () => null,
   onNativeSynced = nativeConfiguration === desktopNativeConfiguration ? desktopNativeSynced : async () => {} } = {}) {
   const clients = new Map()
-  const request = createRequestQueue(handler)
+  // Taking over Codex only applies after a restart, so the assistant restarts Codex itself
+  // shortly after the panel has shown the takeover reply.
+  let restartCodexAt = 0
+  const request = createRequestQueue(async (command) => {
+    const data = await handler(command)
+    if (command.action === 'reconfigure') restartCodexAt = Date.now() + restartDelayMs
+    return data
+  })
   let generation = validateUpdateMarker(await readUpdate(updateFile))?.generation || null
   let ready = false
   let lastFailure = ''
   try {
     while (!signal?.aborted && isRunning(processId)) {
       let reloading = false
+      if (restartCodexAt && Date.now() >= restartCodexAt && request.isIdle() &&
+        [...clients.values()].every((client) => client.isIdle())) return { restartCodex: true }
       try {
         const endpoint = validateEndpoint(await readEndpoint(endpointFile))
         if (endpoint.processId !== processId) break
@@ -875,6 +894,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (result?.reload && !stop.signal.aborted) {
         await restartAssistant(args)
       }
+      if (result?.restartCodex && !stop.signal.aborted) await restartCodex()
     }
   } catch (error) {
     console.error(connectionMessage(error))
