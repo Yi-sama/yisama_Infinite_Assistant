@@ -20,6 +20,23 @@ function Show-LauncherError {
     [System.Windows.MessageBox]::Show($Message, 'Codex - yisama', 'OK', 'Error') | Out-Null
 }
 
+function Confirm-LauncherAction {
+    param([string]$Message)
+    Add-Type -AssemblyName PresentationFramework
+    return [System.Windows.MessageBox]::Show($Message, 'Codex - yisama', 'YesNo', 'Question') -eq 'Yes'
+}
+
+function Get-LauncherErrorText {
+    param([string]$Reason)
+    $hint = switch -Wildcard ($Reason) {
+        'The installed Codex desktop executable was not found.' { '没有找到已安装的 Codex 桌面版，请先安装 Codex。' }
+        'Codex exited before*' { 'Codex 启动后马上退出了。' }
+        'Codex did not report*' { 'Codex 启动超时。' }
+        default { $Reason }
+    }
+    return "无法启动 yisama：$hint$([Environment]::NewLine)$([Environment]::NewLine)详细记录：$(Join-Path $dataRoot 'launcher.stderr.log')"
+}
+
 function Write-LauncherFailure {
     param([string]$Message)
     New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
@@ -161,7 +178,12 @@ try {
     }
 
     if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
-        throw 'Codex 正在运行，请先完全关闭，再打开 Codex - yisama。'
+        # Closing the window can leave Codex running in the system tray.
+        if (-not (Confirm-LauncherAction 'Codex 仍在后台运行（可能在右下角托盘里）。要结束它，再用 yisama 重新打开吗？')) { exit 0 }
+        Get-CodexDesktopProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
+        if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
+            throw 'Codex 仍在运行，无法结束。请在任务管理器里结束 Codex 后再试。'
+        }
     }
 
     $wallpaper = Get-WallpaperLauncher
@@ -194,7 +216,7 @@ try {
 catch {
     if (-not $ValidateOnly) {
         Write-LauncherFailure $_.Exception.Message
-        Show-LauncherError '无法启动 yisama。请确认 Codex 已完全关闭，然后打开 Codex - yisama。'
+        Show-LauncherError (Get-LauncherErrorText $_.Exception.Message)
     }
     Write-Error $_.Exception.Message
     exit 1

@@ -72,3 +72,32 @@ test('launcher waits for a just-closed Codex to finish exiting', {
     '-File', probe, '-Launcher', launcher], { windowsHide: true })
   assert.deepEqual(stdout.trim().split(/\r?\n/), ['lingering=True', 'stuck=False'])
 })
+
+// Loads only Get-LauncherErrorText: the dialog must name the real reason, not a generic hint.
+const ERROR_PROBE = `
+param([string]$Launcher)
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+$function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Get-LauncherErrorText' }, $true)
+Invoke-Expression $function.Extent.Text
+$dataRoot = 'TESTROOT'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+Get-LauncherErrorText 'The installed Codex desktop executable was not found.'
+Get-LauncherErrorText 'something unexpected'
+`
+
+test('launcher error dialog names the real failure reason', {
+  skip: process.platform !== 'win32' && 'Windows launcher only.',
+  timeout: 60000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-launcher-test-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+  const probe = path.join(root, 'error.ps1')
+  await fs.writeFile(probe, ERROR_PROBE, 'utf8')
+  const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', probe, '-Launcher', launcher], { windowsHide: true })
+  assert.match(stdout, /没有找到已安装的 Codex 桌面版/)
+  assert.match(stdout, /无法启动 yisama：something unexpected/)
+  assert.match(stdout, /详细记录：TESTROOT.launcher\.stderr\.log/)
+})
