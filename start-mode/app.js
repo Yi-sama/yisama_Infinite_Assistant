@@ -60,6 +60,7 @@
         method, credentials: 'same-origin', cache: 'no-store',
         headers: {
           Accept: 'application/json',
+          ...(state.accessToken ? { Authorization: 'Bearer ' + state.accessToken } : {}),
           ...(state.userId ? { 'New-Api-User': String(state.userId) } : {}),
           ...headers,
         },
@@ -93,8 +94,10 @@
           }
           const payload = await response.json().catch(() => null)
           const user = payload?.data?.user
-          if (!response.ok || !payload?.success || !Number.isInteger(user?.id)) throw new Error('SESSION_INVALID')
+          const accessToken = payload?.data?.access_token
+          if (!response.ok || !payload?.success || !Number.isInteger(user?.id) || typeof accessToken !== 'string' || accessToken.length < 20) throw new Error('SESSION_INVALID')
           state.userId = user.id
+          state.accessToken = accessToken
           return user
         })().catch((error) => {
           sessionPromise = null
@@ -161,44 +164,54 @@
       const quota = Number(payload.data?.quota)
       return Number.isFinite(quota) ? quota / 500000 : 0
     },
+    // 用量按整个账户统计，和专业模式“数据看板”用同一个接口（/api/data/self，按小时汇总，约 5 分钟延迟）
     async usage(range) {
       if (demo) return state.live ? DEMO_USAGE[range] : EMPTY_USAGE
       await this.session()
+      const MONTH = 30 * 86400
+      const now = Math.floor(Date.now() / 1000)
       const days = { today: 1, '3d': 3, '7d': 7, month: 30 }
-      const start = days[range] ? Math.floor(Date.now() / 1000) - days[range] * 86400 : 0
-      const callsByDay = new Map()
+      const fetchSpan = async (start, end) => {
+        const params = new URLSearchParams({ start_timestamp: String(start), end_timestamp: String(end), default_time: 'hour' })
+        const payload = await this.request(`/api/data/self?${params}`)
+        return Array.isArray(payload.data) ? payload.data : []
+      }
+      let rows = []
+      if (days[range]) rows = await fetchSpan(now - days[range] * 86400, now)
+      else {
+        // “全部”：接口一次最多查 1 个月，往前按月查，连续 3 个月没数据就停（最多 3 年）
+        for (let i = 0, empty = 0; i < 36 && empty < 3; i += 1) {
+          const chunk = await fetchSpan(now - (i + 1) * MONTH, now - i * MONTH)
+          empty = chunk.length ? 0 : empty + 1
+          rows = rows.concat(chunk)
+        }
+      }
       let calls = 0
       let tokens = 0
       let quota = 0
-      let hasQuota = true
-      for (let page = 1; page <= 100; page += 1) {
-        const params = new URLSearchParams({ token_name: KEY_NAME, p: String(page), size: '100' })
-        if (start) params.set('start_timestamp', String(start))
-        const payload = await this.request(`/api/log/self?${params}`)
-        const rows = Array.isArray(payload.data) ? payload.data
-          : payload.data?.items || payload.data?.logs || []
-        if (!rows.length) break
-        for (const row of rows) {
-          if (Number(row?.type) !== 2) continue
-          calls += 1
-          if (row.quota === undefined || row.quota === null || row.quota === '') hasQuota = false
-          else quota += Number(row.quota) || 0
-          tokens += Number(row.total_tokens ?? row.tokens ?? 0) ||
-            Number(row.prompt_tokens ?? 0) + Number(row.completion_tokens ?? 0)
-          const rawTime = row.timestamp ?? row.created_at ?? row.createdAt
-          const date = rawTime ? new Date(typeof rawTime === 'number' ? rawTime * 1000 : rawTime) : null
-          if (date && !Number.isNaN(date.getTime())) {
-            const key = date.toISOString().slice(0, 10)
-            callsByDay.set(key, (callsByDay.get(key) || 0) + 1)
-          }
+      const callsByDay = new Map()
+      for (const row of rows) {
+        const count = Number(row?.count) || 0
+        calls += count
+        tokens += Number(row?.token_used) || 0
+        quota += Number(row?.quota) || 0
+        const date = new Date(Number(row?.created_at) * 1000)
+        if (!Number.isNaN(date.getTime())) {
+          const key = date.toISOString().slice(0, 10)
+          callsByDay.set(key, (callsByDay.get(key) || 0) + count)
         }
-        if (rows.length < 100) break
       }
       const ordered = [...callsByDay.entries()].sort(([a], [b]) => a.localeCompare(b))
-      return {
-        calls, tokens, spent: hasQuota ? Math.abs(quota) / 500000 : null,
-        callsByDay: ordered.map(([, value]) => value),
-      }
+      return { calls, tokens, spent: Math.abs(quota) / 500000, callsByDay: ordered.map(([, value]) => value) }
+    },
+    // 判断“简洁模式”这个 Key 有没有被调用过：查实时日志，只看这个 Key
+    async keyUsed() {
+      if (demo) return state.live
+      await this.session()
+      const params = new URLSearchParams({ token_name: KEY_NAME, type: '2', p: '1', size: '1' })
+      const payload = await this.request(`/api/log/self?${params}`)
+      const rows = Array.isArray(payload.data) ? payload.data : payload.data?.items || payload.data?.logs || []
+      return rows.some((row) => Number(row?.type) === 2)
     },
     async week() {
       const usage = await this.usage('7d')
@@ -254,7 +267,7 @@
   if (!demo) localStorage.removeItem('ys.start.key')
   const state = Object.assign({
     live: false, vendor: null, use: null, model: null, group: null, balance: 5,
-    keyId: null, key: null, userId: null, tutorialSeen: false, scene: 'qa', accessOpen: false,
+    keyId: null, key: null, userId: null, accessToken: null, tutorialSeen: false, scene: 'qa', accessOpen: false,
   },
     Object.fromEntries(KEEP.map((k) => [k, store.get(k, undefined)]).filter(([, v]) => v !== undefined)))
   const save = () => KEEP.forEach((k) => store.set(k, state[k]))
@@ -592,6 +605,7 @@
     paintScenes()
     try {
       const [bal, usage] = await Promise.all([api.balance(), api.usage(usageRange)])
+      if (!demo && !state.live && (await api.keyUsed())) state.live = true
       state.balance = bal
       if (!demo) save()
       countUp($('.js-balance'), bal, { dec: 2, ms: 1100 })
@@ -723,7 +737,7 @@
       if (checking) return
       checking = true
       try {
-        if ((await api.usage('all')).calls > 0) {
+        if (await api.keyUsed()) {
           clearInterval(firstRequestTimer)
           firstRequestTimer = null
           await gotFirstRequest()
@@ -995,9 +1009,12 @@
   // ---------- 启动 ----------
   ;(async () => {
     try {
+      // 用户自己打开了简洁模式，就记成“上次用的是简洁”；没选过的先弹选择框
+      const savedMode = store.get('mode')
       if (!demo && !(await api.session())) return
+      if (savedMode) store.set('mode', 'simple')
       loadPricing(await api.pricing())
-      if (!store.get('mode')) gate.showModal()
+      if (!savedMode) gate.showModal()
       const restored = demo
         ? Boolean(state.key && state.vendor)
         : await restoreFormalState()

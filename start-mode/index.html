@@ -8,15 +8,24 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="style.css?v=20261101-onboarding" />
+<link rel="stylesheet" href="style.css?v=20261101-nav2" />
 </head>
 <body>
 
 <header class="top">
-  <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"></span>YisamaAPI</a>
-  <span class="pill">简洁模式</span>
+  <a class="brand" href="/"><img src="/site/media/logo.png" alt="" width="28" height="28" /><span>YisamaAPI</span></a>
+  <!-- 和首页同一组导航，切到简洁模式时导航栏不变 -->
+  <nav class="top__links" aria-label="主导航">
+    <a href="/">主页</a>
+    <a href="/start/" aria-current="page">控制台</a>
+    <a href="/image-studio">工作站</a>
+    <a href="/video-studio">视频创作</a>
+    <a href="/tavern">酒馆</a>
+    <a class="market-link" href="/pricing">模型广场</a>
+    <a href="https://ocnakk5bgrbz.feishu.cn/wiki/HZE0wQ5pBiJunZk9HKqcliTOnj2" target="_blank" rel="noopener">文档</a>
+  </nav>
   <div class="top__right">
-    <a class="ghost market-link" href="/pricing">模型广场</a>
+    <span class="pill">简洁模式</span>
     <button class="ghost" data-open="settings">设置</button>
     <a class="ghost ghost--pro" href="/console" data-mode-switch="pro">专业模式 <span aria-hidden="true">→</span></a>
   </div>
@@ -84,7 +93,7 @@
           </div>
         </div>
         <p class="usage__amount"><b class="odo js-token-total">0</b><small><span class="js-token-unit"></span>Token</small></p>
-        <p class="meter__sub"><span class="js-token-feel"></span> <span class="q" tabindex="0" data-tip="按 1 Token ≈ 0.75 个汉字粗略换算。包括 AI 读你的文件、对话记录，以及它写出来的内容。">?</span></p>
+        <p class="meter__sub"><span class="js-token-feel"></span> <span class="q" tabindex="0" data-tip="统计整个账户所有 Key 的用量，和专业模式数据看板一致，约 5 分钟更新一次。按 1 Token ≈ 0.75 个汉字粗略换算。">?</span></p>
         <p class="usage__meta js-usage-meta"><span class="js-call-total">0</span> 次调用<span class="usage__meta-sep">·</span><span class="js-week-cost"></span></p>
       </div>
     </section>
@@ -339,7 +348,7 @@
       <em>进入完整控制台 →</em>
     </button>
   </div>
-  <p class="gate__foot">不确定就选简洁模式。以后随时可以在右上角切换。</p>
+  <p class="gate__foot">不确定就选简洁模式。以后随时可以在右上角切换，下次登录会进入你最后用的模式。</p>
 </dialog>
 
 <!-- ============ 充值 ============ -->
@@ -394,6 +403,6 @@
   <button data-demo="low">余额低</button>
 </nav>
 
-<script src="app.js?v=20261101-onboarding"></script>
+<script src="app.js?v=20261101-nav2"></script>
 </body>
 </html>

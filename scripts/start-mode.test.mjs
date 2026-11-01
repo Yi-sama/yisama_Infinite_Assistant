@@ -42,7 +42,7 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
     }
     if (url.pathname === '/api/user/auth/refresh') {
       sessionReady = true
-      return reply({ success: true, data: { user: { id: 42, username: 'formal-test' } } })
+      return reply({ success: true, data: { user: { id: 42, username: 'formal-test' }, access_token: 'test-access-token-0123456789' } })
     }
     if (url.pathname === '/api/pricing') {
       if (formalPage && !sessionReady) return reply({ success: false }, 401)
@@ -65,6 +65,7 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
       return reply({ success: true, data: { key: apiState.secret } })
     }
     if (url.pathname === '/api/log/self') return reply({ success: true, data: [] })
+    if (url.pathname === '/api/data/self') return reply({ success: true, data: [] })
     const file = files[url.pathname]
     if (!file) { res.writeHead(404).end(); return }
     try {
@@ -157,7 +158,8 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
 
   await t.test('model market, applications, assistant and token usage stay visible', async () => {
     assert.equal(await page.locator('.market-link').getAttribute('href'), '/pricing')
-    assert.equal(await page.locator('a[href="/rankings"], a[href*="feishu.cn"]').count(), 0)
+    assert.deepEqual(await page.locator('.top__links a').allTextContents(), ['主页', '控制台', '工作站', '视频创作', '酒馆', '模型广场', '文档'])
+    assert.equal(await page.locator('.top__links [aria-current]').textContent(), '控制台')
     assert.deepEqual(await page.locator('#hub .app').evaluateAll((links) => links.map((link) => link.getAttribute('href'))), [
       '/image-studio',
       '/tavern',

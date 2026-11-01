@@ -132,3 +132,14 @@
 - 专业模式导航桥接只隐藏搜索按钮，并在原位置加入“简洁模式”；通知、语言、设置、用户菜单保持不变。生产 nginx 注入改为 `/site/nav-bridge.js?v=20261101-nav`，避免 CDN 继续使用旧脚本。
 - 已同步测试 `/opt/new-api-design-test/www/start/`、正式 `/var/www/yisama-site-20261025T155517Z/start/` 和两处 `site/nav-bridge.js`。备份时间戳：静态文件 `20261031T185255Z`，nginx 配置 `/etc/nginx/conf.d/api-yisama.conf.bak-20261031T190454Z`。
 - 验证：`node --test scripts/start-mode.test.mjs` 12 项通过；线上静态文件哈希与本地一致；`nginx -t` 通过并 reload；容器未重启。真实账号登录后的支付到账、余额刷新、日志用量，以及登录后专业模式视觉仍需人工确认。
+
+## 2026-11-01 模式选择 / 记忆 / 用量统一（mode-v2）
+
+- 首次选择弹窗移到专业模式：`/site/nav-bridge.js` 在控制台渲染出来（已登录）且 `ys.start.mode` 为空时弹“简洁 / 专业”；选简洁跳 `/start/`，选专业留在原页。`/start/` 里原弹窗保留兜底。
+- 模式记忆（仅本机 localStorage `ys.start.mode`）：停在哪边就记哪边。只在“刚登录/注册/OAuth 回来”那一次按上次模式落地（经 sessionStorage `ys.start.justAuth` 跨页传递）；之后手动去哪就是哪，`/start/` 不再强制跳回 `/console`。
+- 首页、价格页“控制台”按钮（`/site/auth.js`）已登录时按上次模式指向 `/start/` 或 `/dashboard`。
+- 简洁模式用量改为整个账户：`/api/data/self`（与专业模式数据看板同源，按小时汇总，约 5 分钟延迟，单次最多 1 个月，“全部”按月往前查，连续 3 个月无数据停止）。“是否已接通”仍只看“简洁模式”Key 的实时日志（`api.keyUsed()`）。
+- 本仓库副本：`start-mode/site-bridge/{nav-bridge,auth}.js`。部署时间戳备份 `*.bak-mode-v2-20261101T095858Z`（start/app.js、start/index.html、site/nav-bridge.js、site/auth.js、index.html、pricing/index.html、nginx conf）。版本号统一 `v=20261101-mode-v2`。测试站 `/opt/new-api-design-test/www` 未同步（本来就是旧版）。
+- 验证：测试 11 项通过（mock 补了 `access_token` 和 `/api/data/self`）；模拟控制台验证 7 条路径（新用户弹窗、选简洁/专业、登录后恢复、手动切换不被弹回）；线上 CDN 文件哈希与本地一致，未登录访问正常跳登录、无脚本错误。真实账号登录后的弹窗外观与用量数字需人工确认。
+- mode-v3（同日）：用户反馈“从首页点控制台就进专业模式”。现在首页/价格页所有 `/dashboard` 入口（控制台、进入控制台、创建 API Key）在已登录时按上次模式改指向；整页打开 `/dashboard` 或 `/console` 且上次是简洁时，nav-bridge 直接 `replace` 到 `/start/`（控制台内部前端路由跳转不受影响）。备份 `*.bak-mode-v3-*`，版本号 `v=20261101-mode-v3`。
+- nav2（同日）：简洁模式顶栏换成和首页相同的导航（主页 / 控制台 / 工作站 / 视频创作 / 酒馆 / 模型广场 / 排行榜 / 文档，“控制台”高亮指向 `/start/`），右侧保留“简洁模式”标记、设置、专业模式 →。≤1180px 和首页一样收起导航只留模型广场。备份 `start/*.bak-nav2-*`，版本号 `v=20261101-nav2`。测试 12 项通过。
