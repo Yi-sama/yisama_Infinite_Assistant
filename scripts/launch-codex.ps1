@@ -101,7 +101,17 @@ function Get-WallpaperLauncher {
 function Read-RequestedDebugPort {
     param([string]$LogPath)
     if (-not (Test-Path -LiteralPath $LogPath)) { return $null }
-    $text = [IO.File]::ReadAllText($LogPath, [Text.UTF8Encoding]::new($false, $true))
+    # Codex still holds the redirected log open for writing, so share read/write access.
+    # Its output may also contain non-UTF-8 OS messages; decode leniently.
+    try {
+        $stream = [IO.File]::Open($LogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+    }
+    catch [IO.IOException] { return $null }
+    try {
+        $reader = New-Object IO.StreamReader($stream, [Text.UTF8Encoding]::new($false, $false))
+        $text = $reader.ReadToEnd()
+    }
+    finally { $stream.Dispose() }
     $match = [regex]::Match($text, '(?m)^\s*DevTools listening on ws://(?:127\.0\.0\.1|\[::1\]):(?<port>[0-9]{1,5})/devtools/browser/[^\s]+\s*$')
     if ($match.Success) { return [int]$match.Groups['port'].Value }
     return $null
