@@ -159,6 +159,60 @@ function Wait-OwnEndpoint {
     throw "Codex did not report its loopback debug port. See $LogPath."
 }
 
+function Get-FreeLoopbackPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try { return $listener.LocalEndpoint.Port }
+    finally { $listener.Stop() }
+}
+
+function Wait-DebugPort {
+    param([Diagnostics.Process]$Process, [int]$Port)
+    $deadline = [DateTime]::UtcNow.AddSeconds($startupTimeoutSeconds)
+    do {
+        try {
+            Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json/version" -UseBasicParsing -TimeoutSec 2 | Out-Null
+            return @{ port = $Port; processId = $Process.Id }
+        }
+        catch { }
+        if ($Process.HasExited) { throw 'Codex exited before its debug endpoint was ready.' }
+        Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'Codex did not report its loopback debug port.'
+}
+
+# Some Windows 10 machines deny running a Store app's executable directly, so the
+# Store Codex is started through Windows app activation, which still passes arguments.
+function Start-CodexStoreApp {
+    param([string[]]$Arguments)
+    $package = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $package) { return $null }
+    $appId = @((Get-AppxPackageManifest -Package $package).Package.Applications.Application)[0].Id
+    if (-not ('YisamaAppActivator' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IApplicationActivationManager {
+    [PreserveSig] int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
+        [MarshalAs(UnmanagedType.LPWStr)] string arguments, int options, out uint processId);
+}
+[ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+class ApplicationActivationManager { }
+public static class YisamaAppActivator {
+    public static uint Activate(string appUserModelId, string arguments) {
+        uint processId;
+        var manager = (IApplicationActivationManager)new ApplicationActivationManager();
+        Marshal.ThrowExceptionForHR(manager.ActivateApplication(appUserModelId, arguments, 0, out processId));
+        return processId;
+    }
+}
+'@
+    }
+    $processId = [YisamaAppActivator]::Activate("$($package.PackageFamilyName)!$appId", ($Arguments -join ' '))
+    return Get-Process -Id $processId
+}
+
 function Write-EndpointFile {
     param([hashtable]$Endpoint)
     New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
@@ -204,8 +258,17 @@ try {
         $executable = Find-CodexExecutable
         New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
         $debugLog = Join-Path $dataRoot ("codex-launch-$([Guid]::NewGuid().ToString('N')).stderr.log")
-        $codex = Start-Process -FilePath $executable -ArgumentList @('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0') -RedirectStandardError $debugLog -PassThru
-        $endpoint = Wait-OwnEndpoint -Process $codex -LogPath $debugLog
+        try {
+            $codex = Start-Process -FilePath $executable -ArgumentList @('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0') -RedirectStandardError $debugLog -PassThru
+            $endpoint = Wait-OwnEndpoint -Process $codex -LogPath $debugLog
+        }
+        catch [InvalidOperationException] {
+            Write-LauncherFailure "Direct Codex start failed, using app activation: $($_.Exception.Message)"
+            $port = Get-FreeLoopbackPort
+            $codex = Start-CodexStoreApp -Arguments @('--remote-debugging-address=127.0.0.1', "--remote-debugging-port=$port")
+            if (-not $codex) { throw }
+            $endpoint = Wait-DebugPort -Process $codex -Port $port
+        }
     }
 
     Write-EndpointFile -Endpoint $endpoint

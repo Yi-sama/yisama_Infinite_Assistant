@@ -101,3 +101,37 @@ test('launcher error dialog names the real failure reason', {
   assert.match(stdout, /无法启动 yisama：something unexpected/)
   assert.match(stdout, /详细记录：TESTROOT.launcher\.stderr\.log/)
 })
+
+// Loads only Get-FreeLoopbackPort and Wait-DebugPort: Store Codex started through app
+// activation has no redirected log, so the launcher polls the port it chose.
+const POLL_PROBE = `
+param([string]$Launcher, [int]$Port)
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+foreach ($name in 'Get-FreeLoopbackPort', 'Wait-DebugPort') {
+    $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name }, $true)
+    Invoke-Expression $function.Extent.Text
+}
+$startupTimeoutSeconds = 30
+"free=$((Get-FreeLoopbackPort) -gt 0)"
+$endpoint = Wait-DebugPort -Process (Get-Process -Id $PID) -Port $Port
+"port=$($endpoint.port) self=$($endpoint.processId -eq $PID)"
+`
+
+test('launcher polls the chosen debug port when Codex has no redirected log', {
+  skip: process.platform !== 'win32' && 'Windows launcher only.',
+  timeout: 60000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-launcher-test-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+  const http = await import('node:http')
+  const server = http.createServer((request, response) => response.end('{}'))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const probe = path.join(root, 'poll.ps1')
+  await fs.writeFile(probe, POLL_PROBE, 'utf8')
+  const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', probe, '-Launcher', launcher, '-Port', String(server.address().port)], { windowsHide: true })
+  assert.deepEqual(stdout.trim().split(/\r?\n/), ['free=True', `port=${server.address().port} self=True`])
+})
