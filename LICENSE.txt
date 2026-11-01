@@ -1,0 +1,42 @@
+YISAMA INFINITE ASSISTANT
+PROPRIETARY SOFTWARE LICENSE
+
+Copyright (c) 2026 yisama Infinite Assistant maintainers.
+
+This software and its source code, binaries, scripts, configuration, artwork,
+documentation, and other included materials are proprietary. They are provided
+only to users who have received permission from the copyright holder.
+
+You may use the software only for the authorized purpose and within the scope
+of the permission granted to you.
+
+Without prior written permission, you may not:
+
+1. Copy, publish, sell, rent, sublicense, or redistribute the software or any
+   substantial part of it.
+2. Modify, repackage, fork, or provide a derivative distribution of the
+   software.
+3. Reverse engineer, decompile, disassemble, extract, or attempt to recover
+   source code, private endpoints, implementation details, or embedded assets.
+4. Remove copyright, authorization, security, or attribution notices.
+5. Use the software or its extracted materials to build or distribute a
+   competing product.
+
+The software is provided as available. The copyright holder is not liable for
+losses caused by unauthorized modification, redistribution, or use outside the
+authorized scope.
+
+Security notice:
+
+Do not upload the installation directory, source code, configuration files,
+session data, API keys, logs, or reverse-engineering results to an AI service,
+code-analysis service, or other third-party service. These files may contain
+private credentials or implementation details.
+
+本软件为专有软件，不是开源软件。除非获得版权所有者的书面授权，否则不得
+复制、发布、转售、出租、再许可、修改、重新打包、反编译、反汇编、提取源
+代码或内部实现、移除版权与授权声明，或再次分发本软件及其组成部分。
+
+请勿将安装目录、源代码、配置文件、会话数据、API Key、日志或反编译结果
+上传到任何 AI 服务、代码分析服务或其他第三方服务。这些内容可能包含私
+密凭证和未公开的实现细节。
