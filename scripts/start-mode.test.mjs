@@ -22,6 +22,8 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
     secret: 'sk-formal-test-key-0123456789',
   }
   const apiCalls = []
+  let sessionReady = false
+  let formalPage = false
   const readBody = async (req) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
@@ -30,12 +32,20 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost')
     apiCalls.push(url.pathname)
+    if (url.pathname === '/') {
+      sessionReady = false
+      formalPage = !url.searchParams.has('demo')
+    }
     const reply = (payload, status = 200) => {
       res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(payload))
     }
     if (url.pathname === '/api/user/auth/refresh') {
+      sessionReady = true
       return reply({ success: true, data: { user: { id: 42, username: 'formal-test' } } })
+    }
+    if (url.pathname === '/api/pricing') {
+      if (formalPage && !sessionReady) return reply({ success: false }, 401)
     }
     if (url.pathname === '/api/user/self') {
       return reply({ success: true, data: { id: 42, username: 'formal-test', quota: apiState.quota } })
@@ -93,7 +103,7 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
   }
   const errors = []
   page.on('pageerror', (error) => errors.push(error.message))
-  await page.goto(`http://127.0.0.1:${server.address().port}/?demo`)
+  await page.goto(`http://127.0.0.1:${server.address().port}/?demo&controls=1`)
   await page.locator('[data-mode="simple"]').click()
   await page.locator('.js-vendors [data-vendor="openai"]').click()
   await page.locator('.js-make-key').click()
@@ -177,6 +187,18 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
     assert.equal(await page.locator('[data-usage-range].is-on').getAttribute('data-usage-range'), 'today')
     await page.locator('[data-usage-range="all"]').click()
     await page.waitForFunction(() => document.querySelector('.js-token-total').textContent === '224')
+    await page.locator('[data-open="topup"]').click()
+    await page.locator('.js-amounts .amt').first().waitFor({ state: 'visible' })
+    assert.equal(await page.locator('.topup-shop').getAttribute('href'), 'https://wzyp.cn/shop/IIIYMQU4')
+    assert.match(await page.locator('#topup').textContent(), /链动小铺/)
+    assert.equal(await page.locator('.js-pay').getAttribute('hidden'), null)
+    assert.equal(await page.locator('.js-amounts .amt').count(), 4)
+    assert.equal(await page.locator('.js-custom').isVisible(), true)
+    assert.equal(await page.locator('.js-redeem').count(), 1)
+    await page.locator('.redeem summary').click()
+    assert.equal(await page.locator('.js-redeem').isVisible(), true)
+    assert.equal(await page.locator('.paid').isHidden(), true)
+    await page.locator('#topup [aria-label="关闭"]').click()
     for (const [width, height] of [[1440, 900], [1280, 600], [390, 844], [320, 640]]) {
       await resizePage({ width, height })
       assert.equal(await page.locator('.apps').isVisible(), true, `applications hidden at ${width}px`)
@@ -210,6 +232,20 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
     await page.evaluate(() => { localStorage.setItem('ys.start.balance', '5') })
     await page.reload()
     await page.locator('.ready').waitFor({ state: 'visible' })
+  })
+
+  await t.test('first-time users see the tutorial once and can skip it', async () => {
+    await page.evaluate(() => localStorage.removeItem('ys.start.tutorialSeen'))
+    await page.goto(`http://127.0.0.1:${server.address().port}/?demo&controls=1&first`)
+    await page.locator('#guide').waitFor({ state: 'visible' })
+    assert.equal(await page.locator('[data-step="0"]').isVisible(), true)
+    assert.equal(await page.evaluate(() => localStorage.getItem('ys.start.tutorialSeen')), null)
+    await page.locator('#guide [data-home]').first().click()
+    await page.locator('#hub').waitFor({ state: 'visible' })
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('ys.start.tutorialSeen'))), true)
+    await page.reload()
+    await page.locator('.ready').waitFor({ state: 'visible' })
+    assert.equal(await page.locator('#guide').isHidden(), true)
   })
 
   await t.test('home steps and headline follow the chosen tool, not only Codex', async () => {
@@ -344,8 +380,9 @@ test('start-mode configuration, prerequisites, billing and clipboard regressions
   })
 
   await t.test('installation and expanded configuration fit desktop and narrow screens', async () => {
-    await page.goto(page.url().replace('?demo', ''))
+    await page.goto(page.url().replace(/\?.*$/, ''))
     await page.locator('.ready').waitFor({ state: 'visible' })
+    assert.equal(await page.locator('.demo').isHidden(), true)
     assert.equal(await page.evaluate(() => localStorage.getItem('ys.start.key')), null)
     assert.notEqual(await page.locator('.js-key').textContent(), apiState.secret)
     assert.equal(apiCalls.filter((path) => path === '/api/user/auth/refresh').length, 1)

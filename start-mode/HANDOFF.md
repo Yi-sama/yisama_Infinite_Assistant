@@ -117,3 +117,18 @@
 - 首页三步和标题按用户选的工具变化（`USES` 里新增 `short / step2 / step3 / tip`）：Codex、Claude Code（PowerShell 3 行命令 → 输入 claude）、聊天软件（添加"OpenAI 兼容"服务商）、自己写程序（改 base_url 和 api_key）。之前写死了"Codex"。
 - 去掉余额下的油量条和"还剩 50%"：它是按上次充值额（默认 ¥10）算的比例，用户看不懂，也和"够用约 N 次"重复。
 - 测试新增"首页步骤跟随工具"一项，共 11 项通过。
+
+## 2026-11-01 正式接入与充值入口
+
+- 实测正式 `new-api-accrual` 的 `/api/pricing` 未登录返回 401；`app.js` 现在先恢复会话，再通过统一请求器读取价格，未登录会跳转 `/sign-in`。本机 `?demo` 仍可独立演示，原型控制条还需要 `?controls=1`。
+- 移除假充值、假到账和兑换码逻辑，充值弹窗改为链动小铺入口：`https://wzyp.cn/shop/IIIYMQU4`，并提示到账后回站刷新余额。
+- 静态文件已同步到测试 `/opt/new-api-design-test/www/start/` 和正式 `/var/www/yisama-site-20261025T155517Z/start/`；`/start/` 路由已存在，无容器重启。两处均保留同目录 `.bak-auth-*` 备份，脚本引用带 `v=20261101-auth` 避免旧缓存。
+- `node --test scripts/start-mode.test.mjs`：11 项通过；生产未登录浏览器无脚本错误并按预期跳转登录页。正式账号登录后的 Key、余额、日志用量和真实调用仍需人工账号验收。
+
+## 2026-11-01 恢复原充值并上线模式切换
+
+- 充值流程恢复为正式站真实接口：金额选择、自定义金额、支付方式、`/api/user/pay`、兑换码 `/api/user/topup` 均保留；链动小铺 `https://wzyp.cn/shop/IIIYMQU4` 作为并列辅助入口，不替代本站充值。
+- 首次生成简洁模式 Key 后自动进入一次教程；跳过或完成后写入 `ys.start.tutorialSeen`，后续不重复显示。正式环境不伪造余额或到账，只有本地 `?demo` 使用演示数据。
+- 专业模式导航桥接只隐藏搜索按钮，并在原位置加入“简洁模式”；通知、语言、设置、用户菜单保持不变。生产 nginx 注入改为 `/site/nav-bridge.js?v=20261101-nav`，避免 CDN 继续使用旧脚本。
+- 已同步测试 `/opt/new-api-design-test/www/start/`、正式 `/var/www/yisama-site-20261025T155517Z/start/` 和两处 `site/nav-bridge.js`。备份时间戳：静态文件 `20261031T185255Z`，nginx 配置 `/etc/nginx/conf.d/api-yisama.conf.bak-20261031T190454Z`。
+- 验证：`node --test scripts/start-mode.test.mjs` 12 项通过；线上静态文件哈希与本地一致；`nginx -t` 通过并 reload；容器未重启。真实账号登录后的支付到账、余额刷新、日志用量，以及登录后专业模式视觉仍需人工确认。

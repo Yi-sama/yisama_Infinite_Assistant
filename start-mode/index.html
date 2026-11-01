@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="style.css?v=20261101-onboarding" />
 </head>
 <body>
 
@@ -183,7 +183,7 @@
 
 <!-- ============ 教程（可选，从首页点进来） ============ -->
 <main class="guide" id="guide" hidden>
-  <button class="back" data-home><span aria-hidden="true">←</span> 返回首页</button>
+  <button class="back" data-home><span aria-hidden="true">←</span> 跳过教程</button>
   <div class="flow">
     <aside class="rail" aria-label="教程进度">
       <svg class="rail__svg" viewBox="0 0 40 600" preserveAspectRatio="none" aria-hidden="true">
@@ -348,13 +348,20 @@
   <h2 id="topup-title" tabindex="-1" autofocus>充值</h2>
   <p class="muted">¥1 = 1 元额度，按实际使用扣费。</p>
   <div class="amounts js-amounts"></div>
-  <label class="custom"><span class="custom__cur">¥</span><input class="js-custom" type="number" min="1" step="1" inputmode="numeric" placeholder="其他金额，最少 1" aria-label="其他金额" /></label>
-  <button class="btn btn--primary btn--wide js-pay"><span class="alipay" aria-hidden="true">支</span><span>用支付宝支付 ¥<span class="js-pay-amt">30</span></span></button>
-  <p class="fine-print">余额用完后 Codex 会直接报错停止，不会欠费，也不会自动扣款。“约 N 句”是按平均用量估算的，长对话会花得更多。</p>
+  <label class="custom">其他金额 <span>¥</span><input class="js-custom" type="number" min="1" max="1000" step="1" inputmode="numeric" placeholder="最少 1" /></label>
+  <label class="pay-method">支付方式 <select class="js-pay-method" aria-label="支付方式"></select></label>
+  <button class="btn btn--primary btn--wide js-pay"><span class="payment-mark" aria-hidden="true">支</span> <span class="js-pay-label">用支付宝支付</span> ¥<span class="js-pay-amt">30</span></button>
+  <p class="payment-empty js-payment-empty" hidden>当前暂未配置在线支付，请使用下面的链动小铺入口或联系管理员。</p>
+  <p class="topup-note">余额用完后会直接报错停止，不会欠费，也不会自动扣款。在线支付完成后，以后台到账和余额刷新结果为准。</p>
+  <div class="topup-alternate">
+    <div><b>也可以前往链动小铺充值</b><span>这里是独立的辅助充值入口。</span></div>
+    <a class="topup-shop" href="https://wzyp.cn/shop/IIIYMQU4" target="_blank" rel="noopener noreferrer">打开链动小铺 <span aria-hidden="true">→</span></a>
+  </div>
   <details class="redeem">
     <summary>有兑换码？</summary>
     <div class="redeem__row"><input class="js-code" placeholder="粘贴兑换码" /><button class="btn js-redeem">兑换</button></div>
   </details>
+  <p class="fine-print">支付方式和兑换码是否可用由正式站后台配置决定；链动小铺不会替代本站原有充值流程。</p>
   <div class="paid" hidden><span class="paid__check"></span><b>已到账 ¥<span class="js-paid">30</span></b></div>
 </dialog>
 
@@ -387,6 +394,6 @@
   <button data-demo="low">余额低</button>
 </nav>
 
-<script src="app.js"></script>
+<script src="app.js?v=20261101-onboarding"></script>
 </body>
 </html>

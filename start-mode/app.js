@@ -1,12 +1,16 @@
-// 简洁模式：?demo 保留本地演示；正式页面使用同源 new-api 接口。
+// 简洁模式：本机 ?demo 保留本地演示；正式页面使用同源 new-api 接口。
 (() => {
   const $ = (s, r = document) => r.querySelector(s)
   const $$ = (s, r = document) => [...r.querySelectorAll(s)]
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
-  const demo = new URLSearchParams(location.search).has('demo')
+  const localPreview = ['127.0.0.1', 'localhost', '::1'].includes(location.hostname)
+  const params = new URLSearchParams(location.search)
+  const demo = localPreview && params.has('demo')
+  const demoTools = demo && params.has('controls')
   const ORIGIN = 'https://api.yisama.asia'
-  const PRICING_URL = demo ? 'api/pricing' : '/api/pricing'
+  const PRICING_URL = '/api/pricing'
   const KEY_NAME = '简洁模式'
+  const SHOP_URL = 'https://wzyp.cn/shop/IIIYMQU4'
   const wait = (ms) => new Promise((r) => setTimeout(r, reduced ? 0 : ms))
   const fmt = (n, dec = 0) => n.toLocaleString('zh-CN', { minimumFractionDigits: dec, maximumFractionDigits: dec })
   let sessionPromise = null
@@ -67,7 +71,12 @@
         throw new Error('AUTH_REQUIRED')
       }
       const payload = await response.json().catch(() => null)
-      if (!response.ok || !payload || payload.success === false) throw new Error(`API_${response.status}`)
+      if (!response.ok || !payload || payload.success === false || payload.message === 'error') {
+        const detail = typeof payload?.data === 'string' ? payload.data : payload?.message
+        const error = new Error(detail || `API_${response.status}`)
+        error.code = `API_${response.status}`
+        throw error
+      }
       return payload
     },
     async session() {
@@ -94,7 +103,7 @@
       }
       return sessionPromise
     },
-    async pricing() { return (await fetch(PRICING_URL, { cache: 'no-store' })).json() },
+    async pricing() { return this.request(PRICING_URL) },
     async findKey() {
       if (demo) return state.keyId ? { id: state.keyId, group: state.group, name: KEY_NAME } : null
       const keyword = encodeURIComponent(KEY_NAME)
@@ -195,17 +204,57 @@
       const usage = await this.usage('7d')
       return { calls: usage.callsByDay || [], spent: usage.spent }
     },
+    async topupInfo() {
+      if (demo) {
+        return {
+          enable_online_topup: true,
+          enable_redemption: true,
+          min_topup: 1,
+          amount_options: [10, 30, 50, 100],
+          pay_methods: [
+            { name: '支付宝', type: 'alipay', min_topup: 1 },
+            { name: '微信支付', type: 'wxpay', min_topup: 1 },
+          ],
+          topup_link: SHOP_URL,
+        }
+      }
+      return (await this.request('/api/user/topup/info')).data || {}
+    },
+    async pay(amount, paymentMethod) {
+      if (demo) {
+        state.balance += amount
+        save()
+        return { message: 'success', data: {}, url: '' }
+      }
+      return this.request('/api/user/pay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { amount, payment_method: paymentMethod },
+      })
+    },
+    async redeem(code) {
+      if (demo) {
+        state.balance += 10
+        save()
+        return { message: 'success', data: 10 }
+      }
+      return this.request('/api/user/topup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { key: code },
+      })
+    },
   }
 
   const store = {
     get: (k, d) => { try { return JSON.parse(localStorage.getItem('ys.start.' + k)) ?? d } catch { return d } },
     set: (k, v) => localStorage.setItem('ys.start.' + k, JSON.stringify(v)),
   }
-  const KEEP = ['live', 'vendor', 'use', 'model', 'group', 'balance', 'keyId', ...(demo ? ['key'] : []), 'scene', 'accessOpen']
+  const KEEP = ['live', 'vendor', 'use', 'model', 'group', 'balance', 'keyId', 'tutorialSeen', ...(demo ? ['key'] : []), 'scene', 'accessOpen']
   if (!demo) localStorage.removeItem('ys.start.key')
   const state = Object.assign({
     live: false, vendor: null, use: null, model: null, group: null, balance: 5,
-    keyId: null, key: null, userId: null, scene: 'qa', accessOpen: false,
+    keyId: null, key: null, userId: null, tutorialSeen: false, scene: 'qa', accessOpen: false,
   },
     Object.fromEntries(KEEP.map((k) => [k, store.get(k, undefined)]).filter(([, v]) => v !== undefined)))
   const save = () => KEEP.forEach((k) => store.set(k, state[k]))
@@ -359,6 +408,20 @@
     watchFirstRequest()
     if (fresh) { keyEl.classList.add('is-decoding'); await scramble(keyEl, mask(state.key)); keyEl.classList.remove('is-decoding') }
     else renderKey()
+    await maybeOpenFirstTutorial()
+  }
+
+  let tutorialOpening = false
+  async function maybeOpenFirstTutorial() {
+    if (tutorialOpening || state.tutorialSeen || !state.key || (demo && !params.has('first'))) return
+    tutorialOpening = true
+    await wait(120)
+    if (!state.tutorialSeen && $('#guide').hidden) {
+      pickCodex('cli')
+      await showView('guide')
+      await go(0, { instant: true })
+    }
+    tutorialOpening = false
   }
 
   function paintAccess() {
@@ -563,7 +626,12 @@
     scrollTo({ top: 0, behavior: 'instant' })
     if (name === 'hub') paintHub()
   }
-  $$('[data-home]').forEach((b) => b.addEventListener('click', () => showView('hub')))
+  function finishTutorial() {
+    state.tutorialSeen = true
+    save()
+    showView('hub')
+  }
+  $$('[data-home]').forEach((b) => b.addEventListener('click', finishTutorial))
   $$('[data-guide]').forEach((b) => b.addEventListener('click', () => { pickCodex(b.dataset.guide); showView('guide'); go(0, { instant: true }) }))
   $('[data-assist]').addEventListener('click', (e) => { e.preventDefault(); toast('真实版本这里下载 Yisama-Setup.exe') })
 
@@ -688,7 +756,147 @@
   }))
 
   // ---------- 弹层 ----------
-  $$('[data-open]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.open === 'settings') paintSettings(); $('#' + b.dataset.open).showModal() }))
+  let amt = 30
+  let paymentMethod = ''
+  let walletTopupInfo = null
+  let walletTopupPromise = null
+
+  function submitPaymentForm(url, params) {
+    const form = document.createElement('form')
+    form.action = url
+    form.method = 'POST'
+    form.target = '_blank'
+    Object.entries(params || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null) return
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = key
+      input.value = String(value)
+      form.appendChild(input)
+    })
+    document.body.appendChild(form)
+    form.submit()
+    form.remove()
+  }
+
+  function pickTopupAmount(value) {
+    amt = Math.max(1, Math.floor(Number(value) || 0))
+    $$('.amt').forEach((button) => button.classList.toggle('is-on', +button.dataset.amt === amt))
+    $('.js-pay-amt').textContent = amt
+  }
+
+  function paintPaymentMethod() {
+    const methods = Array.isArray(walletTopupInfo?.pay_methods) ? walletTopupInfo.pay_methods : []
+    const select = $('.js-pay-method')
+    const current = methods.find((method) => method.type === paymentMethod) || methods[0]
+    paymentMethod = current?.type || ''
+    select.innerHTML = methods.map((method) =>
+      `<option value="${method.type}">${method.name || method.type}</option>`).join('')
+    select.value = paymentMethod
+    select.hidden = methods.length < 2
+    $('.pay-method').hidden = methods.length === 0
+    $('.js-pay-label').textContent = current ? `用${current.name || current.type}支付` : '在线支付'
+    $('.js-pay').hidden = methods.length === 0 || walletTopupInfo?.enable_online_topup === false
+    $('.js-payment-empty').hidden = !$('.js-pay').hidden
+  }
+
+  async function paintTopup() {
+    if (!walletTopupPromise) {
+      walletTopupPromise = api.topupInfo().then((info) => {
+        walletTopupInfo = info || {}
+        return walletTopupInfo
+      }).catch((error) => {
+        walletTopupPromise = null
+        if (error.message !== 'AUTH_REQUIRED') toast(error.message || '充值配置暂时没读出来')
+        walletTopupInfo = { enable_online_topup: false, enable_redemption: true, pay_methods: [] }
+        return walletTopupInfo
+      })
+    }
+    await walletTopupPromise
+    const min = Math.max(1, Number(walletTopupInfo?.min_topup) || 1)
+    const options = [...new Set((walletTopupInfo?.amount_options || [10, 30, 50, 100])
+      .map(Number).filter((value) => Number.isInteger(value) && value >= min && value <= 1000))]
+    const amounts = options.length ? options : [10, 30, 50, 100].filter((value) => value >= min)
+    if (!amounts.includes(amt)) amt = amounts[0] || min
+    $('.js-amounts').innerHTML = amounts.map((value) =>
+      `<button class="amt${value === amt ? ' is-on' : ''}" type="button" data-amt="${value}"><b>¥${value}</b><span>${amtHint(value)}</span></button>`).join('')
+    $$('.amt').forEach((button) => button.addEventListener('click', () => {
+      $('.js-custom').value = ''
+      pickTopupAmount(+button.dataset.amt)
+    }))
+    $('.js-custom').min = String(min)
+    $('.js-custom').max = '1000'
+    $('.js-custom').placeholder = `最少 ${min}`
+    pickTopupAmount(amt)
+    paintPaymentMethod()
+    $('.redeem').hidden = walletTopupInfo?.enable_redemption === false
+  }
+
+  $('.js-custom').addEventListener('input', (event) => {
+    const value = Math.floor(+event.currentTarget.value)
+    if (value > 0) pickTopupAmount(value)
+  })
+  $('.js-pay-method').addEventListener('change', (event) => {
+    paymentMethod = event.currentTarget.value
+    const method = walletTopupInfo?.pay_methods?.find((item) => item.type === paymentMethod)
+    $('.js-pay-label').textContent = method ? `用${method.name || method.type}支付` : '在线支付'
+  })
+  $('.js-pay').addEventListener('click', async () => {
+    const min = Math.max(1, Number(walletTopupInfo?.min_topup) || 1)
+    if (!paymentMethod) return toast('当前没有可用的在线支付方式')
+    if (amt < min || amt > 1000) return toast(`充值金额需要在 ${min} 到 1000 之间`)
+    const button = $('.js-pay')
+    button.disabled = true
+    try {
+      const response = await api.pay(amt, paymentMethod)
+      if (demo) {
+        $('.js-paid').textContent = amt
+        $('.paid').hidden = false
+        await wait(900)
+        $('.paid').hidden = true
+        $('#topup').close()
+        paintHub()
+        toast(`演示到账 ¥${amt}`)
+        return
+      }
+      if (!response.url || !response.data || typeof response.data !== 'object') {
+        throw new Error('支付页面没有正确返回，请联系管理员检查支付配置')
+      }
+      submitPaymentForm(response.url, response.data)
+      $('#topup').close()
+      toast('支付页面已打开，完成支付后余额会按后台回调到账')
+    } catch (error) {
+      if (error.message !== 'AUTH_REQUIRED') toast(error.message || '发起支付失败，请稍后重试')
+    } finally {
+      button.disabled = false
+    }
+  })
+  $('.js-redeem').addEventListener('click', async () => {
+    const input = $('.js-code')
+    const code = input.value.trim()
+    if (!code) return toast('请先粘贴兑换码')
+    const button = $('.js-redeem')
+    button.disabled = true
+    try {
+      const response = await api.redeem(code)
+      const amount = Number(response.data) || 0
+      input.value = ''
+      $('#topup').close()
+      paintHub()
+      toast(amount ? `兑换成功，到账 ¥${amount}` : '兑换成功，余额已刷新')
+    } catch (error) {
+      if (error.message !== 'AUTH_REQUIRED') toast(error.message || '兑换失败，请检查兑换码')
+    } finally {
+      button.disabled = false
+    }
+  })
+
+  $$('[data-open]').forEach((b) => b.addEventListener('click', async () => {
+    if (b.dataset.open === 'settings') paintSettings()
+    const dialog = $('#' + b.dataset.open)
+    dialog.showModal()
+    if (b.dataset.open === 'topup') await paintTopup()
+  }))
   $$('dialog').forEach((d) => d.addEventListener('click', (e) => { if (e.target === d && d.id !== 'gate') d.close() }))
 
   const gate = $('#gate')
@@ -702,28 +910,6 @@
     gate.close()
   }))
   $('[data-mode-switch="pro"]').addEventListener('click', () => store.set('mode', 'pro'))
-
-  // 充值（真实版本：POST /api/user/pay → 支付宝 → 回到 /start/?paid=1 后轮询余额）
-  let amt = 30
-  $('.js-amounts').innerHTML = [10, 30, 50, 100].map((a) => `<button class="amt${a === amt ? ' is-on' : ''}" data-amt="${a}"><b>¥${a}</b><span></span></button>`).join('')
-  function pick(a) {
-    amt = a
-    $$('.amt').forEach((x) => x.classList.toggle('is-on', +x.dataset.amt === a))
-    $('.js-pay-amt').textContent = a
-  }
-  $$('.amt').forEach((b) => b.addEventListener('click', () => { $('.js-custom').value = ''; pick(+b.dataset.amt) }))
-  $('.js-custom').addEventListener('input', (e) => { const v = Math.floor(+e.target.value); if (v >= 1) pick(v) })
-  $('.js-pay').addEventListener('click', async () => {
-    $('.js-paid').textContent = amt
-    $('.paid').hidden = false
-    state.balance += amt
-    save()
-    await wait(1600)
-    $('.paid').hidden = true
-    $('#topup').close()
-    paintHub()
-  })
-  $('.js-redeem').addEventListener('click', () => toast('兑换码会调用 /api/user/topup'))
 
   // 设置：厂商 / 模型 / 线路，全部来自价格表
   function paintSettings() {
@@ -797,7 +983,7 @@
   }
 
   // ---------- 原型控制条 ----------
-  $('.demo').hidden = !new URLSearchParams(location.search).has('demo')
+  $('.demo').hidden = !demoTools
   $('.demo').addEventListener('click', (e) => {
     const a = e.target.dataset.demo
     if (a === 'gate') gate.showModal()
@@ -809,6 +995,7 @@
   // ---------- 启动 ----------
   ;(async () => {
     try {
+      if (!demo && !(await api.session())) return
       loadPricing(await api.pricing())
       if (!store.get('mode')) gate.showModal()
       const restored = demo

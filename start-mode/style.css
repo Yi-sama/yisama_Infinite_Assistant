@@ -563,25 +563,68 @@ dialog::backdrop { background: rgba(4, 4, 8, .6); backdrop-filter: blur(6px); an
   text-align: left; padding: 14px 16px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line);
   transition: border-color .25s, background .25s, transform .2s var(--ease);
 }
-.amt:hover { border-color: var(--line-2); }
-.amt:active { transform: scale(.97); }
+.amt:hover { border-color: var(--line-2); transform: translateY(-1px); }
 .amt b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
-.amt span { font-size: 13px; color: var(--fg-3); }
+.amt span { display: block; min-height: 20px; font-size: 13px; color: var(--fg-3); }
 .amt.is-on { border-color: var(--vio); background: rgba(128, 96, 224, .1); box-shadow: inset 0 0 0 1px var(--vio); }
 .amt.is-on span { color: var(--fg-2); }
-.custom { display: flex; align-items: center; gap: 8px; margin: 12px 0 18px; padding: 10px 14px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); color: var(--fg-3); font-size: 14px; }
-.custom__cur { color: var(--fg-2); font-size: 16px; }
-.custom input { flex: 1; min-width: 0; background: none; border: 0; color: var(--fg); font: 600 16px var(--sans); outline: none; }
+.custom {
+  display: flex; align-items: center; gap: 8px; margin: 12px 0 14px; padding: 10px 14px;
+  border-radius: 12px; background: var(--bg); border: 1px solid var(--line); color: var(--fg-3); font-size: 14px;
+}
+.custom span { margin-left: auto; color: var(--fg-2); }
+.custom input { width: 100px; background: none; border: 0; color: var(--fg); font: 600 16px var(--sans); outline: none; }
 .custom:focus-within { border-color: var(--vio); }
-.alipay { width: 22px; height: 22px; border-radius: 6px; background: #fff; color: #1677ff; font-size: 13px; font-weight: 900; display: grid; place-items: center; }
-.fine-print { margin: 14px 0 0; font-size: 12px; line-height: 1.6; color: var(--fg-3); }
+.pay-method {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px;
+  color: var(--fg-3); font-size: 13px;
+}
+.pay-method select {
+  min-width: 140px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--fg); outline: none;
+}
+.pay-method select:focus { border-color: var(--vio); }
+.payment-mark {
+  width: 22px; height: 22px; border-radius: 6px; background: #fff; color: #1677ff;
+  font-size: 13px; font-weight: 900; display: grid; place-items: center;
+}
+.payment-empty { margin: 12px 0 0; color: var(--warn); font-size: 13px; }
+.topup-note { margin: 18px 0; padding: 12px 14px; border: 1px solid rgba(32, 192, 224, .24); border-radius: 12px; background: rgba(32, 192, 224, .06); color: var(--fg-2); font-size: 13px; line-height: 1.6; }
+.topup-alternate {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 16px; padding: 12px 14px;
+  border: 1px solid rgba(224, 96, 192, .26); border-radius: 12px; background: rgba(224, 96, 192, .06);
+}
+.topup-alternate div { display: grid; gap: 2px; min-width: 0; }
+.topup-alternate b { font-size: 13px; }
+.topup-alternate span { color: var(--fg-3); font-size: 12px; }
+.topup-shop {
+  flex: none; padding: 7px 10px; border: 1px solid rgba(224, 96, 192, .4); border-radius: 9px;
+  color: var(--fg); text-decoration: none; white-space: nowrap; font-size: 13px;
+}
+.topup-shop:hover { background: rgba(224, 96, 192, .12); }
+.topup-shop span { transition: transform .25s var(--ease); }
+.topup-shop:hover span { transform: translateX(3px); }
 .redeem { margin-top: 14px; font-size: 13px; color: var(--fg-3); }
 .redeem summary { cursor: pointer; }
 .redeem__row { display: flex; gap: 8px; margin-top: 10px; }
-.redeem__row input { flex: 1; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); color: var(--fg); font: 14px var(--mono); }
-.paid { position: absolute; inset: 0; border-radius: inherit; background: var(--bg-2); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; font-size: 22px; animation: fade .3s both; }
-.paid__check { width: 84px; height: 84px; border-radius: 50%; background: rgba(60, 220, 154, .12); border: 2px solid var(--ok); position: relative; animation: pop .6s var(--spring) both; }
-.paid__check::after { content: ""; position: absolute; left: 28px; top: 18px; width: 18px; height: 34px; border: solid var(--ok); border-width: 0 4px 4px 0; transform: rotate(45deg); animation: fade .3s .3s both; }
+.redeem__row input {
+  flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; background: var(--bg);
+  border: 1px solid var(--line); color: var(--fg); font: 14px var(--mono);
+}
+.paid {
+  position: absolute; inset: 0; border-radius: inherit; background: var(--bg-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+  font-size: 22px; animation: fade .3s both;
+}
+.paid__check {
+  width: 84px; height: 84px; border-radius: 50%; background: rgba(60, 220, 154, .12);
+  border: 2px solid var(--ok); position: relative; animation: pop .6s var(--spring) both;
+}
+.paid__check::after {
+  content: ""; position: absolute; left: 28px; top: 18px; width: 18px; height: 34px;
+  border: solid var(--ok); border-width: 0 4px 4px 0; transform: rotate(45deg); animation: fade .3s .3s both;
+}
+.fine-print { margin: 14px 0 0; font-size: 12px; line-height: 1.6; color: var(--fg-3); }
 
 .drawer fieldset { border: 0; padding: 0; margin: 22px 0 0; display: grid; gap: 8px; }
 .drawer legend { font-size: 12px; color: var(--fg-3); font-family: var(--mono); letter-spacing: .08em; margin-bottom: 8px; }
@@ -758,9 +801,5 @@ dialog::backdrop { background: rgba(4, 4, 8, .6); backdrop-filter: blur(6px); an
 .btn-sm--lg { padding: 10px 26px; font-size: 15px; margin-bottom: 4px; }
 .meter--balance.is-low .btn-sm { background: var(--warn); color: #1a1000; box-shadow: 0 8px 24px -8px rgba(240, 160, 64, .8); }
 .sheet[open] { padding: 24px; }
-.amounts { margin-top: 16px; }
-.amt { padding: 12px 14px; }
-.custom { margin: 10px 0 14px; }
-.sheet .js-pay:focus-visible, .amt:focus-visible { outline: 2px solid var(--cyan, #20c0e0); outline-offset: 2px; }
 @media (max-width: 560px) { .balance-row { flex-wrap: wrap; } .btn-sm--lg { width: 100%; padding: 12px; } }
 #topup-title:focus { outline: none; }
