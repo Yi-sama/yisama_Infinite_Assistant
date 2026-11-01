@@ -2,7 +2,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import readline from 'node:readline/promises'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, createPublicKey, randomUUID, verify as verifySignature } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
@@ -16,6 +16,12 @@ import {
 
 export { DEFAULT_ORIGIN, PROVIDER_ID, patchCodexConfig }
 export const KEY_PREFIX = 'yisama-infinite-assistant'
+const ASSISTANT_VERSION = '0.1.0'
+const ASSISTANT_LICENSE_PUBLIC_KEY =
+  'MCowBQYDK2VwAyEAwdYPN4l6iJ9vQDCV6FZEFPDrsAJBenNhJIeDGeMxf10='
+const ASSISTANT_LICENSE_RENEW_BEFORE = 24 * 60 * 60
+const assistantLicenseRequired = typeof __YISAMA_LICENSE_REQUIRED__ === 'undefined'
+  ? false : __YISAMA_LICENSE_REQUIRED__
 const REASONING_LABELS = {
   none: '关闭', minimal: '最少', low: '低', medium: '中', high: '高',
   xhigh: '超高（XHigh）', max: '最高（Max）', ultra: '极致（Ultra）',
@@ -171,6 +177,7 @@ export function paths() {
     pluginData,
     state: path.join(pluginData, 'state.json'),
     session: path.join(pluginData, 'session.json'),
+    license: path.join(pluginData, 'license.json'),
     codexConfig: path.join(codexHome, 'config.toml'),
     codexAuth: path.join(codexHome, 'auth.json'),
   }
@@ -183,6 +190,73 @@ async function readJson(file, fallback = null) {
 
 async function writeJson(file, value) {
   await replaceFile(file, JSON.stringify(value, null, 2) + '\n')
+}
+
+function assistantLicenseBytes(payload) {
+  return JSON.stringify({
+    version: payload?.version,
+    license_id: payload?.license_id,
+    user_id: payload?.user_id,
+    installation_id: payload?.installation_id,
+    issued_at: payload?.issued_at,
+    expires_at: payload?.expires_at,
+  })
+}
+
+function assistantLicensePublicKey() {
+  return createPublicKey({
+    key: Buffer.from(ASSISTANT_LICENSE_PUBLIC_KEY, 'base64'),
+    format: 'der',
+    type: 'spki',
+  })
+}
+
+function validAssistantLicense(lease, installationId, userId, now = Math.floor(Date.now() / 1000)) {
+  const payload = lease?.payload
+  if (!payload || payload.version !== 1 || payload.user_id !== userId ||
+      payload.installation_id !== installationId || typeof payload.license_id !== 'string' ||
+      !Number.isSafeInteger(payload.issued_at) || !Number.isSafeInteger(payload.expires_at) ||
+      payload.issued_at > now + 300 || payload.expires_at <= now ||
+      typeof lease.signature !== 'string') return false
+  let signature
+  try { signature = Buffer.from(lease.signature, 'base64') } catch { return false }
+  if (signature.length !== 64) return false
+  return verifySignature(null, Buffer.from(assistantLicenseBytes(payload)), assistantLicensePublicKey(), signature)
+}
+
+function licenseError(code, message) {
+  const error = new UserError(message)
+  error.publicCode = code
+  return error
+}
+
+async function ensureAssistantLicense(session) {
+  if (!assistantLicenseRequired) return
+  const file = paths().license
+  const stored = await readJson(file, {})
+  const installationId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    stored?.installationId || '') ? stored.installationId : randomUUID()
+  const now = Math.floor(Date.now() / 1000)
+  if (validAssistantLicense(stored?.lease, installationId, session.user?.id, now + ASSISTANT_LICENSE_RENEW_BEFORE)) return
+
+  let response
+  try {
+    response = await requestApi('/assistant/license/activate', {
+      token: session.token, method: 'POST',
+      body: { installation_id: installationId, version: ASSISTANT_VERSION, client: 'codex-windows' },
+    })
+  } catch (error) {
+    if (error.status === 403) throw licenseError('LICENSE_REVOKED', '当前安装未获授权，请联系管理员。')
+    if (error.status === 404 || error.status === 503) {
+      throw licenseError('LICENSE_UNAVAILABLE', '授权服务暂时不可用，请更新后重试。')
+    }
+    throw licenseError('LICENSE_FAILED', '授权验证失败，请稍后重试。')
+  }
+  const lease = response.data
+  if (!validAssistantLicense(lease, installationId, session.user?.id, now)) {
+    throw licenseError('LICENSE_INVALID', '授权响应无效，请联系管理员。')
+  }
+  await writeJson(file, { installationId, lease, updatedAt: new Date().toISOString() })
 }
 
 function apiError(status) {
@@ -322,7 +396,9 @@ export async function authenticatedSession({ interactive = true, onPortalOpen } 
     if (!session.expiresAt || session.expiresAt * 1000 > Date.now() + 30000) {
       try {
         const response = await requestApi('/user/self', { token: session.token })
-        return { ...session, user: response.data }
+        const current = { ...session, user: response.data }
+        await ensureAssistantLicense(current)
+        return current
       } catch (error) {
         if (error.status !== 401) throw error
       }
@@ -343,7 +419,9 @@ export async function authenticatedSession({ interactive = true, onPortalOpen } 
             cookies: (await context.storageState()).cookies.filter((cookie) => cookie.name === 'new_api_refresh'),
           }
           await writeJson(paths().session, session)
-          return { ...session, user: payload.data.user }
+          const current = { ...session, user: payload.data.user }
+          await ensureAssistantLicense(current)
+          return current
         }
         if (![401, 403].includes(response.status())) throw apiError(response.status())
       } finally {
@@ -354,7 +432,9 @@ export async function authenticatedSession({ interactive = true, onPortalOpen } 
   if (!interactive) throw new UserError('请先登录 yisama 无限助手。')
   session = await signInWithPortal(origin, { onPortalOpen })
   const response = await requestApi('/user/self', { token: session.token })
-  return { ...session, user: response.data }
+  const current = { ...session, user: response.data }
+  await ensureAssistantLicense(current)
+  return current
 }
 
 export async function fetchGroupInfo(token) {
@@ -1314,7 +1394,10 @@ export async function run(argv = process.argv.slice(2)) {
   throw new UserError('操作不存在。')
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+const cliEntryEnabled = typeof __YISAMA_CLI_ENTRY__ === 'undefined' ? true : __YISAMA_CLI_ENTRY__
+
+if (cliEntryEnabled &&
+    process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   run().catch((error) => {
     console.error(`yisama 无限助手：${safeError(error)}`)
     process.exitCode = 1

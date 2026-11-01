@@ -16,7 +16,13 @@
 
 安装不登录、不改变当前模型或认证信息。用户登录后才写入相关配置，并保留原始备份；退出账号可恢复原配置。卸载只移除本助手拥有的入口，不擅自删除登录和备份数据。
 
-维护者运行 `npm run build:windows` 构建安装包，自带 Node.js 与生产依赖，用户无需另装 Node.js。可用 `Yisama-Setup.exe --dry-run` 检查安装条件，不执行安装。安装包隔离测试需先构建，再设置 `YISAMA_WINDOWS_TESTS=1` 运行 `npm test`。界面截图使用模拟账号与余额，不代表真实账号联调通过。
+维护者运行 `npm run build:windows` 构建安装包，需要先安装 Inno Setup 6（`winget install JRSoftware.InnoSetup`，或用 `YISAMA_ISCC` 指定 `ISCC.exe`）。安装器脚本在 `installer/yisama.iss`，图标由 `node scripts/build-icon.mjs` 从 `brand-logo/v5/final` 生成到 `windows/assets/`。安装包只包含压缩后的运行入口、启动脚本和生产依赖，不包含测试文件、源码地图或交接文档；用户无需另装 Node.js。安装到当前用户目录、无需管理员权限，会出现在“应用和功能”中；卸载前先恢复原 Codex 配置，恢复失败则取消卸载。安装包测试需先构建，再设置 `YISAMA_WINDOWS_TESTS=1` 运行 `npm test`，测试以 `/YISAMATEST=1` 安装到临时目录，不创建快捷方式和卸载项。界面截图使用模拟账号与余额，不代表真实账号联调通过。
+
+在线授权默认关闭；打包时设置 `YISAMA_REQUIRE_LICENSE=1` 才会启用，启用前须先在实际处理流量的服务端部署授权接口和私钥。
+
+正式发布时可通过 `YISAMA_SIGNTOOL`、`YISAMA_SIGN_CERT`、`YISAMA_SIGN_CERT_PASSWORD`
+和可选的 `YISAMA_SIGN_TIMESTAMP_URL` 配置 Windows 签名；设置
+`YISAMA_REQUIRE_SIGNATURE=1` 会拒绝生成未签名安装包。
 
 本机开发更新使用 `npm run update:local`，不再运行安装器。该命令只替换助手脚本，并在助手空闲、面板关闭时重新加载助手进程，不重启 Codex、不改账号或 Codex 配置。可先用 `npm run update:local -- --dry-run` 查看变更；运行环境或依赖变化时会拒绝脚本更新。旧版助手首次接入更新机制需由维护者重载助手进程，之后自动接收本地更新通知。当前未提供在线自动下载更新，正式发布前需配置可信更新源。
 

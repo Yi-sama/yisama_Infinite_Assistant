@@ -29,9 +29,9 @@ async function digest(file) {
   }
 }
 
-test('Windows installer packages the Codex launcher without native overlay automation', {
+test('Windows installer installs the bundled launcher payload', {
   skip: !enabled && 'Build Windows artifacts and set YISAMA_WINDOWS_TESTS=1 for isolated installer checks.',
-  timeout: 90000,
+  timeout: 180000,
 }, async (t) => {
   await fs.access(installer)
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-windows-test-'))
@@ -41,42 +41,55 @@ test('Windows installer packages the Codex launcher without native overlay autom
   const protectedFiles = ['config.toml', 'auth.json'].map((name) => path.join(realHome, name))
   const before = await Promise.all(protectedFiles.map(digest))
 
-  let dryRun
-  try {
-    dryRun = await exec(installer, ['--dry-run'])
-  } catch (error) {
-    assert.equal(error.code, 2)
-    dryRun = error
-  }
-  assert.match(dryRun.stdout, /BLOCKED|Dry run completed/)
-  if (/Dry run completed/.test(dryRun.stdout)) assert.match(dryRun.stdout, /shortcuts named Codex - yisama/)
-  assert.doesNotMatch(dryRun.stdout, /Would set HKCU/i)
-
-  const unpacked = await exec(installer, ['--extract-test', root])
-  const match = /Extracted payload only:\s*(.+)/.exec(unpacked.stdout)
-  assert.ok(match, 'Installer must report its isolated extraction directory')
-  const extracted = match[1].trim()
-  assert.ok((await fs.realpath(extracted)).toLowerCase().startsWith(
-    (await fs.realpath(root)).toLowerCase() + path.sep))
+  // Test mode installs files only: no Codex check, shortcuts, registry or uninstaller.
+  const extracted = path.join(root, 'app')
+  await exec(installer, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/YISAMATEST=1',
+    `/DIR=${extracted}`, `/LOG=${path.join(root, 'setup.log')}`], { timeout: 120000 })
+  await assert.rejects(fs.access(path.join(extracted, 'unins000.exe')))
+  await fs.access(path.join(extracted, 'yisama.ico'))
+  await assert.rejects(exec('reg.exe', ['query',
+    'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{2FEC2B14-5ABC-420F-A522-A943ACC9B195}_is1']),
+  'test mode must not register an uninstaller')
 
   for (const relative of [
     'runtime/node.exe',
     'runtime/Node-LICENSE.txt',
     'scripts/launch-codex.ps1',
     'scripts/codex-assistant.mjs',
+    'scripts/yisama.mjs',
+    'package.json',
+    'LICENSE.txt',
+    'release-manifest.json',
+    'node_modules/playwright/package.json',
+    'node_modules/playwright-core/package.json',
+  ]) await fs.access(path.join(extracted, relative))
+  for (const relative of [
     'scripts/codex-panel.mjs',
     'scripts/desktop-bridge.mjs',
+    'scripts/codex-config.mjs',
     'scripts/update-local.mjs',
+    'node_modules/esbuild/package.json',
     'node_modules/smol-toml/package.json',
-  ]) await fs.access(path.join(extracted, relative))
+  ]) await assert.rejects(fs.access(path.join(extracted, relative)))
+  const packagedFiles = await fs.readdir(path.join(extracted, 'scripts'))
+  assert.deepEqual(packagedFiles.sort(), ['codex-assistant.mjs', 'launch-codex.ps1', 'yisama.mjs'])
+  const releasePackage = JSON.parse(await fs.readFile(path.join(extracted, 'package.json'), 'utf8'))
+  assert.deepEqual(releasePackage.dependencies, { playwright: '1.64.1' })
+  const manifest = JSON.parse(await fs.readFile(path.join(extracted, 'release-manifest.json'), 'utf8'))
+  assert.equal(manifest.sourceIncluded, false)
+  assert.equal(manifest.sourceMapsIncluded, false)
+  assert.equal(manifest.testFilesIncluded, false)
   const license = await fs.readFile(path.join(extracted, 'runtime/Node-LICENSE.txt'), 'utf8')
   assert.ok(license.length > 10000, 'the runtime must include its complete distribution license')
   assert.match(license, /MIT License/)
   await assert.rejects(fs.access(path.join(extracted, 'Host.exe')))
-  for (const name of ['launch-codex.ps1', 'codex-assistant.mjs', 'codex-panel.mjs',
-    'desktop-bridge.mjs', 'yisama.mjs', 'codex-config.mjs', 'update-local.mjs']) {
-    assert.equal(await digest(path.join(extracted, 'scripts', name)),
-      await digest(path.join(repository, 'scripts', name)), `${name} must match the final source`)
+  assert.equal(await digest(path.join(extracted, 'scripts', 'launch-codex.ps1')),
+    await digest(path.join(repository, 'scripts', 'launch-codex.ps1')))
+  for (const name of ['codex-assistant.mjs', 'yisama.mjs']) {
+    assert.notEqual(await digest(path.join(extracted, 'scripts', name)),
+      await digest(path.join(repository, 'scripts', name)), `${name} must be bundled`)
+    const bundled = await fs.readFile(path.join(extracted, 'scripts', name), 'utf8')
+    assert.doesNotMatch(bundled, /sourceMappingURL|from\s+["']\.\/(?:codex|desktop|yisama)/)
   }
 
   const node = path.join(extracted, 'runtime', 'node.exe')

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="yisama 无限助手">
+  <defs>
+    <linearGradient id="spectrum" gradientUnits="userSpaceOnUse" x1="92" y1="0" x2="408" y2="0">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.5" stop-color="#A78BFA"/>
+      <stop offset="1" stop-color="#FB7185"/>
+    </linearGradient>
+    <path id="key" d="M408 236H312C280 236 262 250 236 268C210 287 186 312 150 312C112 312 92 288 92 262C92 234 114 210 150 210C184 210 206 240 236 268L262 292"/>
+    <path id="teeth" d="M352 236V282M392 236V272"/>
+    <path id="over" d="M312 236C280 236 262 250 236 268C210 287 186 312 150 312"/>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0E0E14"/>
+  <g fill="none" stroke-linejoin="round" transform="translate(256 256) scale(1.2) translate(-250 -261)">
+    <g stroke="#F4F1EA" stroke-width="46" stroke-linecap="round"><use href="#key"/><use href="#teeth"/></g>
+    <g stroke="url(#spectrum)" stroke-width="20" stroke-linecap="round"><use href="#key"/><use href="#teeth"/></g>
+    <use href="#over" stroke="#F4F1EA" stroke-width="46" stroke-linecap="butt"/>
+    <use href="#over" stroke="url(#spectrum)" stroke-width="20" stroke-linecap="butt"/>
+  </g>
+</svg>

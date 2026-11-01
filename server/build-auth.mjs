@@ -64,7 +64,9 @@ async function candidateOverlay(inputs) {
   const marker = '\tanonymousRequestBodyLimit := middleware.AnonymousRequestBodyLimit()'
   if (routerText.split(marker).length !== 2) throw new Error('Router insertion point changed.')
   const patchedRouter = path.join(output, 'api-router.go')
-  await fs.writeFile(patchedRouter, routerText.replace(marker, `${marker}\n\tsetAssistantAuthRoutes(apiRouter)`), 'utf8')
+  await fs.writeFile(patchedRouter, routerText.replace(
+    marker, `${marker}\n\tsetAssistantAuthRoutes(apiRouter)\n\tsetAssistantLicenseRoutes(apiRouter)`,
+  ), 'utf8')
   replacements[routerFile] = patchedRouter
   const userFile = path.join(inputs.source, 'controller/user.go')
   const userText = await fs.readFile(replacements[userFile], 'utf8')
@@ -76,6 +78,8 @@ async function candidateOverlay(inputs) {
   replacements[path.join(inputs.source, 'router/assistant-auth.go')] = path.join(here, 'assistant-auth.go')
   replacements[path.join(inputs.source, 'middleware/assistant-auth-rate-limit.go')] = path.join(here, 'assistant-auth-rate-limit.go')
   replacements[path.join(inputs.source, 'router/assistant-auth_test.go')] = path.join(here, 'assistant-auth_test.go')
+  replacements[path.join(inputs.source, 'router/assistant-license.go')] = path.join(here, 'assistant-license.go')
+  replacements[path.join(inputs.source, 'router/assistant-license_test.go')] = path.join(here, 'assistant-license_test.go')
   const overlay = path.join(output, 'candidate-overlay.json')
   await fs.writeFile(overlay, JSON.stringify({ Replace: replacements }, null, 2), 'utf8')
   return overlay
@@ -110,7 +114,7 @@ else {
   const overlay = isBaseline ? path.join(output, 'baseline-overlay.json') : await candidateOverlay(inputs)
   const artifact = path.join(output, isBaseline ? 'new-api.baseline' : 'new-api')
   const args = isTest
-    ? ['test', '-p', '1', '-overlay', overlay, '-run', '^TestAssistantAuth', '-count=1', './router']
+    ? ['test', '-p', '1', '-overlay', overlay, '-run', '^TestAssistant', '-count=1', './router']
     : ['build', '-p', '1', '-trimpath', '-buildvcs=false', '-overlay', overlay, '-o', artifact, '.']
   const child = spawn('go', args, {
     cwd: inputs.source, stdio: 'inherit', windowsHide: true,
@@ -135,7 +139,10 @@ else {
       if (baseline.baselineSha256 !== inputs.baselineSha256) throw new Error('Baseline changed.')
       await fs.writeFile(path.join(output, 'manifest.json'), JSON.stringify({
         baselineSha256: inputs.baselineSha256, sha256: sha(binary),
-        changedSources: ['router/api-router.go', 'controller/user.go', 'router/assistant-auth.go', 'middleware/assistant-auth-rate-limit.go'],
+        changedSources: [
+          'router/api-router.go', 'controller/user.go', 'router/assistant-auth.go',
+          'middleware/assistant-auth-rate-limit.go', 'router/assistant-license.go',
+        ],
         remoteBuild: false,
       }, null, 2), 'utf8')
     }
