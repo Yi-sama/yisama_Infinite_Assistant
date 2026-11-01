@@ -43,3 +43,32 @@ test('launcher reads the debug port while Codex still holds its log open', {
     '-File', probe, '-Launcher', launcher, '-LogPath', path.join(root, 'codex.stderr.log')], { windowsHide: true })
   assert.equal(stdout.trim(), 'running=True port=43123')
 })
+
+// Loads only Wait-CodexDesktopExit with a stubbed process list: Codex lingers for
+// about one second after its window closes, then a second stub never exits.
+const WAIT_PROBE = `
+param([string]$Launcher)
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+$function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Wait-CodexDesktopExit' }, $true)
+Invoke-Expression $function.Extent.Text
+$script:exitAt = [DateTime]::UtcNow.AddSeconds(1)
+function Get-CodexDesktopProcesses { if ([DateTime]::UtcNow -lt $script:exitAt) { @('codex') } }
+"lingering=$(Wait-CodexDesktopExit -Seconds 10)"
+$script:exitAt = [DateTime]::MaxValue
+"stuck=$(Wait-CodexDesktopExit -Seconds 1)"
+`
+
+test('launcher waits for a just-closed Codex to finish exiting', {
+  skip: process.platform !== 'win32' && 'Windows launcher only.',
+  timeout: 60000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-launcher-test-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+  const probe = path.join(root, 'wait.ps1')
+  await fs.writeFile(probe, WAIT_PROBE, 'utf8')
+  const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', probe, '-Launcher', launcher], { windowsHide: true })
+  assert.deepEqual(stdout.trim().split(/\r?\n/), ['lingering=True', 'stuck=False'])
+})

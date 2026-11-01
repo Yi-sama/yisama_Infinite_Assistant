@@ -12,6 +12,7 @@ $assistantScript = Join-Path $PSScriptRoot 'codex-assistant.mjs'
 $dataRoot = Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant'
 $endpointFile = Join-Path $dataRoot 'codex-endpoint.json'
 $startupTimeoutSeconds = 60
+$codexExitTimeoutSeconds = 20
 
 function Show-LauncherError {
     param([string]$Message)
@@ -42,6 +43,18 @@ function Get-CodexDesktopProcesses {
     @(Get-Process -Name ChatGPT, Codex -ErrorAction SilentlyContinue | Where-Object {
         try { Test-CodexDesktopPath $_.Path } catch { $false }
     })
+}
+
+# Codex keeps background processes alive for a few seconds after its window closes,
+# so an immediate relaunch waits for them instead of failing.
+function Wait-CodexDesktopExit {
+    param([int]$Seconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    while (Get-CodexDesktopProcesses) {
+        if ([DateTime]::UtcNow -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 500
+    }
+    return $true
 }
 
 function Find-CodexExecutable {
@@ -147,7 +160,7 @@ try {
         exit 0
     }
 
-    if (Get-CodexDesktopProcesses) {
+    if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
         throw 'Codex 正在运行，请先完全关闭，再打开 Codex - yisama。'
     }
 
