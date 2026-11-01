@@ -687,7 +687,7 @@ export function installAssistantUI(options = {}) {
     const payment = state.rechargePayment
     rechargePayment.hidden = !payment?.paymentUrl
     rechargePaymentText.textContent = payment?.paymentUrl
-      ? `订单已创建：${payment.amount}，请继续完成支付。` : ''
+      ? `订单已创建：${payment.amount}。请在 10 分钟内完成支付，超时请重新创建订单。` : ''
     rechargePaymentButton.disabled = locked
   }
   const placePanel = () => {
@@ -1350,7 +1350,7 @@ export function installAssistantUI(options = {}) {
             fields: data.fields && typeof data.fields === 'object' ? data.fields : {},
             amount: Number(data.amount) || rechargeValue(),
           }
-          state.message = '订单已创建，请继续完成支付。'
+          state.message = '订单已创建。请在 10 分钟内完成支付，超时请重新创建订单。'
         } else {
           applyData(data, entry.action === 'status')
           if (data.configured && ['select', 'login'].includes(entry.action)) state.nativeSync = 'pending'
