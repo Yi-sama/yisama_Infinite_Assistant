@@ -767,3 +767,26 @@ test('short group lists do not show a search field', async (t) => {
   await open(signedIn())
   assert.equal(await page.locator('[data-testid="group-search"]').isHidden(), true)
 })
+
+test('one click on create order still creates it while the typed amount is being priced', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, commands, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  await page.locator('[data-testid="recharge"]').click()
+  await respond(await next('rechargeInfo'), { ok: true, data: {
+    amountOptions: [10], paymentMethods: [{ name: '支付宝', type: 'alipay', minTopup: 0 }], minTopup: 1, currency: 'USD',
+  } })
+  await page.locator('[data-testid="recharge-amount"]').fill('5')
+  // Clicking blurs the amount field, which starts pricing before the click lands.
+  await page.locator('[data-testid="recharge-submit"]').click()
+  const pricing = await next('rechargeAmount')
+  assert.equal(commands.filter((value) => value.action === 'rechargePay').length, 0)
+  assert.equal(await page.locator('[data-testid="recharge-submit"]').textContent(), '正在创建…')
+  await respond(pricing, { ok: true, data: { paymentAmount: 5 } })
+  const pay = await next('rechargePay')
+  assert.deepEqual({ amount: pay.amount, method: pay.paymentMethod }, { amount: 5, method: 'alipay' })
+  await respond(pay, { ok: true, data: { paymentUrl: 'https://pay.example.test/checkout/1', fields: {}, amount: 5 } })
+  assert.equal(await page.locator('[data-testid="recharge-payment"]').isVisible(), true)
+})

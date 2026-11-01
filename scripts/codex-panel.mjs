@@ -12,6 +12,8 @@ export function installAssistantUI(options = {}) {
 
   const cleanups = []
   const pending = new Map()
+  // An order requested while its amount is still being priced is created once pricing settles.
+  let payAfterAmount = false
   const storageKey = 'yisama-infinite-assistant-ui-position-v1'
   const state = {
     open: false,
@@ -746,9 +748,10 @@ export function installAssistantUI(options = {}) {
       info.minTopup || 0)
     rechargeEstimateLabel.textContent = minTopup && amount < minTopup ? `最低 ${minTopup}` : '预计支付'
     rechargeEstimateValue.textContent = state.rechargePaymentAmount || '—'
-    rechargeSubmit.disabled = locked || !amount || !selectedMethod || Boolean(minTopup && amount < minTopup) ||
-      hasActivePending('rechargeInfo') || hasActivePending('rechargeAmount') || hasActivePending('rechargePay')
-    rechargeSubmit.textContent = hasActivePending('rechargePay') ? '正在创建…' : '创建订单'
+    // Pricing alone must not lock the button: the click that blurred the amount field is still on its way.
+    rechargeSubmit.disabled = (locked && !hasActivePending('rechargeAmount')) || !amount || !selectedMethod || Boolean(minTopup && amount < minTopup) ||
+      hasActivePending('rechargeInfo') || hasActivePending('rechargePay') || payAfterAmount
+    rechargeSubmit.textContent = hasActivePending('rechargePay') || payAfterAmount ? '正在创建…' : '创建订单'
     const payment = state.rechargePayment
     rechargePayment.hidden = !payment?.paymentUrl
     rechargePaymentText.textContent = payment?.paymentUrl
@@ -1331,6 +1334,7 @@ export function installAssistantUI(options = {}) {
   })
   addListener(rechargeAmountInput, 'input', () => {
     state.rechargeAmount = rechargeAmountInput.value
+    payAfterAmount = false
     state.rechargePayment = null
     state.rechargePaymentAmount = ''
     render()
@@ -1350,10 +1354,16 @@ export function installAssistantUI(options = {}) {
     }
   })
   addListener(rechargeSubmit, 'click', () => {
-    if (hasForegroundPending()) return
     const amount = rechargeValue()
     const paymentMethod = rechargeMethod()
-    if (amount && paymentMethod) request('rechargePay', { amount, paymentMethod })
+    if (!amount || !paymentMethod) return
+    // Leaving the amount field to click here starts pricing first; the click must not be lost.
+    if (hasActivePending('rechargeAmount')) {
+      payAfterAmount = true
+      render()
+      return
+    }
+    if (!hasForegroundPending()) request('rechargePay', { amount, paymentMethod })
   })
   addListener(rechargePaymentButton, 'click', () => {
     const payment = state.rechargePayment
@@ -1429,6 +1439,8 @@ export function installAssistantUI(options = {}) {
       if (!entry) return false
       pending.delete(response.id)
       window.clearTimeout(entry.timer)
+      const queuedPay = entry.action === 'rechargeAmount' && payAfterAmount
+      if (queuedPay) payAfterAmount = false
       if (entry.action === 'status' && (entry.id !== latestStatusId || hasForegroundPending() || entry.foregroundVersion !== foregroundVersion)) return true
       if (entry.action !== 'status' && entry.foregroundVersion !== foregroundVersion) return true
       let startSetup = false
@@ -1484,6 +1496,9 @@ export function installAssistantUI(options = {}) {
       render()
       if (startSetup) request('login')
       if (entry.action === 'status' && response.ok === true && !state.loggedIn && !state.authReady) request('authOptions')
+      if (queuedPay && response.ok === true && rechargeValue() && rechargeMethod()) {
+        request('rechargePay', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
+      }
       if (entry.action === 'rechargeInfo' && response.ok === true && rechargeValue() && rechargeMethod()) {
         request('rechargeAmount', { amount: rechargeValue(), paymentMethod: rechargeMethod() })
       }

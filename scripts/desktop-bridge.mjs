@@ -10,6 +10,7 @@ import {
   desktopRechargeAmount,
   desktopRechargePay,
   desktopRecharge,
+  desktopRedeem,
   desktopRestore,
   desktopSelect,
   desktopReconfigure,
@@ -21,7 +22,7 @@ import {
 
 const MAX_LINE_LENGTH = 16 * 1024
 const ACTIONS = new Set(['status', 'login', 'authOptions', 'register', 'sendVerification',
-  'select', 'reconfigure', 'rechargeInfo', 'rechargeAmount', 'rechargePay', 'recharge',
+  'select', 'reconfigure', 'rechargeInfo', 'rechargeAmount', 'rechargePay', 'recharge', 'redeem',
   'restore', 'fast'])
 
 function requestId(value) {
@@ -34,10 +35,11 @@ export function validateRequest(value) {
     throw new Error('invalid bridge request')
   }
   const limits = { group: 200, model: 200, username: 200, password: 1024, email: 254,
-    verificationCode: 100, loginId: 100, twoFactorCode: 100, paymentMethod: 40 }
+    verificationCode: 100, loginId: 100, twoFactorCode: 100, paymentMethod: 40, redeemCode: 200 }
   const allowed = value.action === 'login' ? ['username', 'password', 'loginId', 'twoFactorCode']
     : value.action === 'register' ? ['username', 'password', 'email', 'verificationCode']
       : value.action === 'sendVerification' ? ['email'] : value.action === 'select' ? ['group', 'model']
+        : value.action === 'redeem' ? ['redeemCode']
         : ['rechargeAmount', 'rechargePay'].includes(value.action) ? ['paymentMethod'] : []
   const request = { id: value.id, action: value.action }
   if (value.action === 'fast') {
@@ -73,6 +75,7 @@ export function validateRequest(value) {
     throw new Error('invalid bridge request')
   }
   if (value.action === 'sendVerification' && !request.email) throw new Error('invalid bridge request')
+  if (value.action === 'redeem' && !request.redeemCode) throw new Error('invalid bridge request')
   return request
 }
 
@@ -89,6 +92,7 @@ export async function handleRequest(request) {
   if (action === 'rechargeAmount') return desktopRechargeAmount(details)
   if (action === 'rechargePay') return desktopRechargePay(details)
   if (action === 'fast') return desktopFastMode(details)
+  if (action === 'redeem') return desktopRedeem(details)
   if (action === 'recharge') return desktopRecharge()
   return desktopRestore()
 }

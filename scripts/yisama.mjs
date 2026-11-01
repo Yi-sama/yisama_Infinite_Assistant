@@ -1351,6 +1351,14 @@ export async function desktopRechargePay({ amount, paymentMethod } = {}) {
   return { ...payment, amount: Math.floor(value), paymentMethod: method }
 }
 
+export async function desktopRedeem({ redeemCode } = {}) {
+  const key = typeof redeemCode === 'string' ? redeemCode.trim() : ''
+  if (!key) throw new UserError('请输入兑换码。')
+  const session = await authenticatedSession({ interactive: false })
+  await requestApi('/user/topup', { token: session.token, method: 'POST', body: { key } })
+  return desktopStatus()
+}
+
 export async function desktopRecharge() {
   await openRecharge()
   return desktopStatus({ message: '已在外部浏览器打开官方站点钱包。' })

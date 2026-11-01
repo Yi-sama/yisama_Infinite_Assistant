@@ -93,6 +93,11 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
       if (state.accountFailure) return reply({ success: false }, state.accountFailure)
       return reply({ success: true, data: state.account })
     }
+    if (url.pathname === '/api/user/topup' && req.method === 'POST') {
+      if (body?.key !== 'valid-redeem-code') return reply({ success: false, message: 'redeem failed' })
+      state.account.quota += 500000
+      return reply({ success: true, data: 500000 })
+    }
     if (url.pathname === '/api/user/self/groups') {
       return reply({ success: true, data: state.groups })
     }
@@ -810,4 +815,22 @@ test('local registration preserves website email verification and never forwards
   await assert.rejects(fs.access(files.session), { code: 'ENOENT' })
   assert.doesNotMatch(JSON.stringify([options, sent, wrong, registered]), /new-password|000000|654321/)
   assert.equal((await bridge.close()).stderr, '')
+})
+
+test('redeem codes top up the account and refresh the shown balance', async (t) => {
+  const { state, env } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  state.account.quota = 500000
+  assert.equal((await bridge.request({ id: 1, action: 'status' })).data.quota, '$1.00')
+  const rejected = await bridge.request({ id: 2, action: 'redeem', redeemCode: 'used-code' })
+  assert.equal(rejected.ok, false)
+  const redeemed = await bridge.request({ id: 3, action: 'redeem', redeemCode: ' valid-redeem-code ' })
+  assert.equal(redeemed.ok, true)
+  assert.equal(redeemed.data.quota, '$2.00')
+  assert.deepEqual(state.calls.filter((call) => call.path === '/api/user/topup').map((call) => call.body.key),
+    ['used-code', 'valid-redeem-code'])
+  assert.equal((await bridge.close()).code, 0)
 })
