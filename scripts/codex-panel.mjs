@@ -315,6 +315,7 @@ export function installAssistantUI(options = {}) {
     ${R} .yisama-verification-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
     ${R} .yisama-verification-row .y-button{min-height:40px;padding:0 13px;font-size:12px}
     ${R} .yisama-auth-form .y-button--wide{margin-top:4px}
+    ${R} .yisama-auth-form .y-notice{margin:0}
     @media (max-height:540px){${R} .y-balance{font-size:32px}${R} .y-meter{padding-bottom:12px}${R} .y-group{min-height:34px}}
     @media (prefers-reduced-motion:reduce){${R} *,${R} *:before,${R} *:after{animation:none!important;transition:none!important}}
   `
@@ -803,6 +804,10 @@ export function installAssistantUI(options = {}) {
     statusPill.textContent = statusPillText[kind]
     statusLine.dataset.kind = kind
     const message = noticeText()
+    // Logged out, the notice sits right above the submit button, where the user is looking.
+    const [noticeParent, noticeBefore] = state.loggedIn ? [mainView, confirmation]
+      : state.loginId ? [twoFactorForm, twoFactorButton] : [authForm, loginButton]
+    if (notice.nextSibling !== noticeBefore) noticeParent.insertBefore(notice, noticeBefore)
     notice.textContent = message
     notice.hidden = !message
     notice.dataset.error = String(Boolean(state.error))
@@ -917,7 +922,8 @@ export function installAssistantUI(options = {}) {
       state.setupPending = false
       state.error = '账户已登录，准备配置未完成，请重试准备。'
     } else if (entry.action === 'login') {
-      state.error = '登录未完成，请检查账号、密码或二次验证码。'
+      state.error = code !== 'AUTH_REJECTED' ? '登录未完成，请检查账号、密码或二次验证码。'
+        : entry.twoFactor ? '二次验证码错误，请重新输入。' : '账号或密码错误，或账号已被停用。'
     } else if (entry.action === 'register') {
       state.error = '注册未完成，请检查账号、密码和邮箱验证码。'
     } else if (entry.action === 'authOptions') {
@@ -1000,6 +1006,7 @@ export function installAssistantUI(options = {}) {
       id,
       action,
       setup: action === 'login' && !command.username && !command.password && !command.loginId,
+      twoFactor: action === 'login' && Boolean(command.loginId),
       foregroundVersion,
       timer: window.setTimeout(() => settleTimeout(id), timeoutFor(action)),
       timedOut: false,

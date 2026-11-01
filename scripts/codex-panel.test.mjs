@@ -633,7 +633,9 @@ test('inline login validates inputs, handles errors and two-factor verification 
   assert.equal(wrong.password, 'wrong-password')
   await respond(wrong, { ok: false, error: 'echo wrong-password Bearer sk-secret', code: 'AUTH_REJECTED' })
   assert.equal(await page.locator('[data-testid="auth-password"]').inputValue(), '')
-  assert.match(await page.locator('[data-testid="message"]').textContent(), /检查账号/)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /账号或密码错误/)
+  // The error is shown next to the button that was just pressed, not at the top of the panel.
+  assert.equal(await page.locator('[data-testid="auth-form"] [data-testid="message"] + [data-testid="login"]').isVisible(), true)
   assert.doesNotMatch(await page.locator('[data-testid="assistant-panel"]').textContent(), /wrong-password|sk-secret|Bearer/)
   for (const code of ['AUTH_CONNECTION', 'AUTH_UNAVAILABLE']) {
     await page.locator('[data-testid="auth-password"]').fill('valid-password')
