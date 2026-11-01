@@ -17,23 +17,33 @@ const generation = (letter) => letter.repeat(64)
 const marker = (letter) => ({ generation: generation(letter), updatedAt: '2026-10-29T02:30:00.000Z' })
 const closedPanel = () => ({ open: false, busy: false, unsent: false })
 
-const nativeSource = `function Jlo(e){let f=d,p;return t[7]!==u||t[8]!==f?p=f:p}
-function _fo(e,t,n,r,i){return {serviceTierAccess:R,serviceTierSettings:z,setServiceTier:P}}
-function D2(){return {select:({data:n})=>Vso({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})}}`
+// Shapes copied from the Codex 26.1021 bundle; 26.1016 differs only in minified names.
+const nativeSourceFor = ({ access = 'Jlo', setter = 'P', models = 'Vso' } = {}) => `function ${access}(e){let t=c(10),r=e.hostId,o=e.authMethod,s;s={authMethod:o,hostId:r};let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}
+function _fo(e,t,n,r,i){let l=g(e),u=l.hostId,d={hostId:u,conversationId:e},b=h(u),S=b?.authMethod??null,C={authMethod:S,hostId:x};return {hasManagedNewThreadSettings:I,hostId:L,serviceTierAccess:R,serviceTierSettings:z,setServiceTier:${setter}}}
+var D2=Sc(J,({additionalAvailableModels:e,authMethod:t,enabledReasoningEfforts:n,hasConfiguredModelCatalog:r,hostId:i,includeUltraReasoningEffort:a,isCustomModelProvider:o},{get:d})=>({select:({data:n})=>${models}({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})}))`
+const nativeSource = nativeSourceFor()
 
 test('native controls adapt only the inspected hook sites and reject missing or repeated matches', () => {
   const adapted = adaptNativeFastSource(nativeSource)
-  assert.match(adapted, /__yisamaNativeFast\?\.access\(r,o\)/)
-  assert.match(adapted, /__yisamaNativeFast\?\.wrap\(u,S,P\)/)
+  assert.match(adapted, /__yisamaNativeFast\?\.access\(r,o\)\?\?d,p;/)
+  assert.match(adapted, /__yisamaNativeFast\?\.wrap\(u,S,P\)\?\?P\}/)
   assert.match(adapted, /__yisamaNativeFastSourceReady=true/)
   assert.match(adapted, /__yisamaNativeReasoningSourceReady=true/)
-  assert.match(adapted, /__yisamaNativeFast\?\.modelOptions\(i,t,yisamaOptions,a\)/)
+  assert.match(adapted, /return Vso\(window\.__yisamaNativeFast\?\.modelOptions\(i,t,yisamaOptions,a\)/)
   assert.doesNotThrow(() => new Function(adapted))
-  for (const source of ['', nativeSource + nativeSource, nativeSource.replace('function Jlo', 'function Other'),
-    nativeSource.replace('function D2', 'function Other'), nativeSource.replace('models:n,', 'models:Other,'),
-    nativeSource.replace('setServiceTier:P}', 'setServiceTier:Other}')]) {
+  for (const source of ['', nativeSource + nativeSource, nativeSource.replace('isLoading:u', 'loading:u'),
+    nativeSource.replace(',conversationId:e', ''), nativeSource.replace('hostId:i,', ''),
+    nativeSource.replace('setServiceTier:P}', 'setServiceTier:P()}'), nativeSource.replace('select:', 'pick:')]) {
     assert.throws(() => adaptNativeFastSource(source), /does not support/)
   }
+})
+
+test('native controls follow renamed minified identifiers in other Codex builds', () => {
+  const adapted = adaptNativeFastSource(nativeSourceFor({ access: '_Lo', setter: 'F', models: 'eIo' }))
+  assert.match(adapted, /__yisamaNativeFast\?\.access\(r,o\)\?\?d,p;/)
+  assert.match(adapted, /__yisamaNativeFast\?\.wrap\(u,S,F\)\?\?F\}/)
+  assert.match(adapted, /return eIo\(window\.__yisamaNativeFast\?\.modelOptions\(i,t,yisamaOptions,a\)/)
+  assert.doesNotThrow(() => new Function(adapted))
 })
 
 function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true, serverDelay = 0 } = {}) {
@@ -432,9 +442,11 @@ test('native Fast requests one initial resource reload only after drafts, panel,
 
 test('incompatible native Fast resources cannot cause a renderer reload loop', async () => {
   const calls = []
-  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
-    async call(method) {
+  const reports = []
+  const target = new AssistantTarget({}, null, { report: (message) => reports.push(message), connectionFactory: () => ({
+    async call(method, params) {
       calls.push(method)
+      if (method === 'Runtime.evaluate' && /__yisamaNativeAdapterUnsupported = true/.test(params.expression)) return {}
       return { result: { value: { status: 'pending', reloadNativeFast: true } } }
     },
   }) })
@@ -442,8 +454,10 @@ test('incompatible native Fast resources cannot cause a renderer reload loop', a
   target.mainFrameId = 'main'
   target.contexts.set(1, { auxData: { isDefault: true, frameId: 'main' } })
   assert.equal((await target.syncModels({})).status, 'pending')
-  await assert.rejects(target.syncModels({}), /native model controls did not load/)
+  assert.equal((await target.syncModels({})).status, 'synced')
   assert.equal(calls.filter((method) => method === 'Page.reload').length, 1)
+  assert.equal(calls.at(-1), 'Runtime.evaluate')
+  assert.deepEqual(reports, ['The native model controls did not load. This Codex build may be incompatible.'])
 })
 
 test('native asset interception is scoped, removes stale body headers, and releases incompatible modules', async () => {
@@ -456,7 +470,7 @@ test('native asset interception is scoped, removes stale body headers, and relea
     },
   }) })
   await target.adaptNativeScript({ requestId: 'valid', responseStatusCode: 200,
-    request: { url: 'app://-/assets/app-initial-438d1df57f70.js' },
+    request: { url: 'app://-/assets/app-initial-ad16eaadf81f.js' },
     responseHeaders: [{ name: 'Content-Length', value: '10' }, { name: 'Content-Type', value: 'text/javascript' }],
   })
   assert.deepEqual(calls.at(-1).params.responseHeaders, [{ name: 'Content-Type', value: 'text/javascript' }])

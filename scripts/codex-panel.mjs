@@ -554,6 +554,7 @@ export function installAssistantUI(options = {}) {
     if (state.nativeSync === 'pending' || state.nativeSync === 'syncing') return '正在同步 Codex 模型'
     if (state.nativeSync === 'account-change') return '主实例尚未接管，当前对话未被中断。'
     if (state.nativeSync === 'error') return '配置已保存，Codex 模型尚未同步。'
+    if (state.nativeSync === 'unsupported') return '当前 Codex 版本暂不支持 Ultra、Fast，其余功能正常'
     if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置'
     if (state.pendingGroup) return '正在切换线路'
     if (state.staleQuota) return '余额暂未刷新'
@@ -562,7 +563,7 @@ export function installAssistantUI(options = {}) {
     return '未登录'
   }
   const statusKind = () => {
-    if (state.staleQuota || ['error', 'account-change'].includes(state.nativeSync)) return 'warning'
+    if (state.staleQuota || ['error', 'account-change', 'unsupported'].includes(state.nativeSync)) return 'warning'
     if (state.setupPending || state.pendingGroup || ['pending', 'syncing'].includes(state.nativeSync)) return 'busy'
     return state.loggedIn && state.configured ? 'normal' : 'off'
   }
@@ -1427,7 +1428,7 @@ export function installAssistantUI(options = {}) {
 
   const runtime = {
     nativeStatus(status) {
-      if (disposed || !['pending', 'syncing', 'synced', 'error', 'account-change'].includes(status)) return
+      if (disposed || !['pending', 'syncing', 'synced', 'error', 'account-change', 'unsupported'].includes(status)) return
       if (state.nativeSync === status) return
       state.nativeSync = status
       if (status === 'synced') state.restartRequired = false

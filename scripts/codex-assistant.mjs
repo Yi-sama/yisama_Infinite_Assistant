@@ -14,25 +14,63 @@ export const CODEX_PAGE = 'app://-/index.html'
 const BINDING = 'yisamaAssistantCommand'
 const ASSISTANT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 export const UPDATE_FILE = path.join(ASSISTANT_ROOT, 'update.json')
-const NATIVE_FAST_ASSET = 'app://-/assets/app-initial-438d1df57f70.js'
+const NATIVE_FAST_ASSET = 'app://-/assets/app-initial-*.js'
+const NATIVE_FAST_ASSET_URL = /^app:\/\/-\/assets\/app-initial-[0-9a-f]+\.js$/
 
-// Match the inspected native build exactly. Neither UI markup nor authentication is replaced.
+// Codex's minified names change between builds, so each hook is found by its code shape
+// and must match exactly once. Neither UI markup nor authentication is replaced.
+function uniqueMatch(source, pattern, label) {
+  const matches = [...source.matchAll(new RegExp(pattern.source, 'g'))]
+  if (matches.length !== 1) throw new ConnectionError(`This Codex build does not support the native Fast adapter (${label}).`)
+  return matches[0]
+}
+
+function enclosingFunction(source, index) {
+  return source.slice(source.lastIndexOf('function ', index), index)
+}
+
+function lastCapture(text, pattern, label) {
+  const match = [...text.matchAll(new RegExp(pattern.source, 'g'))].at(-1)
+  if (!match) throw new ConnectionError(`This Codex build does not support the native Fast adapter (${label}).`)
+  return match
+}
+
 export function adaptNativeFastSource(source) {
-  const access = 'let f=d,p;return t[7]!==u||t[8]!==f?'
-  const setter = 'serviceTierAccess:R,serviceTierSettings:z,setServiceTier:P}'
-  const modelOptions = '{additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels}'
-  const select = `select:({data:n})=>Vso(${modelOptions})`
-  if (source.split(access).length !== 2 || source.split(setter).length !== 2 ||
-    source.split(select).length !== 2 || !source.includes('function D2()') ||
-    !source.includes('function Jlo(e)') || !source.includes('function _fo(e,t,n,r,i)')) {
-    throw new ConnectionError('This Codex build does not support the native Fast adapter.')
+  const n = String.raw`[\w$]+`
+  const access = uniqueMatch(source, new RegExp(
+    String.raw`let (${n})=(${n}),(${n});return (${n}\[\d+\])!==(${n})\|\|(${n}\[\d+\])!==\1\?\(\3=\{serviceTierAccess:\1,isLoading:\5\}`), 'access')
+  const [, accessMethod, accessHost] = lastCapture(enclosingFunction(source, access.index),
+    new RegExp(String.raw`\{authMethod:(${n}),hostId:(${n})\}`), 'access auth')
+
+  const setter = uniqueMatch(source, new RegExp(
+    String.raw`serviceTierAccess:(${n}),serviceTierSettings:(${n}),setServiceTier:(${n})\}`), 'setter')
+  const setterScope = enclosingFunction(source, setter.index)
+  const [, setterHost] = uniqueMatch(setterScope, new RegExp(String.raw`\{hostId:(${n}),conversationId:${n}\}`), 'setter host')
+  const [, setterMethod] = uniqueMatch(setterScope, new RegExp(String.raw`\{authMethod:(${n}),hostId:${n}\}`), 'setter auth')
+
+  const select = uniqueMatch(source, new RegExp(
+    String.raw`select:\(\{data:(${n})\}\)=>(${n})\((\{additionalAvailableModels:new Set\(${n}\),apiKeyDaybreakSupported:[^{}]*?useHiddenModels:[\w$.]+\})\)`), 'models')
+  const query = lastCapture(source.slice(Math.max(0, select.index - 4000), select.index),
+    /\(\{additionalAvailableModels:[^{}]*?\}/, 'models query')[0]
+  const field = (name) => new RegExp(String.raw`[{,]${name}:(${n})[,}]`).exec(query)?.[1]
+  const [selectHost, selectMethod, selectUltra] = [field('hostId'), field('authMethod'), field('includeUltraReasoningEffort')]
+  if (!selectHost || !selectMethod || !selectUltra) {
+    throw new ConnectionError('This Codex build does not support the native Fast adapter (models query).')
   }
-  return source.replace(access,
-    'let f=window.__yisamaNativeFast?.access(r,o)??d,p;return t[7]!==u||t[8]!==f?')
-    .replace(setter,
-      'serviceTierAccess:R,serviceTierSettings:z,setServiceTier:window.__yisamaNativeFast?.wrap(u,S,P)??P}')
-    .replace(select, `select:({data:n})=>{const yisamaOptions=${modelOptions};return Vso(window.__yisamaNativeFast?.modelOptions(i,t,yisamaOptions,a)??yisamaOptions)}`) +
-    '\nwindow.__yisamaNativeFastSourceReady=true;window.__yisamaNativeReasoningSourceReady=true;\n'
+
+  const edits = [
+    [access, `let ${access[1]}=window.__yisamaNativeFast?.access(${accessHost},${accessMethod})??${access[2]}` +
+      access[0].slice(`let ${access[1]}=${access[2]}`.length)],
+    [setter, `serviceTierAccess:${setter[1]},serviceTierSettings:${setter[2]},` +
+      `setServiceTier:window.__yisamaNativeFast?.wrap(${setterHost},${setterMethod},${setter[3]})??${setter[3]}}`],
+    [select, `select:({data:${select[1]}})=>{const yisamaOptions=${select[3]};return ${select[2]}(` +
+      `window.__yisamaNativeFast?.modelOptions(${selectHost},${selectMethod},yisamaOptions,${selectUltra})??yisamaOptions)}`],
+  ].sort((a, b) => b[0].index - a[0].index)
+  let patched = source
+  for (const [match, replacement] of edits) {
+    patched = patched.slice(0, match.index) + replacement + patched.slice(match.index + match[0].length)
+  }
+  return patched + '\nwindow.__yisamaNativeFastSourceReady=true;window.__yisamaNativeReasoningSourceReady=true;\n'
 }
 
 // Serialized into the renderer. The existing native setter still owns UI and persistence.
@@ -457,7 +495,7 @@ export class AssistantTarget {
 
   async adaptNativeScript(params) {
     try {
-      if (params.request.url !== NATIVE_FAST_ASSET || params.responseStatusCode !== 200) {
+      if (!NATIVE_FAST_ASSET_URL.test(params.request.url) || params.responseStatusCode !== 200) {
         throw new ConnectionError('The native Fast module could not be adapted.')
       }
       const response = await this.connection.call('Fetch.getResponseBody', { requestId: params.requestId })
@@ -525,7 +563,14 @@ export class AssistantTarget {
     const synced = result.result?.value
     if (synced?.reloadNativeFast === true) {
       if (this.nativeFastReloadAttempted) {
-        throw new ConnectionError('The native model controls did not load. This Codex build may be incompatible.')
+        // Keep the rest of the assistant usable and say so, instead of syncing forever.
+        await this.connection.call('Runtime.evaluate', {
+          expression: `window.__yisamaNativeAdapterUnsupported = true;
+            window.__yisamaInfiniteAssistant?.nativeStatus?.('unsupported');`,
+          contextId: this.topContext(), returnByValue: true,
+        })
+        this.report('The native model controls did not load. This Codex build may be incompatible.')
+        return { status: 'synced' }
       }
       this.nativeFastReloadAttempted = true
       await this.connection.call('Page.reload', { ignoreCache: true })
@@ -714,6 +759,10 @@ export async function syncNativeModels(settings, options = {}) {
     }).catch(() => finish(reject, new Error('Native request failed.')))
   })
   const finish = async () => {
+    if (window.__yisamaNativeAdapterUnsupported === true) {
+      runtime.nativeStatus?.('unsupported')
+      return { status: 'synced' }
+    }
     if (!fast?.needsReload?.()) {
       runtime.nativeStatus?.('synced')
       return { status: 'synced' }
