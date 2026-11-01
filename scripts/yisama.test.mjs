@@ -13,6 +13,7 @@ import {
   patchCodexConfig,
   safeError,
   signIn,
+  submitPaymentForm,
 } from './yisama.mjs'
 import { makeModelCatalog, providerConfig, restoreOwned } from './codex-config.mjs'
 
@@ -59,6 +60,24 @@ test('provider block uses Responses wire format and local auth', () => {
   assert.equal(provider.wire_api, 'responses')
   assert.equal(provider.requires_openai_auth, true)
   assert.equal(provider.env_key, undefined)
+})
+
+test('submits gateway fields before opening the checkout page', async () => {
+  let request
+  const payment = await submitPaymentForm('https://pay.example/submit.php', {
+    pid: '4862221745', money: 1, sign: 'secret',
+  }, async (url, options) => {
+    request = { url, options }
+    return new Response(null, { status: 302, headers: { location: '/checkout/test-token' } })
+  })
+  assert.equal(request.url, 'https://pay.example/submit.php')
+  assert.equal(request.options.method, 'POST')
+  assert.equal(request.options.redirect, 'manual')
+  assert.equal(String(request.options.body), 'pid=4862221745&money=1&sign=secret')
+  assert.deepEqual(payment, {
+    paymentUrl: 'https://pay.example/checkout/test-token',
+    fields: {},
+  })
 })
 
 test('native catalogs keep known model capabilities without inventing them for other providers', () => {

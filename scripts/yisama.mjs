@@ -1182,6 +1182,26 @@ function paymentUrl(value) {
   }
 }
 
+export async function submitPaymentForm(url, fields, fetchImpl = globalThis.fetch) {
+  const entries = Object.entries(fields && typeof fields === 'object' ? fields : {})
+    .filter(([key, value]) => /^[\w.-]{1,100}$/.test(key) &&
+      value !== null && value !== undefined && ['string', 'number', 'boolean'].includes(typeof value))
+    .map(([key, value]) => [key, String(value)])
+  if (!entries.length) return { paymentUrl: url, fields: {} }
+  const response = await fetchImpl(url, {
+    method: 'POST',
+    body: new URLSearchParams(entries),
+    redirect: 'manual',
+    signal: AbortSignal.timeout(30000),
+  })
+  const location = response.headers?.get?.('location')
+  if (response.status >= 300 && response.status < 400 && location) {
+    const redirected = paymentUrl(new URL(location, url).href)
+    if (redirected) return { paymentUrl: redirected, fields: {} }
+  }
+  return { paymentUrl: url, fields: Object.fromEntries(entries) }
+}
+
 function publicRechargeInfo(data) {
   const source = data && typeof data === 'object' ? data : {}
   const amountOptions = jsonArray(source.amount_options)
@@ -1247,7 +1267,8 @@ export async function desktopRechargePay({ amount, paymentMethod } = {}) {
     .filter(([key, field]) => key !== 'url' && key !== 'pay_link' && key !== 'payment_url' &&
       ['string', 'number', 'boolean'].includes(typeof field)))
   if (!url) throw new UserError('订单已创建，但支付入口无效，请稍后重试。')
-  return { paymentUrl: url, fields, amount: Math.floor(value), paymentMethod: method }
+  const payment = method === 'stripe' ? { paymentUrl: url, fields } : await submitPaymentForm(url, fields)
+  return { ...payment, amount: Math.floor(value), paymentMethod: method }
 }
 
 export async function desktopRecharge() {
