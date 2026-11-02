@@ -25,6 +25,10 @@ test('release builder emits only bundled runtime entries', async (t) => {
     'codex-assistant.mjs', 'launch-codex.ps1', 'yisama.mjs',
   ])
   const manifest = JSON.parse(await fs.readFile(path.join(output, 'release-manifest.json'), 'utf8'))
+  const sourcePackage = JSON.parse(await fs.readFile(path.join(repository, 'package.json'), 'utf8'))
+  const releasePackage = JSON.parse(await fs.readFile(path.join(output, 'package.json'), 'utf8'))
+  assert.equal(releasePackage.version, sourcePackage.version)
+  assert.equal(manifest.version, sourcePackage.version)
   assert.equal(manifest.sourceIncluded, false)
   assert.equal(manifest.sourceMapsIncluded, false)
   assert.equal(manifest.testFilesIncluded, false)
