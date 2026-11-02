@@ -61,7 +61,12 @@ async function desktopGroupInfo(session, keep = '') {
     cachedDesktopValue(`groups:${session.origin}:${session.token}`, CATALOG_TTL, () => fetchGroupInfo(session.token)),
     desktopTextCatalog(),
   ])
-  return groups.filter((group) => group.value === 'auto' || group.value === keep || !catalog.mediaGroups.has(group.value))
+  const offered = groups.filter((group) => group.value === 'auto' || group.value === keep || !catalog.mediaGroups.has(group.value))
+  // Once the relay names any group, the assistant offers only the named ones, in display_order;
+  // the configured group stays so the panel can still show where the user is.
+  if (!offered.some((group) => group.label)) return offered
+  const rank = (group) => group.order ?? Number.MAX_SAFE_INTEGER
+  return offered.filter((group) => group.label || group.value === keep).sort((a, b) => rank(a) - rank(b))
 }
 
 async function desktopModels(apiKey, group = '') {
@@ -447,6 +452,7 @@ export async function fetchGroupInfo(token) {
   return Object.entries(data).filter(([value]) => value).map(([value, info]) => ({
     value, ratio: Number.isFinite(info?.ratio) ? info.ratio : null,
     label: typeof info?.display_name === 'string' ? info.display_name.trim() : '',
+    order: Number.isFinite(info?.display_order) ? info.display_order : null,
   }))
 }
 

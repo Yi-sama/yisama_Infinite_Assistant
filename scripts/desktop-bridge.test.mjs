@@ -213,7 +213,20 @@ test('desktop bridge names groups by the relay display name', async (t) => {
   })
   const { data } = await bridge.request({ id: 1, action: 'status' })
   assert.deepEqual(data.groups.map(({ value, label }) => [value, label]).sort(),
-    [['auto', 'All'], ['claude', 'Claude'], ['cn', 'cn'], ['plus', 'GPT']])
+    [['claude', 'Claude'], ['plus', 'GPT']])
+  await bridge.close()
+})
+
+test('desktop bridge offers only named groups in the relay display order', async (t) => {
+  const { env } = await fixture(t, { groups: { auto: { desc: '自动' }, plus: { ratio: 0.2, display_name: 'GPT', display_order: 2 },
+    cn: { ratio: 0.15, display_name: '国模' }, claude: { ratio: 0.9, display_name: 'Claude', display_order: 1 }, premium: { ratio: 2 } } })
+  const bridge = bridgeClient(env)
+  t.after(async () => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  const { data } = await bridge.request({ id: 1, action: 'status' })
+  assert.deepEqual(data.groups.map(({ value, label }) => [value, label]),
+    [['claude', 'Claude'], ['plus', 'GPT'], ['cn', '国模']])
   await bridge.close()
 })
 

@@ -2,74 +2,107 @@
 
 ## 背景
 
-yisama 无限助手 v1.2.0 起，Codex 面板里的分组列表标题是"Models · 模型"。每一项本来显示的是 new-api 的分组名，比如"不降智plus""各种国模""稳定gpt_plus"。站长希望改成显示 GPT、Claude、Gemini、国模这类名字，并且能在中转站后台随时修改。
+yisama 无限助手的 Codex 面板里有一个分组列表，标题是"Models · 模型"。站长希望这里只显示 GPT、Claude、Gemini、国模这样的名字，并且**在后台用表格选择每个名字对应哪个分组**，而不是手写 JSON。
 
-**前端已经做完。** 后端只需要按下面的约定，多返回一个字段。
+第一版（`GroupDisplayNames`，JSON 编辑框，已部署在 release `group-display-names-20261102-150331`）能用，但要手写分组名，太麻烦。这一版改成表格。
 
-不能直接复用分组描述 `desc`：它现在已经是说明文字了，比如"测试中""每天全站共享1000万Token，用完即止""team+free+plus大杂烩"，网站上也在用。
+**助手这边已经做完**，只要后端按下面的约定返回字段就行。
 
-## 接口约定（前端已实现）
+## 后台界面：表格
 
-接口是 `GET /api/user/self/groups`，也就是现有的 `controller/group.go` 里的 `GetUserGroups`。在每个分组对象里加一个**可选**字段 `display_name`（字符串）：
+把现在"分组显示名"的 JSON 编辑框换成表格，每一行是助手里显示的一项：
+
+| 列 | 说明 |
+|---|---|
+| 显示名 | 文本输入框，例如 GPT、Claude、Gemini、国模 |
+| 分组 | 下拉框，选项是所有可选分组（`UserUsableGroups` 的 key，加上 `auto`）。每个选项旁边带上描述和倍率，方便辨认 |
+| 排序 | 上移 / 下移按钮（能拖拽更好）。表格从上到下的顺序就是助手里的显示顺序 |
+| 操作 | 删除这一行 |
+
+表格下面有"添加一行"按钮。表格为空时，可以给一个"填入 GPT / Claude / Gemini / 国模 四行"的快捷按钮，分组留空让站长去选。
+
+保存时校验，不通过就提示，不保存：
+
+- 显示名和分组都必须填；显示名去掉首尾空格，最多 200 字。
+- 同一个分组只能出现在一行里。
+- 显示名不能重复，否则助手里会出现两个一样的名字。
+- `images`、`video` 这类图片、视频分组可以不放进下拉框；放进去也没关系，助手会自动隐藏它们。
+
+页面位置可以留在现在的"额外设置"里。
+
+## 存储
+
+继续用系统选项 `GroupDisplayNames`。为了能表达顺序，值改成数组：
+
+```json
+[
+  { "group": "不降智plus", "name": "GPT" },
+  { "group": "满血ccm 正价", "name": "Claude" },
+  { "group": "Gemini", "name": "Gemini" },
+  { "group": "各种国模", "name": "国模" }
+]
+```
+
+- 数组顺序就是显示顺序。
+- 线上现在存的是空对象 `{}`，而且数据库里还没写过这个选项。读取时如果遇到旧的对象格式 `{"分组":"显示名"}`，按 key 顺序转成数组就行，不需要单独迁移。
+- 分组以后被删掉、或者不在 `UserUsableGroups` 里了，这一行在接口里直接忽略，不要报错。
+
+## 接口约定（助手已实现）
+
+接口是 `GET /api/user/self/groups`，也就是 `controller/group.go` 的 `GetUserGroups`。表格里配置过的分组，在分组对象里加两个字段：
+
+- `display_name`：显示名（字符串）。第一版已经有了。
+- `display_order`：表格里的行号，从 1 开始（整数）。这是这一版新加的。
 
 ```json
 {
   "success": true,
   "message": "",
   "data": {
-    "不降智plus":   { "ratio": 0.2,  "desc": "测试中", "display_name": "GPT" },
-    "满血ccm 正价": { "ratio": 0.9,  "desc": "",       "display_name": "Claude" },
-    "Gemini":       { "ratio": 1,    "desc": "",       "display_name": "Gemini" },
-    "各种国模":     { "ratio": 0.15, "desc": "",       "display_name": "国模" },
-    "每日共享":     { "ratio": 0,    "desc": "每天全站共享1000万Token，用完即止" }
+    "不降智plus":   { "ratio": 0.2,  "desc": "真满血不降智", "display_name": "GPT",    "display_order": 1 },
+    "满血ccm 正价": { "ratio": 0.9,  "desc": "",             "display_name": "Claude", "display_order": 2 },
+    "Gemini":       { "ratio": 1,    "desc": "",             "display_name": "Gemini", "display_order": 3 },
+    "各种国模":     { "ratio": 0.15, "desc": "",             "display_name": "国模",   "display_order": 4 },
+    "稳定gpt_plus": { "ratio": 0.3,  "desc": "稳定的plus，缓存高" }
   }
 }
 ```
 
-前端的处理规则：
+没配置的分组照常返回，不带这两个字段。`desc`、`ratio`、`ratio_min`、`ratio_max` 都不变。
 
-| 情况 | 面板显示 |
+助手的处理规则：
+
+| 情况 | 助手面板 |
 |---|---|
-| `display_name` 是非空字符串 | 去掉首尾空格后显示，最多 200 字 |
-| 没有这个字段、为空或不是字符串 | 显示原分组名，跟现在一样 |
-| `auto` 分组没有 `display_name` | 显示 `All` |
-| `ratio` 为 0 | 显示"免费" |
-| `ratio` 为其它数字 | 显示 `×0.2` 这种格式 |
+| 所有分组都没有 `display_name` | 跟以前一样，显示全部分组和分组名 |
+| 至少一个分组有 `display_name` | **只显示有 `display_name` 的分组**，按 `display_order` 从小到大排 |
+| 用户当前正在用的分组没被配置 | 仍然显示这一项（用原分组名，排在最后），让用户知道自己在哪个分组；切走之后就不再出现 |
+| `ratio` 为 0 / 其它数字 | 显示"免费" / `×0.2` |
 
 其它说明：
 
-- **切换时提交的还是分组名**（对象的 key），`display_name` 只用于显示。所以分组名不要改，改的只是显示名。
-- **显示哪些分组**由接口返回哪些分组决定。不想在助手里显示的分组，后端不返回就行。图片、视频分组前端本来就会根据 `/api/pricing` 自动隐藏。
-- **兼容性：**旧版助手会忽略这个新字段，新版助手遇到没加字段的老后端，也照常显示分组名。前后端谁先上线都可以。
-- `desc`、`ratio`、`ratio_min`、`ratio_max` 这些现有字段保持不变。
+- **切换时提交的还是分组名**，显示名只用于显示。
+- **只影响助手，不影响网站。**网站的令牌分组选择照常显示全部分组，所以不能用"不返回分组"的办法来隐藏。
+- 助手对分组列表有 30 秒缓存，后台保存后最多 30 秒左右生效。
+- **兼容：**旧版助手会忽略 `display_order`，只是按分组名字母顺序显示；新版助手遇到没有这些字段的后端，照旧显示全部分组。
 
-## 后端需要做的事
+## 测试
 
-1. **存储：**为每个分组保存一个显示名，形式是"分组名 → 显示名"的映射。
+- 表格保存后，`GroupDisplayNames` 存成数组，顺序正确。
+- 校验：缺显示名或分组、分组重复、显示名重复，都拒绝保存。
+- 接口：配置过的分组带 `display_name` 和 `display_order`，没配置的不带；原有字段不变。
+- 旧对象格式和空值 `{}` 都能正常读取。
+- 表格里引用了已删除的分组时，接口忽略这一行，不报错。
 
-   建议做成一个新的系统选项（比如 `GroupDisplayNames`，值是 JSON 对象，例如 `{"不降智plus":"GPT","各种国模":"国模"}`），和现有的 `UserUsableGroups`（分组名 → 描述）、`GroupRatio` 存法一致。具体怎么存由后端决定，只要接口按上面的约定返回就行。
+## 源码和部署
 
-2. **接口：**在 `GetUserGroups` 组装每个分组时，如果配置了显示名，就加上 `"display_name": <显示名>`。`auto` 分组也可以支持。
-
-3. **后台界面：**在管理后台的分组设置附近（和"用户可选分组"、"分组倍率"放在一起），提供编辑每个分组显示名的地方，保存后立即生效。
-
-   助手端对分组列表有 30 秒缓存，改完之后最多 30 秒左右就会显示出来。
-
-4. **测试：**
-   - 配置了显示名的分组会返回 `display_name`。
-   - 没配置的分组不返回这个字段，或者返回空字符串。
-   - 原有字段的值不变。
-
-## 可选扩展：排序（前端尚未实现，需要时再说）
-
-目前面板按接口返回的顺序显示。Go 的 map 转成 JSON 时会按 key 排序，所以实际顺序就是分组名的字母顺序。
-
-如果希望固定成"GPT、Claude、Gemini、国模"这样的顺序，可以再加一个可选的整数字段，比如 `display_order`，数字越小越靠前。后端加好后告诉助手这边，前端会再出一个版本来支持。在那之前，后端返回这个字段也不会有任何影响。
+- 继续在分支 `feat/group-display-names-20261102` 上改（GitHub `Yi-sama/new-api-custom`）。线上第一版的源码已经备份成这个分支上的提交 `2bdbb6b`。
+- **部署前先把源码提交并推送**，并把提交号写进 build manifest。不要再用"未提交的工作区"去构建上线的程序，否则下次改 new-api 时这个功能可能被覆盖。
+- 部署方式和第一版一样，`new-api` 和 `new-api-accrual` 都要换。
 
 ## 参考位置
 
-以下位置来自本地快照 `new-api-redesign`（2026-10-19），可能和线上代码有差别，请以线上代码为准。
-
-- `controller/group.go` 的 `GetUserGroups`：组装 `ratio` 和 `desc` 的地方，在这里加 `display_name`。
-- `setting/user_usable_group.go`：`UserUsableGroups` 的存储和读取，可以照着这个写显示名的存储。
-- 助手前端读取这个字段的位置：`yisama_Infinite_Assistant/scripts/yisama.mjs` 的 `fetchGroupInfo`。
+- `setting/group_display_names.go`：第一版的存储和校验。
+- `controller/group.go` 的 `GetUserGroups`：输出 `display_name`，在这里加 `display_order`。
+- `web/src/features/system-settings/extra/group-display-names.tsx`：第一版的 JSON 编辑框，换成表格。
+- 助手读取这些字段的位置：`yisama_Infinite_Assistant/scripts/yisama.mjs` 的 `fetchGroupInfo` 和 `desktopGroupInfo`。
