@@ -135,3 +135,33 @@ test('launcher polls the chosen debug port when Codex has no redirected log', {
     '-File', probe, '-Launcher', launcher, '-Port', String(server.address().port)], { windowsHide: true })
   assert.deepEqual(stdout.trim().split(/\r?\n/), ['free=True', `port=${server.address().port} self=True`])
 })
+
+// Loads only Test-LoopbackPortFree: a port still held after Codex exits must be detected.
+const FREE_PROBE = `
+param([string]$Launcher, [int]$Busy)
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+foreach ($name in 'Get-FreeLoopbackPort', 'Test-LoopbackPortFree') {
+    $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name }, $true)
+    Invoke-Expression $function.Extent.Text
+}
+"busy=$(Test-LoopbackPortFree -Port $Busy) free=$(Test-LoopbackPortFree -Port (Get-FreeLoopbackPort))"
+`
+
+test('launcher detects a debug port that another process still holds', {
+  skip: process.platform !== 'win32' && 'Windows launcher only.',
+  timeout: 60000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-launcher-test-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+  const net = await import('node:net')
+  const server = net.createServer()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const probe = path.join(root, 'free.ps1')
+  await fs.writeFile(probe, FREE_PROBE, 'utf8')
+  const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', probe, '-Launcher', launcher, '-Busy', String(server.address().port)], { windowsHide: true })
+  assert.equal(stdout.trim(), 'busy=False free=True')
+})

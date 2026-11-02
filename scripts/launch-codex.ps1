@@ -168,6 +168,16 @@ function Get-FreeLoopbackPort {
     finally { $listener.Stop() }
 }
 
+# A process started from an earlier Codex (for example a tool server it launched) can inherit
+# Codex's debug socket and keep the port after Codex exits; a new Codex then cannot listen on it.
+function Test-LoopbackPortFree {
+    param([int]$Port)
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+    try { $listener.Start(); return $true }
+    catch [Net.Sockets.SocketException] { return $false }
+    finally { $listener.Stop() }
+}
+
 function Wait-DebugPort {
     param([Diagnostics.Process]$Process, [int]$Port)
     $deadline = [DateTime]::UtcNow.AddSeconds($startupTimeoutSeconds)
@@ -244,6 +254,10 @@ try {
     }
 
     $wallpaper = Get-WallpaperLauncher
+    if ($wallpaper -and -not (Test-LoopbackPortFree -Port $wallpaper.Port)) {
+        Write-LauncherFailure "Port $($wallpaper.Port) is held by another process; starting Codex without Wallpaper Skin."
+        $wallpaper = $null
+    }
     if ($wallpaper) {
         Start-Process -FilePath $wallpaper.FilePath -ArgumentList $wallpaper.Arguments -WindowStyle Hidden | Out-Null
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -254,8 +268,7 @@ try {
             Start-Sleep -Milliseconds 300
         } while ([DateTime]::UtcNow -lt $deadline)
         if (-not $codexProcess) { throw 'The existing Codex Wallpaper Skin launcher did not start Codex.' }
-        $endpoint = @{ port = [int]$wallpaper.Port; processId = $codexProcess[0].Id }
-        $codexProcess[0].Dispose()
+        $endpoint = Wait-DebugPort -Process $codexProcess[0] -Port ([int]$wallpaper.Port)
     }
     else {
         $executable = Find-CodexExecutable

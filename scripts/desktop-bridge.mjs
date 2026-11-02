@@ -119,7 +119,12 @@ export async function runDesktopBridge({ input = process.stdin, output = process
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Bundled into the in-Codex assistant, import.meta.url is the assistant's own file, so the
+// release build turns this entry off; otherwise it would hold stdin open and keep the
+// assistant alive after Codex exits.
+const cliEntryEnabled = typeof __YISAMA_CLI_ENTRY__ === 'undefined' ? true : __YISAMA_CLI_ENTRY__
+
+if (cliEntryEnabled && process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runDesktopBridge().catch(() => {
     process.exitCode = 1
   })
