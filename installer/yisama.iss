@@ -127,6 +127,47 @@ begin
   end;
 end;
 
+{ The assistant's bundled node.exe can outlive Codex and would lock runtime\node.exe.
+  Only processes running that exact bundled executable are stopped. }
+procedure StopBundledAssistant;
+var
+  Locator, Service, Items, Item: Variant;
+  Index, Waited: Integer;
+  Node: String;
+  Found: Boolean;
+begin
+  Node := ExpandConstant('{app}\runtime\node.exe');
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\CIMV2');
+    for Waited := 0 to 20 do
+    begin
+      Found := False;
+      Items := Service.ExecQuery('SELECT ExecutablePath FROM Win32_Process WHERE Name = ''node.exe''');
+      for Index := 0 to Items.Count - 1 do
+      begin
+        Item := Items.ItemIndex(Index);
+        if not VarIsNull(Item.ExecutablePath) then
+          if CompareText(Item.ExecutablePath, Node) = 0 then
+          begin
+            Found := True;
+            Item.Terminate;
+          end;
+      end;
+      if not Found then Exit;
+      Sleep(250);
+    end;
+  except
+    Log('Assistant process stop failed: ' + GetExceptionMessage);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  StopBundledAssistant;
+end;
+
 procedure RemoveOwnedLegacyRunEntry;
 var
   Existing: String;
@@ -166,6 +207,7 @@ begin
     SuppressibleMsgBox('请先关闭所有 Codex 桌面窗口，再卸载。', mbError, MB_OK, IDOK);
     Exit;
   end;
+  StopBundledAssistant;
   PluginData := GetEnv('PLUGIN_DATA');
   if PluginData = '' then
     PluginData := ExpandConstant('{%USERPROFILE}\.yisama-infinite-assistant');
