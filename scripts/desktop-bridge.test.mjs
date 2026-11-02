@@ -204,6 +204,19 @@ function bridgeClient(env) {
   }
 }
 
+test('desktop bridge names groups by the relay display name', async (t) => {
+  const { env } = await fixture(t, { groups: { auto: { desc: '自动' }, plus: { ratio: 0.2, desc: '测试中', display_name: ' GPT ' },
+    cn: { ratio: 0.15, desc: '国模', display_name: '' }, claude: { ratio: 0.9, display_name: 'Claude' } } })
+  const bridge = bridgeClient(env)
+  t.after(async () => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  const { data } = await bridge.request({ id: 1, action: 'status' })
+  assert.deepEqual(data.groups.map(({ value, label }) => [value, label]).sort(),
+    [['auto', 'All'], ['claude', 'Claude'], ['cn', 'cn'], ['plus', 'GPT']])
+  await bridge.close()
+})
+
 test('desktop bridge projects only public state over serialized stdio requests', async (t) => {
   const { files, originalConfig, state, env } = await fixture(t)
   const bridge = bridgeClient(env)

@@ -366,9 +366,9 @@ export function installAssistantUI(options = {}) {
   const fields = el('section', { className: 'y-fields', hidden: '' })
   const groupLabel = el('div', { className: 'y-section-label', id: 'yisama-assistant-group-label' })
   const groupCount = el('span', { className: 'y-section-hint' }, '点选即切换')
-  groupLabel.append(el('span', {}, 'Routes · 线路分组'), groupCount)
+  groupLabel.append(el('span', {}, 'Models · 模型'), groupCount)
   const groupSearch = el('label', { className: 'y-search', hidden: '' })
-  const groupSearchInput = el('input', { type: 'search', placeholder: '搜索线路', 'aria-label': '搜索线路', 'data-testid': 'group-search', autocomplete: 'off', maxlength: 60 })
+  const groupSearchInput = el('input', { type: 'search', placeholder: '搜索模型', 'aria-label': '搜索模型', 'data-testid': 'group-search', autocomplete: 'off', maxlength: 60 })
   groupSearch.append(svg('0 0 24 24', [{ d: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4' }]), groupSearchInput)
   const groupSelect = el('div', {
     className: 'y-groups', role: 'radiogroup', 'aria-labelledby': 'yisama-assistant-group-label',
@@ -378,12 +378,12 @@ export function installAssistantUI(options = {}) {
   const groupTrail = el('span', { className: 'y-trail', 'aria-hidden': 'true' })
   const groupComet = el('span', { className: 'y-comet', 'aria-hidden': 'true', hidden: '' })
   const groupTrack = el('div', { className: 'y-groups__track' })
-  const groupEmpty = el('div', { className: 'y-groups__empty', hidden: '' }, '没有匹配的线路')
+  const groupEmpty = el('div', { className: 'y-groups__empty', hidden: '' }, '没有匹配的模型')
   groupTrack.append(groupRail, groupTrail, groupComet)
   groupSelect.append(groupTrack, groupEmpty)
   const applyButton = el('button', {
     type: 'button', className: 'y-button y-button--accent y-button--wide y-apply', 'data-testid': 'apply-selection',
-  }, '使用此分组')
+  }, '使用此模型')
   const takeoverButton = el('button', {
     type: 'button', className: 'y-button y-button--accent y-button--wide y-takeover', 'data-testid': 'takeover',
   }, '接管 Codex（重启后生效）')
@@ -556,7 +556,7 @@ export function installAssistantUI(options = {}) {
     if (state.nativeSync === 'error') return '配置已保存，Codex 模型尚未同步。'
     if (state.nativeSync === 'unsupported') return '当前 Codex 版本暂不支持 Ultra、Fast，其余功能正常'
     if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置'
-    if (state.pendingGroup) return '正在切换线路'
+    if (state.pendingGroup) return '正在切换模型'
     if (state.staleQuota) return '余额暂未刷新'
     if (state.loggedIn && state.configured) return '已准备就绪'
     if (state.loggedIn) return '账户已登录，尚未准备配置'
@@ -571,7 +571,7 @@ export function installAssistantUI(options = {}) {
   const noticeText = () => {
     if (state.error) return state.error
     if (state.nativeSync === 'account-change') {
-      return '重启并接管后，可使用当前线路和模型支持的 Ultra、Fast（1.5x 计费）等能力。'
+      return '重启并接管后，可使用当前模型支持的 Ultra、Fast（1.5x 计费）等能力。'
     }
     // Steady-state phrases belong to the status line only; a pending switch makes older messages stale.
     if (!state.message || state.pendingGroup) return ''
@@ -845,7 +845,7 @@ export function installAssistantUI(options = {}) {
       const accountMismatch = state.nativeSync === 'account-change' && state.configured
       applyButton.hidden = state.configured
       takeoverButton.hidden = !accountMismatch
-      applyButton.textContent = state.groups.length ? '使用此分组' : '重试准备'
+      applyButton.textContent = state.groups.length ? '使用此模型' : '重试准备'
       applyButton.disabled = busy || Boolean(state.pendingGroup) || (state.groups.length > 0 && !selectedGroup)
       takeoverButton.disabled = busy || Boolean(state.pendingGroup) || hasActivePending('reconfigure')
       account.textContent = state.username || '—'
@@ -938,8 +938,8 @@ export function installAssistantUI(options = {}) {
       flagFailedGroup(state.pendingGroup)
       state.pendingGroup = ''
       state.error = code === 'GROUP_NO_TEXT_MODEL'
-        ? '此分组没有可自动选择的对话模型，原分组未改动。'
-        : '切换未完成，原分组未改动，请重试。'
+        ? '该模型分类暂无可用的对话模型，原设置未改动。'
+        : '切换未完成，原设置未改动，请重试。'
     } else if (entry.action === 'reconfigure') {
       state.error = '接管准备未完成，原配置未改动，请重试。'
     } else if (entry.action === 'rechargeInfo') {

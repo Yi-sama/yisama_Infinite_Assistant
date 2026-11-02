@@ -442,8 +442,11 @@ export async function fetchGroupInfo(token) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new UserError('暂时无法读取可用分组。')
   }
+  // display_name ("GPT", "Claude", ...) is the name the relay wants users to see for a group;
+  // without it the group name is shown. desc stays a description.
   return Object.entries(data).filter(([value]) => value).map(([value, info]) => ({
     value, ratio: Number.isFinite(info?.ratio) ? info.ratio : null,
+    label: typeof info?.display_name === 'string' ? info.display_name.trim() : '',
   }))
 }
 
@@ -773,7 +776,8 @@ function publicGroups(groups) {
   return groups.slice(0, 100).map((group) => {
     const value = String(group?.value ?? group).slice(0, 200)
     const ratio = Number.isFinite(group?.ratio) ? group.ratio : undefined
-    return { value, label: value === 'auto' ? 'All' : value, ...(ratio === undefined ? {} : { ratio }) }
+    const label = typeof group?.label === 'string' && group.label ? group.label.slice(0, 200) : value === 'auto' ? 'All' : value
+    return { value, label, ...(ratio === undefined ? {} : { ratio }) }
   })
 }
 
