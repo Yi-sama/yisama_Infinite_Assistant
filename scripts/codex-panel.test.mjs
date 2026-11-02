@@ -413,6 +413,7 @@ test('native synchronization updates subsequent turns only for assistant-owned p
     const threads = {
       replace: { id: 'replace', modelProvider: 'yisama', model: 'old-model', status: { type: 'active' } },
       keep: { id: 'keep', modelProvider: 'yisama', model: 'gemini-3-flash' },
+      native: { id: 'native', modelProvider: 'yisama', model: 'native-extra' },
       external: { id: 'external', modelProvider: 'personal', model: 'personal-model' },
     }
     window.electronBridge = { async sendMessageFromView({ hostId, request }) {
@@ -425,9 +426,10 @@ test('native synchronization updates subsequent turns only for assistant-owned p
         { model: 'gpt-5.5', serviceTiers: fixture.staleTier ? [] : [{ id: 'priority', name: 'Fast' }],
           defaultServiceTier: 'priority' },
         { model: 'gemini-3-flash', serviceTiers: [], defaultServiceTier: null },
+        { model: 'native-extra', serviceTiers: [{ id: 'priority', name: 'Fast' }], defaultServiceTier: 'priority' },
       ], nextCursor: null }
       else if (method === 'thread/loaded/list') result = params.cursor
-        ? { data: ['external'], nextCursor: null } : { data: ['replace', 'keep'], nextCursor: 'second-page' }
+        ? { data: ['external'], nextCursor: null } : { data: ['replace', 'keep', 'native'], nextCursor: 'second-page' }
       else if (method === 'thread/read') result = { thread: threads[params.threadId] }
       else if (method === 'thread/settings/update') { fixture.updates.push(params); result = {} }
       else throw new Error(`Unexpected native method: ${method}`)
@@ -447,6 +449,7 @@ test('native synchronization updates subsequent turns only for assistant-owned p
   assert.deepEqual(await page.evaluate(() => window.nativeFixture.updates), [
     { threadId: 'keep', model: 'gemini-3-flash', serviceTier: null },
   ])
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /已准备就绪/)
   const calls = await page.evaluate(() => window.nativeFixture.calls)
   assert.equal(calls.filter((method) => method === 'thread/loaded/list').length, 2)
   assert.ok(!calls.some((method) => /interrupt|restart|turn\/settings/.test(method)))

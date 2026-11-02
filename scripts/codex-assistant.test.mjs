@@ -310,6 +310,63 @@ test('a new synchronization revision recovers old startup errors but does not re
   assert.equal(calls.length, before, 'real failures remain errors rather than causing repeated login requests')
 })
 
+test('native synchronization accepts extra native models without managing their capabilities or threads', async () => {
+  const { state, window, sync, settings } = nativeSyncFixture()
+  state.needsReload = false
+  Object.assign(settings, {
+    models: ['gpt-owned'],
+    modelSettings: { 'gpt-owned': {
+      fastAvailable: true, serviceTier: 'priority', reasoningEfforts: ['high', 'ultra'],
+    } },
+  })
+  const extra = { model: 'native-extra', serviceTiers: [{ id: 'priority' }], defaultServiceTier: 'priority' }
+  state.catalog = [extra, {
+    model: 'gpt-owned', serviceTiers: [{ id: 'priority' }], defaultServiceTier: 'priority',
+    supportedReasoningEfforts: [{ reasoningEffort: 'high' }, { reasoningEffort: 'ultra' }],
+  }]
+  state.threads = {
+    owned: { modelProvider: 'yisama', model: 'gpt-owned' },
+    extra: { modelProvider: 'yisama', model: 'native-extra' },
+    foreign: { modelProvider: 'personal', model: 'gpt-owned' },
+  }
+  const before = JSON.stringify(state.catalog)
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(window.__yisamaNativeModelSync.status, 'synced')
+  assert.equal(state.authorized, true)
+  assert.equal(state.invalidations, 1)
+  assert.deepEqual(state.updates.map((update) => ({ ...update })),
+    [{ threadId: 'owned', model: 'gpt-owned', serviceTier: 'priority' }])
+  assert.equal(JSON.stringify(state.catalog), before, 'native-only models must remain unchanged')
+})
+
+test('extra native models cannot substitute for required models or their capabilities', async () => {
+  for (const failure of ['missing-model', 'missing-fast', 'missing-reasoning']) {
+    const { state, window, sync, settings } = nativeSyncFixture()
+    state.needsReload = false
+    Object.assign(settings, {
+      models: ['gpt-owned'],
+      modelSettings: { 'gpt-owned': {
+        fastAvailable: true, serviceTier: 'priority', reasoningEfforts: ['ultra'],
+      } },
+    })
+    state.catalog = [{
+      model: 'native-extra', serviceTiers: [{ id: 'priority' }], defaultServiceTier: 'priority',
+      supportedReasoningEfforts: [{ reasoningEffort: 'ultra' }],
+    }]
+    if (failure !== 'missing-model') state.catalog.push({
+      model: 'gpt-owned',
+      serviceTiers: failure === 'missing-fast' ? [] : [{ id: 'priority' }],
+      defaultServiceTier: failure === 'missing-fast' ? null : 'priority',
+      supportedReasoningEfforts: failure === 'missing-reasoning' ? [] : [{ reasoningEffort: 'ultra' }],
+    })
+    assert.equal((await sync()).status, 'error', failure)
+    assert.equal(window.__yisamaNativeModelSync.stage,
+      failure === 'missing-model' ? 'catalog' : 'service-tiers', failure)
+    assert.equal(state.authorized, false, failure)
+    assert.equal(state.updates.length, 0, failure)
+  }
+})
+
 test('Fast-only synchronization preserves the catalog, query cache, and owned threads', async () => {
   const { state, window, calls, sync, settings } = nativeSyncFixture()
   state.needsReload = false

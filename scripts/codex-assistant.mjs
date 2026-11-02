@@ -852,14 +852,16 @@ export async function syncNativeModels(settings, options = {}) {
         catalog.push(...response.data)
         cursor = response.nextCursor
       } while (cursor)
-      models = catalog.map((model) => model.model)
-      if (Array.isArray(settings.models) && (models.length !== settings.models.length ||
-        settings.models.some((model) => !models.includes(model)))) {
+      const nativeModels = catalog.map((model) => model.model)
+      if (Array.isArray(settings.models) && settings.models.some((model) => !nativeModels.includes(model))) {
         throw new Error('Native model catalog did not change.')
       }
+      // Codex can retain native-only entries; manage only the configured catalog.
+      models = Array.isArray(settings.models) ? settings.models : nativeModels
       if (settings.modelSettings && settings.provider) {
         stage = 'service-tiers'
         for (const model of catalog) {
+          if (!models.includes(model.model)) continue
           const expected = settings.modelSettings[model.model]
           const supported = expected?.fastAvailable ?? Boolean(expected?.serviceTier)
           if (expected?.reasoningEfforts?.some((effort) =>
