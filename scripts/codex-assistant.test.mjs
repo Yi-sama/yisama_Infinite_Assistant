@@ -17,10 +17,10 @@ const generation = (letter) => letter.repeat(64)
 const marker = (letter) => ({ generation: generation(letter), updatedAt: '2026-10-29T02:30:00.000Z' })
 const closedPanel = () => ({ open: false, busy: false, unsent: false })
 
-// Shapes copied from the Codex 26.1021 bundle; 26.1016 differs only in minified names.
-const nativeSourceFor = ({ access = 'Jlo', setter = 'P', models = 'Vso' } = {}) => `function ${access}(e){let t=c(10),r=e.hostId,o=e.authMethod,s;s={authMethod:o,hostId:r};let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}
+// Inspected 26.1021 and 26.1027 shapes. In 26.1027 the selector's i shadows hostId.
+const nativeSourceFor = ({ access = 'Jlo', setter = 'P', models = 'Vso', teamCatalog = false } = {}) => `function ${access}(e){let t=c(10),r=e.hostId,o=e.authMethod,s;s={authMethod:o,hostId:r};let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}
 function _fo(e,t,n,r,i){let l=g(e),u=l.hostId,d={hostId:u,conversationId:e},b=h(u),S=b?.authMethod??null,C={authMethod:S,hostId:x};return {hasManagedNewThreadSettings:I,hostId:L,serviceTierAccess:R,serviceTierSettings:z,setServiceTier:${setter}}}
-var D2=Sc(J,({additionalAvailableModels:e,authMethod:t,enabledReasoningEfforts:n,hasConfiguredModelCatalog:r,hostId:i,includeUltraReasoningEffort:a,isCustomModelProvider:o},{get:d})=>({select:({data:n})=>${models}({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})}))`
+var D2=Sc(J,({additionalAvailableModels:e,authMethod:t,enabledReasoningEfforts:n,hasConfiguredModelCatalog:r,hostId:i,includeUltraReasoningEffort:a,isCustomModelProvider:o},{get:d})=>({select:({data:n${teamCatalog ? ',isTeamCatalog:i=!1' : ''}})=>${teamCatalog ? '({...' : ''}${models}({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})${teamCatalog ? ',isTeamCatalog:i})' : ''}}))`
 const nativeSource = nativeSourceFor()
 
 test('native controls adapt only the inspected hook sites and reject missing or repeated matches', () => {
@@ -29,7 +29,8 @@ test('native controls adapt only the inspected hook sites and reject missing or 
   assert.match(adapted, /__yisamaNativeFast\?\.wrap\(u,S,P\)\?\?P\}/)
   assert.match(adapted, /__yisamaNativeFastSourceReady=true/)
   assert.match(adapted, /__yisamaNativeReasoningSourceReady=true/)
-  assert.match(adapted, /return Vso\(window\.__yisamaNativeFast\?\.modelOptions\(i,t,yisamaOptions,a\)/)
+  assert.match(adapted, /return Vso\(window\.__yisamaNativeFast\?\.modelOptions\(yisamaHost,yisamaMethod,yisamaOptions,yisamaUltra\)/)
+  assert.match(adapted, /\}\)\(i,t,a\)/)
   assert.doesNotThrow(() => new Function(adapted))
   for (const source of ['', nativeSource + nativeSource, nativeSource.replace('isLoading:u', 'loading:u'),
     nativeSource.replace(',conversationId:e', ''), nativeSource.replace('hostId:i,', ''),
@@ -42,8 +43,50 @@ test('native controls follow renamed minified identifiers in other Codex builds'
   const adapted = adaptNativeFastSource(nativeSourceFor({ access: '_Lo', setter: 'F', models: 'eIo' }))
   assert.match(adapted, /__yisamaNativeFast\?\.access\(r,o\)\?\?d,p;/)
   assert.match(adapted, /__yisamaNativeFast\?\.wrap\(u,S,F\)\?\?F\}/)
-  assert.match(adapted, /return eIo\(window\.__yisamaNativeFast\?\.modelOptions\(i,t,yisamaOptions,a\)/)
+  assert.match(adapted, /return eIo\(window\.__yisamaNativeFast\?\.modelOptions\(yisamaHost,yisamaMethod,yisamaOptions,yisamaUltra\)/)
   assert.doesNotThrow(() => new Function(adapted))
+})
+
+test('native controls preserve the 26.1027 team selector and capture host outside its shadowed parameter', () => {
+  const { controller, window } = fastFixture()
+  const model = { model: 'gpt-test', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }
+  controller.authorize({ provider: 'yisama', fastAvailable: true,
+    modelSettings: { 'gpt-test': { reasoningEfforts: ['high', 'ultra'] } } })
+  for (const teamCatalog of [false, true]) {
+    for (const [hostId, authMethod, includeUltraReasoningEffort] of [
+      ['local', 'apikey', true], ['remote', 'apikey', true],
+      ['local', 'chatgpt', true], ['local', 'apikey', false],
+    ]) {
+      const adapted = adaptNativeFastSource(nativeSourceFor({ models: 'Rko', teamCatalog }))
+      const options = { additionalAvailableModels: [], authMethod, hostId,
+        includeUltraReasoningEffort, hasConfiguredModelCatalog: true, isCustomModelProvider: true }
+      const query = runInNewContext(`${adapted}\nD2(options,{})`, {
+        window, options, Sc: (_key, build) => build, J: null, Rko: (value) => value,
+        _: false, b: { availableModels: [], defaultModel: model.model, useHiddenModels: false },
+        y: new Set(['high']), x: false,
+      })
+      const owned = hostId === 'local' && authMethod === 'apikey'
+      for (const isTeamCatalog of [undefined, false, true]) {
+        const actual = query.select({ data: [model], isTeamCatalog })
+        assert.equal(actual.includeUltraReasoningEffort, owned && includeUltraReasoningEffort)
+        assert.deepEqual([...actual.enabledReasoningEfforts], owned ? ['high', 'ultra'] : ['high'])
+        assert.equal(actual.models[0].supportedReasoningEfforts.some((entry) => entry.reasoningEffort === 'ultra'), owned)
+        assert.equal(actual.isTeamCatalog, teamCatalog ? isTeamCatalog ?? false : undefined)
+        assert.equal(actual.authMethod, authMethod)
+        assert.equal(actual.defaultModel, model.model)
+      }
+      assert.equal(controller.access(hostId, authMethod)?.fast, owned ? true : undefined)
+    }
+  }
+  assert.deepEqual(model.supportedReasoningEfforts, [{ reasoningEffort: 'high' }])
+  const source = nativeSourceFor({ teamCatalog: true })
+  for (const malformed of [source + nativeSource,
+    source.replace(',isTeamCatalog:i})', ',isTeamCatalog:j})'),
+    source.replace('=>({...', '=>('),
+    source.replace(',isTeamCatalog:i=!1', '')]) {
+    assert.throws(() => adaptNativeFastSource(malformed), /does not support/)
+  }
+  controller.dispose()
 })
 
 function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true, serverDelay = 0 } = {}) {
@@ -230,13 +273,21 @@ test('native reasoning exposes catalog-backed Max and Ultra without Fast or chan
 function nativeSyncFixture() {
   const listeners = new Set()
   const calls = []
-  const state = { mounted: true, queryReady: true, loading: false, draft: '', panelOpen: false,
+  const state = { mounted: true, queryReady: true, loading: false, draft: '', panelOpen: false, reloadRequested: false,
     active: false, needsReload: true, catalog: [], invalidations: 0, updates: [] }
   const settings = { version: 'test', apiKey: 'sk-native-test-only', provider: 'yisama', fastAvailable: true }
   const props = { client: { getQueryCache() {}, async invalidateQueries() { state.invalidations++ } } }
   const root = { get memoizedProps() { return state.queryReady ? props : null } }
   const window = {
-    __yisamaInfiniteAssistant: { nativeStatus() {}, snapshot: () => ({ open: state.panelOpen }) },
+    __yisamaInfiniteAssistant: {
+      nativeStatus(status) { state.nativeSync = status },
+      snapshot: () => ({ open: state.panelOpen, nativeSync: state.nativeSync }),
+      consumeNativeReloadRequest() {
+        const requested = state.reloadRequested
+        state.reloadRequested = false
+        return requested
+      },
+    },
     __codexRoot: { _internalRoot: { get current() { return state.mounted ? root : null } } },
     __yisamaNativeFast: {
       authorize(value) { state.authorized = Boolean(value) },
@@ -481,7 +532,7 @@ test('catalog switches preserve a thread model that is temporarily outside the g
     'switching back must recover the original conversation model')
 })
 
-test('native Fast requests one initial resource reload only after drafts, panel, and active replies clear', async () => {
+test('native controls never reload automatically when drafts or active replies clear', async () => {
   const { state, sync, calls } = nativeSyncFixture()
   for (const field of ['draft', 'panelOpen', 'active']) {
     state[field] = field === 'draft' ? 'unsent' : true
@@ -490,11 +541,37 @@ test('native Fast requests one initial resource reload only after drafts, panel,
     assert.equal(result.reloadNativeFast, undefined)
     state[field] = field === 'draft' ? '' : false
   }
-  assert.equal((await sync()).reloadNativeFast, true)
+  for (let poll = 0; poll < 3; poll++) assert.equal((await sync()).reloadNativeFast, undefined)
+  assert.equal(state.nativeSync, 'reload-required')
+  assert.equal(calls.includes('thread/loaded/list'), false,
+    'background readiness checks do not scan conversations or schedule a page reload')
+  state.reloadRequested = true
+  state.panelOpen = true
+  assert.equal((await sync()).reloadNativeFast, true, 'the explicit button works with the panel open')
+  assert.equal(state.reloadRequested, false)
+  assert.equal((await sync()).reloadNativeFast, undefined, 'one click grants only one reload attempt')
   assert.equal(calls.filter((method) => method === 'account/login/start').length, 1,
     'waiting for safe resource loading must not repeatedly log in')
   state.needsReload = false
   assert.equal((await sync()).status, 'synced')
+})
+
+test('a blocked or failed explicit reload is consumed and cannot run later without another click', async () => {
+  for (const blockedBy of ['draft', 'active', 'loading', 'mounted', 'failMethod']) {
+    const { state, sync } = nativeSyncFixture()
+    await sync()
+    const normal = state[blockedBy]
+    state[blockedBy] = { draft: 'unsent', active: true, loading: true,
+      mounted: false, failMethod: 'thread/read' }[blockedBy]
+    state.reloadRequested = true
+    assert.equal((await sync()).reloadNativeFast, undefined, blockedBy)
+    assert.equal(state.reloadRequested, false, blockedBy)
+    if (['draft', 'active'].includes(blockedBy)) assert.equal(state.nativeSync, 'reload-blocked')
+    state[blockedBy] = normal
+    for (let poll = 0; poll < 3; poll++) {
+      assert.equal((await sync()).reloadNativeFast, undefined, `${blockedBy}: no delayed reload`)
+    }
+  }
 })
 
 test('incompatible native Fast resources cannot cause a renderer reload loop', async () => {
@@ -504,7 +581,8 @@ test('incompatible native Fast resources cannot cause a renderer reload loop', a
     async call(method, params) {
       calls.push(method)
       if (method === 'Runtime.evaluate' && /__yisamaNativeAdapterUnsupported = true/.test(params.expression)) return {}
-      return { result: { value: { status: 'pending', reloadNativeFast: true } } }
+      return { result: { value: { status: 'pending',
+        ...(calls.includes('Page.reload') ? { nativeControlsMissing: true } : { reloadNativeFast: true }) } } }
     },
   }) })
   target.allowed = true
@@ -514,7 +592,26 @@ test('incompatible native Fast resources cannot cause a renderer reload loop', a
   assert.equal((await target.syncModels({})).status, 'synced')
   assert.equal(calls.filter((method) => method === 'Page.reload').length, 1)
   assert.equal(calls.at(-1), 'Runtime.evaluate')
-  assert.deepEqual(reports, ['The native model controls did not load. This Codex build may be incompatible.'])
+  assert.match(reports[0], /Native model controls: user-requested page reload\.$/)
+  assert.equal(reports[1], 'The native model controls did not load. This Codex build may be incompatible.')
+})
+
+test('a reload requested in an old document cannot refresh a replacement document', async () => {
+  const calls = []
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method) {
+      calls.push(method)
+      target.onEvent({ method: 'Runtime.executionContextsCleared' })
+      target.contexts.set(2, { auxData: { isDefault: true, frameId: 'main' } })
+      return { result: { value: { status: 'pending', reloadNativeFast: true } } }
+    },
+  }) })
+  target.allowed = true
+  target.mainFrameId = 'main'
+  target.contexts.set(1, { auxData: { isDefault: true, frameId: 'main' } })
+  assert.equal((await target.syncModels({})).status, 'pending')
+  assert.deepEqual(calls, ['Runtime.evaluate'])
+  assert.equal(target.nativeFastReloadAttempted, false)
 })
 
 test('native asset interception is scoped, removes stale body headers, and releases incompatible modules', async () => {

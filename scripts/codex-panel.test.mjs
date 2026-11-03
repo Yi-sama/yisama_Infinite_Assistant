@@ -397,6 +397,74 @@ test('native catalogs reload immediately without restarting or hiding a failed s
     'production synchronization is forbidden outside the Codex main page')
 })
 
+test('native controls reload only after a click and never queue behind a draft or active turn', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  await page.evaluate(() => {
+    const fixture = window.nativeFixture = { active: true, ready: false, sequence: 0, methods: [] }
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: () => `reload-test-${++fixture.sequence}` })
+    window.__codexRoot = { _internalRoot: { current: {} } }
+    window.__yisamaNativeModelSync = { version: 'reload-test', status: 'synced' }
+    window.__yisamaNativeFast = { authorize() {}, isBusy: () => false, needsReload: () => !fixture.ready }
+    window.electronBridge = { async sendMessageFromView({ hostId, request }) {
+      fixture.methods.push(request.method)
+      const result = request.method === 'getAuthStatus'
+        ? { authMethod: 'apikey', authToken: 'isolated-reload-key' }
+        : request.method === 'thread/loaded/list' ? { data: ['isolated-thread'], nextCursor: null }
+          : { thread: { status: { type: fixture.active ? 'active' : 'idle' } } }
+      window.dispatchEvent(new MessageEvent('message', { data: {
+        type: 'mcp-response', hostId, message: { id: request.id, result },
+      } }))
+    } }
+    const draft = document.createElement('textarea')
+    draft.id = 'isolated-draft'
+    document.body.append(draft)
+    document.querySelector('[data-testid="logged-out"] input').value = 'retained-login-name'
+  })
+  const sync = () => page.evaluate(({ source }) => (0, eval)(`(${source})`)({
+    version: 'reload-test', apiKey: 'isolated-reload-key', provider: 'yisama',
+  }, { allowTestLocation: true }), { source: syncNativeModels.toString() })
+  const button = page.locator('[data-testid="native-reload"]')
+  assert.equal((await sync()).reloadNativeFast, undefined)
+  assert.equal(await button.isVisible(), true)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /刷新 Codex/)
+  assert.deepEqual(await page.evaluate(() => window.nativeFixture.methods), ['getAuthStatus'])
+  await fs.mkdir(output, { recursive: true })
+  for (const width of [1280, 420]) {
+    await page.setViewportSize({ width, height: 800 })
+    await page.waitForTimeout(200)
+    assert.equal(await button.evaluate((node) => node.scrollWidth <= node.clientWidth), true)
+    await page.locator('[data-testid="assistant-panel"]').screenshot({
+      path: path.join(output, `assistant-native-reload-${width}.png`),
+    })
+  }
+  await button.click()
+  assert.equal((await sync()).reloadNativeFast, undefined)
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /还有草稿或运行中的任务/)
+  await page.evaluate(() => { window.nativeFixture.active = false })
+  assert.equal((await sync()).reloadNativeFast, undefined, 'a finished turn cannot trigger a deferred reload')
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /尚未刷新/)
+  await page.locator('#isolated-draft').fill('unsent message')
+  await button.click()
+  assert.equal((await sync()).reloadNativeFast, undefined)
+  assert.equal(await page.locator('#isolated-draft').inputValue(), 'unsent message')
+  await page.locator('#isolated-draft').fill('')
+  assert.equal((await sync()).reloadNativeFast, undefined, 'clearing a draft cannot trigger a deferred reload')
+  await button.click()
+  await page.evaluate(installAssistantUI, { allowTestLocation: true })
+  assert.equal((await sync()).reloadNativeFast, undefined, 'reattaching cannot execute a stale click')
+  await button.click()
+  assert.equal((await sync()).reloadNativeFast, true,
+    'an explicit idle reload works despite retained text in the hidden signed-out form')
+  assert.equal((await sync()).reloadNativeFast, undefined, 'a click is consumed once')
+  await page.evaluate(() => { window.nativeFixture.ready = true })
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(await button.isHidden(), true)
+})
+
 test('native synchronization updates subsequent turns only for assistant-owned providers', async (t) => {
   const app = await fixture(t)
   if (!app) return

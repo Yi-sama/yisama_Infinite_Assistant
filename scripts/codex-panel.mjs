@@ -7,7 +7,10 @@ export function installAssistantUI(options = {}) {
   if (!topFrame || (window.location.href !== 'app://-/index.html' && options.allowTestLocation !== true)) return null
 
   const existing = window.__yisamaInfiniteAssistant
-  if (existing?.receive && document.getElementById(ROOT_ID)) return existing
+  if (existing?.receive && document.getElementById(ROOT_ID)) {
+    existing.consumeNativeReloadRequest?.()
+    return existing
+  }
   existing?.dispose?.()
 
   const cleanups = []
@@ -53,6 +56,7 @@ export function installAssistantUI(options = {}) {
   let sequence = 0
   let foregroundVersion = 0
   let latestStatusId = 0
+  let nativeReloadRequested = false
   let dragging = null
   let suppressClick = false
 
@@ -388,7 +392,11 @@ export function installAssistantUI(options = {}) {
     type: 'button', className: 'y-button y-button--accent y-button--wide y-takeover', 'data-testid': 'takeover',
   }, '接管 Codex（重启后生效）')
   takeoverButton.append(svg('0 0 24 24', [{ d: 'M5 12h13M13 6l6 6-6 6' }]))
-  fields.append(groupLabel, groupSearch, groupSelect, applyButton, takeoverButton)
+  const nativeReloadButton = el('button', {
+    type: 'button', className: 'y-button y-button--accent y-button--wide y-takeover',
+    'data-testid': 'native-reload', hidden: '',
+  }, '刷新并加载控件')
+  fields.append(groupLabel, groupSearch, groupSelect, applyButton, takeoverButton, nativeReloadButton)
 
   const notice = el('div', { className: 'y-notice', role: 'status', hidden: '', 'data-testid': 'message' })
 
@@ -555,6 +563,8 @@ export function installAssistantUI(options = {}) {
     if (state.nativeSync === 'account-change') return '主实例尚未接管，当前对话未被中断。'
     if (state.nativeSync === 'error') return '配置已保存，Codex 模型尚未同步。'
     if (state.nativeSync === 'unsupported') return '当前 Codex 版本暂不支持 Ultra、Fast，其余功能正常'
+    if (state.nativeSync === 'reload-required') return '原生模型控件待加载'
+    if (state.nativeSync === 'reload-blocked') return '还有草稿或运行中的任务，尚未刷新'
     if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置'
     if (state.pendingGroup) return '正在切换模型'
     if (state.staleQuota) return '余额暂未刷新'
@@ -563,7 +573,7 @@ export function installAssistantUI(options = {}) {
     return '未登录'
   }
   const statusKind = () => {
-    if (state.staleQuota || ['error', 'account-change', 'unsupported'].includes(state.nativeSync)) return 'warning'
+    if (state.staleQuota || ['error', 'account-change', 'unsupported', 'reload-required', 'reload-blocked'].includes(state.nativeSync)) return 'warning'
     if (state.setupPending || state.pendingGroup || ['pending', 'syncing'].includes(state.nativeSync)) return 'busy'
     return state.loggedIn && state.configured ? 'normal' : 'off'
   }
@@ -572,6 +582,9 @@ export function installAssistantUI(options = {}) {
     if (state.error) return state.error
     if (state.nativeSync === 'account-change') {
       return '重启并接管后，可使用当前模型支持的 Ultra、Fast（1.5x 计费）等能力。'
+    }
+    if (['reload-required', 'reload-blocked'].includes(state.nativeSync)) {
+      return '加载 Ultra、Fast 控件需要刷新 Codex 页面。请先保存草稿并等待任务完成。'
     }
     // Steady-state phrases belong to the status line only; a pending switch makes older messages stale.
     if (!state.message || state.pendingGroup) return ''
@@ -845,6 +858,8 @@ export function installAssistantUI(options = {}) {
       const accountMismatch = state.nativeSync === 'account-change' && state.configured
       applyButton.hidden = state.configured
       takeoverButton.hidden = !accountMismatch
+      nativeReloadButton.hidden = !state.configured || !['reload-required', 'reload-blocked'].includes(state.nativeSync)
+      nativeReloadButton.disabled = busy || state.setupPending || Boolean(state.pendingGroup)
       applyButton.textContent = state.groups.length ? '使用此模型' : '重试准备'
       applyButton.disabled = busy || Boolean(state.pendingGroup) || (state.groups.length > 0 && !selectedGroup)
       takeoverButton.disabled = busy || Boolean(state.pendingGroup) || hasActivePending('reconfigure')
@@ -1237,6 +1252,12 @@ export function installAssistantUI(options = {}) {
     if (state.nativeSync === 'error') delete window.__yisamaNativeModelSync
     request('status')
   })
+  addListener(nativeReloadButton, 'click', () => {
+    if (nativeReloadButton.hidden || nativeReloadButton.disabled) return
+    nativeReloadRequested = true
+    state.nativeSync = 'pending'
+    render()
+  })
   const setAuthMode = (mode) => {
     if (hasForegroundPending()) return
     state.authMode = mode
@@ -1427,8 +1448,14 @@ export function installAssistantUI(options = {}) {
   cleanups.push(() => window.clearInterval(authTimer))
 
   const runtime = {
+    consumeNativeReloadRequest() {
+      const requested = nativeReloadRequested
+      nativeReloadRequested = false
+      return requested
+    },
     nativeStatus(status) {
-      if (disposed || !['pending', 'syncing', 'synced', 'error', 'account-change', 'unsupported'].includes(status)) return
+      if (disposed || !['pending', 'syncing', 'synced', 'error', 'account-change', 'unsupported',
+        'reload-required', 'reload-blocked'].includes(status)) return
       if (state.nativeSync === status) return
       state.nativeSync = status
       if (status === 'synced') state.restartRequired = false
@@ -1521,7 +1548,7 @@ export function installAssistantUI(options = {}) {
         loggedIn: state.loggedIn, configured: state.configured, username: state.username, quota: state.quota,
         group: state.group, groupLabel: state.groupLabel, groups: state.groups.map((group) => ({ ...group })),
         model: state.model, models: [...state.models], message: state.message, restartRequired: state.restartRequired,
-        open: state.open, staleQuota: state.staleQuota, setupPending: state.setupPending,
+        open: state.open, staleQuota: state.staleQuota, setupPending: state.setupPending, nativeSync: state.nativeSync,
       }
     },
   }

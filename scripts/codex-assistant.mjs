@@ -49,7 +49,11 @@ export function adaptNativeFastSource(source) {
   const [, setterMethod] = uniqueMatch(setterScope, new RegExp(String.raw`\{authMethod:(${n}),hostId:${n}\}`), 'setter auth')
 
   const select = uniqueMatch(source, new RegExp(
-    String.raw`select:\(\{data:(${n})\}\)=>(${n})\((\{additionalAvailableModels:new Set\(${n}\),apiKeyDaybreakSupported:[^{}]*?useHiddenModels:[\w$.]+\})\)`), 'models')
+    String.raw`select:(?<head>\(\{data:${n}(?:,isTeamCatalog:(?<team>${n})=!1)?\}\)=>)(?<spread>\(\{\.\.\.)?(?<transform>${n})\((?<options>\{additionalAvailableModels:new Set\(${n}\),apiKeyDaybreakSupported:[^{}]*?useHiddenModels:[\w$.]+\})\)(?<tail>,isTeamCatalog:\k<team>\}\))?`), 'models')
+  const { head, team, spread, transform, options, tail } = select.groups
+  if (Boolean(team) !== Boolean(spread) || Boolean(team) !== Boolean(tail)) {
+    throw new ConnectionError('This Codex build does not support the native Fast adapter (models).')
+  }
   const query = lastCapture(source.slice(Math.max(0, select.index - 4000), select.index),
     /\(\{additionalAvailableModels:[^{}]*?\}/, 'models query')[0]
   const field = (name) => new RegExp(String.raw`[{,]${name}:(${n})[,}]`).exec(query)?.[1]
@@ -63,8 +67,11 @@ export function adaptNativeFastSource(source) {
       access[0].slice(`let ${access[1]}=${access[2]}`.length)],
     [setter, `serviceTierAccess:${setter[1]},serviceTierSettings:${setter[2]},` +
       `setServiceTier:window.__yisamaNativeFast?.wrap(${setterHost},${setterMethod},${setter[3]})??${setter[3]}}`],
-    [select, `select:({data:${select[1]}})=>{const yisamaOptions=${select[3]};return ${select[2]}(` +
-      `window.__yisamaNativeFast?.modelOptions(${selectHost},${selectMethod},yisamaOptions,${selectUltra})??yisamaOptions)}`],
+    // Capture query arguments before 26.1027's isTeamCatalog parameter shadows hostId.
+    [select, `select:((yisamaHost,yisamaMethod,yisamaUltra)=>${head}{` +
+      `const yisamaOptions=${options};return ${spread || ''}${transform}(` +
+      `window.__yisamaNativeFast?.modelOptions(yisamaHost,yisamaMethod,yisamaOptions,yisamaUltra)??yisamaOptions)` +
+      `${tail || ''}})(${selectHost},${selectMethod},${selectUltra})`],
   ].sort((a, b) => b[0].index - a[0].index)
   let patched = source
   for (const [match, replacement] of edits) {
@@ -555,13 +562,15 @@ export class AssistantTarget {
 
   async syncModels(settings) {
     if (this.disposed || !this.allowed || !this.topContext()) return null
+    const contextId = this.topContext()
     const result = await this.connection.call('Runtime.evaluate', {
       expression: `(${syncNativeModels.toString()})(${JSON.stringify(settings)})`,
-      contextId: this.topContext(), returnByValue: true, awaitPromise: true,
+      contextId, returnByValue: true, awaitPromise: true,
     }, { timeoutMs: 45000 })
     if (result.exceptionDetails) throw new ConnectionError('Native model synchronization failed.')
     const synced = result.result?.value
-    if (synced?.reloadNativeFast === true) {
+    if (synced?.reloadNativeFast === true || synced?.nativeControlsMissing === true) {
+      if (this.disposed || !this.allowed || contextId !== this.topContext()) return { status: 'pending' }
       if (this.nativeFastReloadAttempted) {
         // Keep the rest of the assistant usable and say so, instead of syncing forever.
         await this.connection.call('Runtime.evaluate', {
@@ -572,7 +581,9 @@ export class AssistantTarget {
         this.report('The native model controls did not load. This Codex build may be incompatible.')
         return { status: 'synced' }
       }
+      if (synced.reloadNativeFast !== true) return synced
       this.nativeFastReloadAttempted = true
+      this.report(`${new Date().toISOString()} Native model controls: user-requested page reload.`)
       await this.connection.call('Page.reload', { ignoreCache: true })
       return { status: 'pending' }
     }
@@ -726,6 +737,9 @@ export async function syncNativeModels(settings, options = {}) {
   if (window.top !== window || (location.href !== 'app://-/index.html' && options.allowTestLocation !== true)) return null
   const runtime = window.__yisamaInfiniteAssistant
   if (!runtime || !window.electronBridge?.sendMessageFromView) return { status: 'unavailable' }
+  // A click is valid for this check only, never queued behind a draft or running turn.
+  const reloadRequested = runtime.consumeNativeReloadRequest?.() === true
+  if (reloadRequested) runtime.nativeStatus?.('reload-required')
   const fast = window.__yisamaNativeFast
   if (!settings) {
     fast?.authorize(null)
@@ -767,24 +781,34 @@ export async function syncNativeModels(settings, options = {}) {
       runtime.nativeStatus?.('synced')
       return { status: 'synced' }
     }
-    runtime.nativeStatus?.('pending')
+    if (!reloadRequested) {
+      if (runtime.snapshot?.().nativeSync !== 'reload-blocked') runtime.nativeStatus?.('reload-required')
+      return { status: 'pending', nativeControlsMissing: true }
+    }
+    const blocked = () => {
+      runtime.nativeStatus?.('reload-blocked')
+      return { status: 'pending', nativeControlsMissing: true }
+    }
     const hasUnsentChanges = () => {
       const panel = runtime.snapshot?.()
-      return panel?.open || panel?.setupPending || [...document.querySelectorAll(
+      return panel?.setupPending || [...document.querySelectorAll(
         '[contenteditable=true],textarea,input:not([type]),input[type=text],input[type=password],input[type=email]',
-      )].some((node) => node.isContentEditable ? node.textContent.trim() : node.value?.trim())
+      )].some((node) => {
+        if (panel?.loggedIn && node.closest?.('#yisama-infinite-assistant-ui [data-testid="logged-out"]')) return false
+        return node.isContentEditable ? node.textContent.trim() : node.value?.trim()
+      })
     }
-    if (hasUnsentChanges()) return { status: 'pending' }
+    if (hasUnsentChanges()) return blocked()
     let cursor = null
     do {
       const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
       for (const threadId of loaded.data) {
         const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
-        if (thread.status?.type !== 'idle') return { status: 'pending' }
+        if (thread.status?.type !== 'idle') return blocked()
       }
       cursor = loaded.nextCursor
     } while (cursor)
-    return hasUnsentChanges() ? { status: 'pending' } : { status: 'pending', reloadNativeFast: true }
+    return hasUnsentChanges() ? blocked() : { status: 'pending', reloadNativeFast: true }
   }
   let stage = 'authentication'
   try {
