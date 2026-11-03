@@ -6,6 +6,7 @@ import {
   desktopAuthOptions,
   desktopRegister,
   desktopSendVerification,
+  desktopForgotPassword,
   desktopRechargeInfo,
   desktopRechargeAmount,
   desktopRechargePay,
@@ -15,13 +16,14 @@ import {
   desktopSelect,
   desktopReconfigure,
   desktopStatus,
+  desktopBalance,
   desktopFastMode,
   safeError,
   publicErrorCode,
 } from './yisama.mjs'
 
 const MAX_LINE_LENGTH = 16 * 1024
-const ACTIONS = new Set(['status', 'login', 'authOptions', 'register', 'sendVerification',
+const ACTIONS = new Set(['status', 'balance', 'login', 'authOptions', 'register', 'sendVerification', 'forgotPassword',
   'select', 'reconfigure', 'rechargeInfo', 'rechargeAmount', 'rechargePay', 'recharge', 'redeem',
   'restore', 'fast'])
 
@@ -82,10 +84,12 @@ export function validateRequest(value) {
 export async function handleRequest(request) {
   const { action, group, model, ...details } = validateRequest(request)
   if (action === 'status') return desktopStatus()
+  if (action === 'balance') return desktopBalance()
   if (action === 'authOptions') return desktopAuthOptions()
   if (action === 'login') return desktopLogin(details)
   if (action === 'register') return desktopRegister(details)
   if (action === 'sendVerification') return desktopSendVerification(details)
+  if (action === 'forgotPassword') return desktopForgotPassword()
   if (action === 'select') return desktopSelect({ group, model })
   if (action === 'reconfigure') return desktopReconfigure()
   if (action === 'rechargeInfo') return desktopRechargeInfo()

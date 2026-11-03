@@ -8,14 +8,170 @@ import { execFile, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { configureCodex, makeModelCatalog, restoreCodex } from './codex-config.mjs'
+import { randomUUID } from 'node:crypto'
+import { runInNewContext } from 'node:vm'
+import { configureCodex, makeModelCatalog, replaceFile, restoreCodex } from './codex-config.mjs'
+import { CODEX_PAGE, runAssistant } from './codex-assistant.mjs'
 
-function exec(...args) {
-  const result = promisify(execFile)(...args)
-  result.child.stdin.end()
+async function exec(...args) {
+  const pending = promisify(execFile)(...args)
+  pending.child.stdin.end()
+  const result = await pending
+  assert.equal(pending.child.killed, false, 'Codex must exit without being killed by the command timeout')
   return result
 }
 const binary = process.env.YISAMA_CODEX_BIN
+
+test('real Codex restore keeps original credentials through assistant polling and a fresh service launch', {
+  skip: !binary && 'Set YISAMA_CODEX_BIN to run the real restore test.',
+  timeout: 90000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-real-restore-'))
+  const files = {
+    pluginData: path.join(root, 'data'), state: path.join(root, 'data/state.json'),
+    session: path.join(root, 'data/session.json'),
+    codexConfig: path.join(root, 'codex/config.toml'), codexAuth: path.join(root, 'codex/auth.json'),
+  }
+  const personalKey = 'sk-isolated-original-restore-only'
+  const helperKey = 'sk-isolated-assistant-restore-only'
+  const originalConfig = [
+    'model = "gpt-5-codex"', 'cli_auth_credentials_store = "file"', 'model_provider = "personal"',
+    '[model_providers.personal]', 'name = "Personal"', 'base_url = "http://127.0.0.1:1/v1"',
+    'wire_api = "responses"', 'requires_openai_auth = true', '',
+  ].join('\n')
+  const originalAuth = JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: personalKey }) + '\n'
+  await replaceFile(files.codexConfig, originalConfig)
+  await replaceFile(files.codexAuth, originalAuth)
+  const state = await configureCodex({
+    files, apiKey: helperKey, origin: 'http://127.0.0.1:1', model: 'gpt-5-codex',
+    fast: false, catalog: makeModelCatalog(['gpt-5-codex'], [], { fast: false }),
+  })
+  const env = { ...process.env, CODEX_HOME: path.dirname(files.codexConfig), NODE_TLS_REJECT_UNAUTHORIZED: '1' }
+  for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'CODEX_WINDOWS_REGISTERED_CORE',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) delete env[key]
+  let host
+  const start = async () => {
+    const child = spawn(binary, ['--no-daemon', '-c', 'chatgpt_base_url="http://127.0.0.1:1"',
+      'app-server', '--stdio'], { cwd: root, env, windowsHide: true })
+    const closed = new Promise((resolve) => child.once('close', resolve))
+    const lines = createInterface({ input: child.stdout })
+    child.stderr.resume()
+    let sequence = 0
+    const rpc = (method, params) => new Promise((resolve, reject) => {
+      const id = ++sequence
+      const timer = setTimeout(() => {
+        lines.off('line', receive)
+        reject(new Error(`Restore RPC timed out: ${method}`))
+      }, 10000)
+      const receive = (line) => {
+        const response = JSON.parse(line)
+        if (response.id !== id) return
+        clearTimeout(timer)
+        lines.off('line', receive)
+        if (response.error) reject(new Error(`Restore RPC failed: ${method}`))
+        else resolve(response.result)
+      }
+      lines.on('line', receive)
+      child.stdin.write(JSON.stringify({ id, method, params }) + '\n')
+    })
+    const stop = async () => {
+      child.stdin.end()
+      const timer = setTimeout(() => child.kill(), 2500)
+      try { await closed } finally { clearTimeout(timer); lines.close() }
+    }
+    host = { rpc, stop }
+    await rpc('initialize', {
+      clientInfo: { name: 'yisama_restore_test', version: '0.1.0' },
+      capabilities: { experimentalApi: true },
+    })
+    child.stdin.write('{"method":"initialized"}\n')
+    return host
+  }
+  t.after(async () => {
+    await host?.stop()
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()))
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 3 })
+  })
+  await start()
+  const auth = () => host.rpc('getAuthStatus', { includeToken: true, refreshToken: false })
+  assert.equal((await auth()).authToken, helperKey)
+  const listeners = new Set()
+  const nativeMethods = []
+  let reply
+  const renderer = {
+    __yisamaInfiniteAssistant: {
+      nativeStatus() {}, snapshot: () => ({ loggedIn: !reply, configured: !reply }),
+      receive: (response) => { reply = response },
+    },
+    __codexRoot: { _internalRoot: { current: { memoizedProps: {
+      client: { getQueryCache() {}, async invalidateQueries() {} },
+    } } } },
+    addEventListener(_type, listener) { listeners.add(listener) },
+    removeEventListener(_type, listener) { listeners.delete(listener) },
+    electronBridge: { async sendMessageFromView({ hostId, request }) {
+      nativeMethods.push(request.method)
+      const message = { id: request.id }
+      try { message.result = await host.rpc(request.method, request.params) }
+      catch { message.error = { message: 'Isolated native request failed.' } }
+      for (const listener of listeners) listener({ data: { type: 'mcp-response', hostId, message } })
+    } },
+  }
+  renderer.top = renderer
+  const context = { window: renderer, location: { href: CODEX_PAGE }, crypto: { randomUUID },
+    setTimeout, clearTimeout, document: { querySelectorAll: () => [] } }
+  let send
+  let afterReply = 0
+  const result = await runAssistant({
+    endpointFile: path.join(root, 'endpoint.json'), processId: 7,
+    readEndpoint: async () => ({ port: 9222, processId: 7 }),
+    discover: async () => [{ id: 'isolated-restore', webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/page/restore' }],
+    isRunning: () => !reply || ++afterReply <= 3,
+    handler: async (command) => {
+      assert.equal(command.action, 'restore')
+      await restoreCodex(files, state)
+      assert.equal(await fs.readFile(files.codexAuth, 'utf8'), originalAuth)
+      assert.equal((await auth()).authToken, helperKey, 'the running service still caches the assistant account')
+      return { loggedIn: false, configured: false, restartRequired: true }
+    },
+    nativeConfiguration: async () => null, readUpdate: async () => null,
+    restartDelayMs: 60000, pollMs: 0, signal: AbortSignal.timeout(15000),
+    report: (message) => assert.fail(message),
+    connectionFactory: (_url, onEvent) => {
+      send = onEvent
+      return {
+        socket: { readyState: WebSocket.OPEN }, async connect() {}, close() {},
+        async call(method, params = {}) {
+          if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', url: CODEX_PAGE } } }
+          if (method === 'Runtime.enable') onEvent({ method: 'Runtime.executionContextCreated',
+            params: { context: { id: 1, auxData: { isDefault: true, frameId: 'main' } } } })
+          if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: 'isolated-restore-ui' }
+          if (method === 'Runtime.evaluate' &&
+            (/^\(async function (syncNativeModels|codexRestartBlocker)/.test(params.expression) ||
+              params.expression.includes('__yisamaInfiniteAssistant?.receive'))) {
+            return { result: { value: await runInNewContext(params.expression, context) } }
+          }
+          return {}
+        },
+      }
+    },
+    onReady() {
+      send({ method: 'Runtime.bindingCalled', params: {
+        name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+      } })
+    },
+  })
+  assert.equal(result, undefined, 'the isolated test never restarts the real desktop app')
+  assert.equal(reply?.ok, true)
+  assert.equal(await fs.readFile(files.codexConfig, 'utf8'), originalConfig)
+  assert.equal(await fs.readFile(files.codexAuth, 'utf8'), originalAuth)
+  assert.ok(!nativeMethods.includes('account/login/start'), 'no stale account may overwrite restored credentials')
+  await host.stop()
+  host = null
+  await start()
+  assert.equal((await auth()).authToken, personalKey, 'a fresh service loads the restored personal account')
+  assert.equal(await fs.readFile(files.codexConfig, 'utf8'), originalConfig)
+  assert.equal(await fs.readFile(files.codexAuth, 'utf8'), originalAuth)
+})
 
 test('real Codex reads assistant catalogs for Gemini and Claude after an isolated service restart', {
   skip: !binary && 'Set YISAMA_CODEX_BIN to run the real catalog test.',
@@ -154,7 +310,6 @@ test('real Codex sends priority Responses and the selected reasoning including U
   timeout: 100000,
 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-codex-'))
-  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
   const received = []
   const server = http.createServer(async (req, res) => {
     const chunks = []
@@ -193,7 +348,14 @@ test('real Codex sends priority Responses and the selected reasoning including U
     socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }))
+  t.after(async () => {
+    await new Promise((resolve, reject) => {
+      server.closeAllConnections()
+      server.close((error) => error ? reject(error) : resolve())
+    })
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()))
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 3 })
+  })
   const origin = `http://127.0.0.1:${server.address().port}`
   const files = {
     pluginData: path.join(root, 'data'),
@@ -213,8 +375,8 @@ test('real Codex sends priority Responses and the selected reasoning including U
       state = await configureCodex({ files, state, apiKey, origin, model: 'gpt-5.6-sol', reasoning: level })
       const start = received.length
       const result = await exec(binary, [
-        // Route background plugin catalog requests to the fixture as well.
-        '--no-daemon', '-c', `chatgpt_base_url="${origin}"`,
+        // Plugin discovery is verified separately; keep this request fixture offline.
+        '--no-daemon', '--disable', 'plugins', '-c', `chatgpt_base_url="${origin}"`,
         'exec', '--strict-config', '--skip-git-repo-check', '--ephemeral',
         '--sandbox', 'read-only', '--json', 'Reply exactly YISAMA_TEST_OK. Do not use tools.',
       ], { env, cwd: root, timeout: 15000, maxBuffer: 2 * 1024 * 1024 })

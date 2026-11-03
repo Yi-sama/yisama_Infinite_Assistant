@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash, webcrypto } from 'node:crypto'
 import { runInNewContext } from 'node:vm'
 import {
-  adaptNativeFastSource, installNativeFast, syncNativeModels, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
+  adaptNativeFastSource, installNativeFast, syncNativeModels, codexRestartBlocker, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
   restartAssistant, restartCodex, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
 } from './codex-assistant.mjs'
 
@@ -656,13 +656,13 @@ test('replacement detaches from the old helper and waits until spawning succeeds
   }), /spawn failed/)
 })
 
-test('Codex restart runs the packaged launcher detached with -Restart', async () => {
+test('Codex restart runs the hidden packaged launcher with -Restart without detaching PowerShell', async () => {
   let unreferenced = false
   await restartCodex((executable, args, options) => {
     assert.equal(path.basename(executable).toLowerCase(), 'powershell.exe')
     assert.equal(path.basename(args[args.indexOf('-File') + 1]), 'launch-codex.ps1')
     assert.equal(args.at(-1), '-Restart')
-    assert.deepEqual(options, { detached: true, stdio: 'ignore', windowsHide: true })
+    assert.deepEqual(options, { detached: false, stdio: 'ignore', windowsHide: true })
     const child = new EventEmitter()
     child.unref = () => { unreferenced = true }
     queueMicrotask(() => child.emit('spawn'))
@@ -690,7 +690,7 @@ function sequence(values) {
   return async () => values[Math.min(index++, values.length - 1)]
 }
 
-function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus } = {}) {
+function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus, restartBlocker = null } = {}) {
   const connections = []
   return {
     connections,
@@ -711,6 +711,9 @@ function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus } = {
           if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: `script-${connections.length}` }
           if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function syncNativeModels')) {
             return { result: { value: { status: syncStatus } } }
+          }
+          if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function codexRestartBlocker')) {
+            return { result: { value: restartBlocker } }
           }
           if (method === 'Runtime.evaluate' && params.expression.includes('const runtime =')) {
             return { result: { value: state() } }
@@ -876,19 +879,145 @@ test('an in-flight UI reply prevents reload until its response has been sent', a
 
 test('a takeover restarts Codex once its reply has been sent', async () => {
   for (const [action, expected] of [['reconfigure', { restartCodex: true }], ['status', undefined]]) {
-    const { factory } = makeConnectionFactory({
-      onEnable(onEvent) {
-        onEvent({ method: 'Runtime.bindingCalled', params: {
-          name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
-        } })
-      },
-    })
+    let send
+    const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
     let polls = 0
     const result = await runAssistant(assistantOptions({
       handler: async () => ({ loggedIn: true }), restartDelayMs: 0,
       isRunning: () => ++polls <= 5, connectionFactory: factory,
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: {
+          name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
+        } })
+      },
     }))
     assert.deepEqual(result, expected, action)
+    assert.ok(connections[0].calls.some((call) => call.method === 'Runtime.evaluate' &&
+      call.params.expression.includes('"id":1,"ok":true')))
+  }
+})
+
+test('restore restarts only after its successful reply and never resynchronizes the old account', async () => {
+  for (const [restored, expected] of [[true, { restartCodex: true }], [false, undefined]]) {
+    let send
+    let configured = true
+    const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+    let polls = 0
+    const result = await runAssistant(assistantOptions({
+      handler: async () => {
+        configured = false
+        return { loggedIn: false, restartRequired: restored }
+      },
+      nativeConfiguration: async () => configured ? { version: 'owned-before-restore', models: [] } : null,
+      restartDelayMs: 0,
+      isRunning: () => ++polls <= 5,
+      connectionFactory: factory,
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: {
+          name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+        } })
+      },
+    }))
+    const calls = connections[0].calls
+    const reply = calls.findIndex((call) => call.method === 'Runtime.evaluate' &&
+      call.params.expression.includes('"id":1,"ok":true'))
+    assert.notEqual(reply, -1, 'the logout result must reach the panel before restarting')
+    const laterSyncs = calls.slice(reply + 1).filter((call) =>
+      call.method === 'Runtime.evaluate' && call.params.expression.startsWith('(async function syncNativeModels'))
+    assert.ok(laterSyncs.every((call) => call.params.expression.endsWith('(null)')),
+      'restoration must never log back in using the account cached in Codex')
+    assert.deepEqual(result, expected)
+  }
+})
+
+test('blocked account changes leave the account untouched and never restart later', async () => {
+  for (const action of ['restore', 'reconfigure']) {
+    for (const blocker of ['draft', 'busy', 'unavailable']) {
+      let send
+      let handled = false
+      const { factory, connections } = makeConnectionFactory({
+        restartBlocker: blocker, onEnable: (onEvent) => { send = onEvent },
+      })
+      let polls = 0
+      const result = await runAssistant(assistantOptions({
+        handler: async () => { handled = true; return { restartRequired: true } },
+        restartDelayMs: 0, isRunning: () => ++polls <= 4, connectionFactory: factory,
+        onReady() {
+          send({ method: 'Runtime.bindingCalled', params: {
+            name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
+          } })
+        },
+      }))
+      assert.equal(handled, false, blocker)
+      assert.equal(result, undefined, blocker)
+      const code = `${action === 'restore' ? 'RESTORE' : 'RESTART'}_${blocker === 'unavailable' ? 'CHECK_FAILED' : 'BLOCKED'}`
+      assert.ok(connections[0].calls.some((call) => call.method === 'Runtime.evaluate' &&
+        call.params.expression.includes(code)))
+    }
+  }
+})
+
+test('a failed restore cannot schedule a restart or claim that logout succeeded', async () => {
+  let send
+  const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+  let polls = 0
+  const result = await runAssistant(assistantOptions({
+    handler: async () => { throw new Error('Isolated restore failure.') },
+    restartDelayMs: 0, isRunning: () => ++polls <= 4, connectionFactory: factory,
+    onReady() {
+      send({ method: 'Runtime.bindingCalled', params: {
+        name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+      } })
+    },
+  }))
+  assert.equal(result, undefined)
+  assert.ok(connections[0].calls.some((call) => call.method === 'Runtime.evaluate' &&
+    call.params.expression.includes('"id":1,"ok":false')))
+})
+
+test('restore cannot race a model poll into writing the previous account back', async () => {
+  let send
+  let requested = false
+  let restored = false
+  const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+  let polls = 0
+  await runAssistant(assistantOptions({
+    handler: async () => { restored = true; return { loggedIn: false, restartRequired: true } },
+    nativeConfiguration: async () => {
+      if (requested) return null
+      requested = true
+      send({ method: 'Runtime.bindingCalled', params: {
+        name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+      } })
+      await new Promise(setImmediate)
+      return { version: 'account-read-before-restore', models: [] }
+    },
+    restartDelayMs: 0, isRunning: () => ++polls <= 4, connectionFactory: factory,
+  }))
+  assert.equal(restored, true)
+  const calls = connections[0].calls
+  const reply = calls.findIndex((call) => call.method === 'Runtime.evaluate' &&
+    call.params.expression.includes('"id":1,"ok":true'))
+  assert.notEqual(reply, -1)
+  assert.ok(!calls.slice(reply + 1).some((call) => call.method === 'Runtime.evaluate' &&
+    call.params.expression.includes('account-read-before-restore')))
+})
+
+test('restart preflight checks drafts and active threads without changing authentication', async () => {
+  for (const [draft, active, failure, expected] of [
+    ['', false, '', null],
+    ['unsent message', false, '', 'draft'],
+    ['', true, '', 'busy'],
+    ['', false, 'thread/loaded/list', 'unavailable'],
+  ]) {
+    const { state, window, calls } = nativeSyncFixture()
+    Object.assign(state, { draft, active, failMethod: failure })
+    const blocker = await runInNewContext(`(${codexRestartBlocker.toString()})()`, {
+      window, location: { href: CODEX_PAGE }, crypto: webcrypto, setTimeout, clearTimeout,
+      document: { querySelectorAll: () => [{ isContentEditable: true, get textContent() { return state.draft } }] },
+    })
+    assert.equal(blocker, expected)
+    assert.ok(calls.every((method) => ['thread/loaded/list', 'thread/read'].includes(method)))
   }
 })
 

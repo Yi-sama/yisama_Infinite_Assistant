@@ -21,6 +21,8 @@ const signedIn = (overrides = {}) => ({
   configured: true,
   username: 'demo-user',
   quota: '$12.50',
+  balanceMode: 'settled',
+  pendingSettlement: false,
   group: 'auto',
   groupLabel: 'All',
   groups: [{ value: 'auto', label: 'All' }, { value: 'premium', label: 'premium' }],
@@ -72,6 +74,129 @@ async function fixture(t, viewport = { width: 1280, height: 800 }, options = {})
   }
   return { page, commands, next, respond, open }
 }
+
+test('password recovery opens the official flow without submitting login credentials', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, commands, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: loggedOut })
+  await respond(await next('authOptions'), { ok: true, data: authOptions() })
+  await open(loggedOut)
+  const recovery = page.locator('[data-testid="forgot-password"]')
+  assert.equal(await recovery.count(), 1)
+  await page.locator('[data-testid="auth-username"]').fill('demo')
+  await page.locator('[data-testid="auth-password"]').fill('not-to-be-sent')
+  await recovery.click()
+  const command = await next('forgotPassword')
+  assert.deepEqual(Object.keys(command).sort(), ['action', 'id', 'used'])
+  assert.equal(await page.locator('[data-testid="auth-password"]').inputValue(), '')
+  await respond(command, { ok: true, data: { passwordResetOpened: true } })
+  assert.equal(await page.locator('[data-testid="logged-out"]').isVisible(), true)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /找回密码.*浏览器.*返回.*登录/)
+  await page.locator('[data-testid="register-tab"]').click()
+  assert.equal(await recovery.isHidden(), true)
+  await page.locator('[data-testid="login-tab"]').click()
+  assert.equal(await recovery.isVisible(), true)
+  await recovery.click()
+  await respond(await next('forgotPassword'), { ok: false })
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /无法打开.*找回密码/)
+  assert.equal(commands.filter((item) => item.action === 'login').length, 0)
+  await fs.mkdir(output, { recursive: true })
+  for (const width of [1280, 360]) {
+    await page.setViewportSize({ width, height: 800 })
+    assert.equal(await recovery.evaluate((node) => node.scrollWidth <= node.clientWidth), true)
+    await page.locator('[data-testid="assistant-panel"]').screenshot({
+      path: path.join(output, `assistant-password-recovery-${width}.png`),
+    })
+  }
+})
+
+test('all balance surfaces show settled balance while in-flight precharges stay hidden', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$1.00' }) })
+  await open(signedIn({ quota: '$1.00', pendingSettlement: true }))
+  assert.equal(await page.locator('[data-testid="quota-note"]').textContent(), '结算中')
+  assert.match(await page.locator('[data-testid="assistant-badge"]').getAttribute('title'), /已结算余额.*不扣除/)
+  assert.match(await page.locator('[data-testid="badge-balance"]').getAttribute('title'), /已结算余额/)
+  assert.equal(await page.locator('[data-testid="badge-balance"]').textContent(), '$1.00')
+  assert.equal(await page.locator('[data-testid="panel-balance"]').textContent(), '$1.00')
+  assert.doesNotMatch(await page.locator('[data-testid="assistant-panel"]').textContent(), /0\.22|0\.78/)
+  await page.locator('[data-testid="refresh"]').click()
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$0.81' }) })
+  assert.equal(await page.locator('[data-testid="badge-balance"]').textContent(), '$0.81')
+  assert.equal(await page.locator('[data-testid="panel-balance"]').textContent(), '$0.81')
+  await page.locator('[data-testid="recharge"]').click()
+  await respond(await next('rechargeInfo'), { ok: true, data: { paymentMethods: [], minTopup: 1 } })
+  assert.equal(await page.locator('[data-testid="wallet-balance"]').textContent(), '$0.81')
+})
+
+test('background balance polling updates settlement without blocking controls or replacing model state', async (t) => {
+  const app = await fixture(t, { width: 1280, height: 800 }, { balancePollMs: 50, settlementPollMs: 50 })
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$1.00' }) })
+  await open(signedIn({ quota: '$1.00', pendingSettlement: true }))
+  const pending = await next('balance')
+  assert.equal(await page.locator('[data-testid="restore"]').isEnabled(), true)
+  await respond(pending, { ok: true, data: { quota: '$0.81', balanceMode: 'settled', pendingSettlement: false } })
+  assert.equal(await page.locator('[data-testid="panel-balance"]').textContent(), '$0.81')
+  assert.equal(await page.locator('[data-testid="quota-note"]').textContent(), '已结算')
+  assert.equal((await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot())).group, 'auto')
+  const failed = await next('balance')
+  await respond(failed, { ok: false })
+  assert.equal(await page.locator('[data-testid="panel-balance"]').textContent(), '$0.81')
+  assert.equal(await page.locator('[data-testid="stale-note"]').isVisible(), true)
+  await fs.mkdir(output, { recursive: true })
+  for (const width of [1280, 360]) {
+    await page.setViewportSize({ width, height: 800 })
+    await page.locator('[data-testid="assistant-panel"]').screenshot({
+      path: path.join(output, `assistant-settled-balance-${width}.png`),
+    })
+  }
+})
+
+test('late balance responses cannot replace a newer snapshot or revive a logged-out account', async (t) => {
+  const app = await fixture(t, { width: 1280, height: 800 }, { balancePollMs: 50, settlementPollMs: 50 })
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$1.00' }) })
+  await open(signedIn({ quota: '$1.00' }))
+  const older = await next('balance')
+  await page.locator('[data-testid="refresh"]').click()
+  await respond(await next('status'), { ok: true, data: signedIn({ quota: '$0.81' }) })
+  await respond(older, { ok: true, data: { quota: '$1.00', balanceMode: 'settled', pendingSettlement: true } })
+  assert.equal(await page.locator('[data-testid="panel-balance"]').textContent(), '$0.81')
+  const beforeLogout = await next('balance')
+  await page.locator('[data-testid="refresh"]').click()
+  await respond(await next('status'), { ok: true, data: loggedOut })
+  await respond(beforeLogout, { ok: true, data: { quota: '$0.80', balanceMode: 'settled' } })
+  const state = await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot())
+  assert.equal(state.loggedIn, false)
+  assert.equal(state.quota, '')
+  assert.equal(await page.locator('[data-testid="badge-balance"]').textContent(), '登录')
+})
+
+test('balance polling pauses while hidden and stops after disposal', async (t) => {
+  const app = await fixture(t, { width: 1280, height: 800 }, { balancePollMs: 50 })
+  if (!app) return
+  const { page, commands, next, respond } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await page.evaluate(() => Object.defineProperty(document, 'hidden', { configurable: true, value: true }))
+  await page.waitForTimeout(1200)
+  assert.equal(commands.filter((item) => item.action === 'balance').length, 0)
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await respond(await next('balance'), { ok: true, data: { quota: '$0.81', balanceMode: 'settled' } })
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.dispose())
+  const count = commands.length
+  await page.waitForTimeout(1200)
+  assert.equal(commands.length, count)
+})
 
 test('badge, sidebar actions, stale state, and screenshots', async (t) => {
   const app = await fixture(t)
@@ -211,13 +336,32 @@ test('login, restore confirmation, reinjection, dispose, and location guard', as
   assert.equal(await page.locator('[data-testid="auth-password"]').inputValue(), '')
   assert.equal(commands.filter((command) => command.action === 'login').length, 1)
   await respond(login, { ok: true, data: signedIn() })
+  assert.equal(await page.locator('[data-testid="restore"]').textContent(), '退出登录并恢复原配置')
   await page.locator('[data-testid="restore"]').click()
   await assert.doesNotReject(page.locator('[data-testid="restore-confirmation"]').waitFor({ state: 'visible' }))
+  assert.match(await page.locator('[data-testid="restore-confirmation"]').textContent(), /退出.*停用.*自动.*重新打开 Codex/)
+  await fs.mkdir(output, { recursive: true })
+  for (const width of [1280, 360]) {
+    await page.setViewportSize({ width, height: 800 })
+    assert.equal(await page.locator('[data-testid="confirm-restore"]').evaluate(
+      (node) => node.scrollWidth <= node.clientWidth,
+    ), true)
+    await page.locator('[data-testid="assistant-panel"]').screenshot({
+      path: path.join(output, `assistant-restore-confirmation-${width}.png`),
+    })
+  }
+  await page.locator('[data-testid="cancel-restore"]').click()
+  assert.equal(commands.filter((command) => command.action === 'restore').length, 0)
+  await page.locator('[data-testid="restore"]').click()
   await page.locator('[data-testid="confirm-restore"]').click()
   assert.equal(await page.locator('[data-testid="group-select"]').getAttribute('aria-disabled'), 'true')
   const restore = await next('restore')
-  await respond(restore, { ok: true, data: { ...loggedOut, restartRequired: true } })
+  await respond(restore, { ok: true, data: {
+    ...loggedOut, restartRequired: true, message: '已退出登录并恢复原配置，正在自动重启 Codex…',
+  } })
   assert.equal(await page.locator('[data-testid="login"]').count(), 1)
+  assert.equal(await page.locator('[data-testid="login"]').isDisabled(), true)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /自动重启 Codex/)
 
   const before = commands.length
   await page.evaluate(installAssistantUI, { allowTestLocation: true })
@@ -235,6 +379,34 @@ test('login, restore confirmation, reinjection, dispose, and location guard', as
   const guard = await page.evaluate(makeAssistantScript())
   assert.equal(guard, null)
   assert.equal(await page.locator('#yisama-infinite-assistant-ui').count(), 0)
+})
+
+test('one restore action remains available after login expiry and explains blocked restoration', async (t) => {
+  const app = await fixture(t, { width: 360, height: 800 })
+  if (!app) return
+  const { page, commands, next, respond, open } = app
+  const expired = { ...loggedOut, configured: true }
+  await respond(await next('status'), { ok: true, data: expired })
+  await respond(await next('authOptions'), { ok: true, data: authOptions() })
+  await open(expired)
+  const restore = page.locator('[data-testid="restore"]')
+  assert.equal(await restore.isVisible(), true)
+  assert.equal(await restore.count(), 1)
+  assert.equal(await restore.evaluate((node) => node.scrollWidth <= node.clientWidth), true)
+  await restore.click()
+  await page.locator('[data-testid="confirm-restore"]').click()
+  await respond(await next('restore'), { ok: false, code: 'RESTORE_BLOCKED' })
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /草稿|运行中的任务/)
+  assert.equal(await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot().configured), true)
+  assert.equal(await page.locator('[data-testid="confirm-restore"]').isDisabled(), false)
+  assert.equal(commands.filter((command) => command.action === 'restore').length, 1)
+  await page.locator('[data-testid="confirm-restore"]').click()
+  await respond(await next('restore'), { ok: false, code: 'RESTORE_CHECK_FAILED' })
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /无法确认 Codex/)
+  await fs.mkdir(output, { recursive: true })
+  await page.locator('[data-testid="assistant-panel"]').screenshot({
+    path: path.join(output, 'assistant-restore-mobile.png'),
+  })
 })
 
 test('cached logged-in account can configure its only available group', async (t) => {
@@ -318,10 +490,10 @@ test('opening refreshes account state and reuses an in-flight refresh without bl
   assert.equal(await page.locator('[data-testid="apply-selection"]').isHidden(), true)
 })
 
-test('native catalogs reload immediately without restarting or hiding a failed sync', async (t) => {
+test('native catalogs sync without restarting and account changes require restart confirmation', async (t) => {
   const app = await fixture(t)
   if (!app) return
-  const { page, next, respond, open } = app
+  const { page, commands, next, respond, open } = app
   await respond(await next('status'), { ok: true, data: signedIn() })
   await open(signedIn())
   await page.evaluate(() => {
@@ -382,17 +554,40 @@ test('native catalogs reload immediately without restarting or hiding a failed s
   assert.equal(await page.evaluate(() => window.nativeFixture.methods.filter(
     (method) => method === 'account/login/start').length), loginCalls,
   'a different in-memory account must not overwrite saved authentication or cancel active replies')
-  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /主实例尚未接管/)
-  assert.match(await page.locator('[data-testid="message"]').textContent(), /Ultra.*Fast/)
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /需重启.*生效/)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /自动.*重新打开 Codex/)
   assert.equal(await page.locator('[data-testid="takeover"]').isVisible(), true)
   await page.locator('[data-testid="takeover"]').click()
+  assert.equal(commands.filter((item) => item.action === 'reconfigure').length, 0)
+  assert.equal(await page.locator('[data-testid="restart-confirmation"]').isVisible(), true)
+  assert.equal(await page.locator('[data-testid="message"]').isHidden(), true)
+  await fs.mkdir(output, { recursive: true })
+  for (const width of [1280, 360]) {
+    await page.setViewportSize({ width, height: 800 })
+    assert.equal(await page.locator('[data-testid="confirm-restart"]').evaluate(
+      (node) => node.scrollWidth <= node.clientWidth,
+    ), true)
+    await page.locator('[data-testid="assistant-panel"]').screenshot({
+      path: path.join(output, `assistant-relogin-confirmation-${width}.png`),
+    })
+  }
+  await page.locator('[data-testid="cancel-restart"]').click()
+  assert.equal(commands.filter((item) => item.action === 'reconfigure').length, 0)
+  await page.locator('[data-testid="takeover"]').click()
+  await page.locator('[data-testid="confirm-restart"]').click()
+  await respond(await next('reconfigure'), { ok: false, code: 'RESTART_BLOCKED' })
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /保存草稿.*任务完成.*未重启/)
+  await page.locator('[data-testid="confirm-restart"]').click()
   const takeover = await next('reconfigure')
   assert.equal(takeover.action, 'reconfigure')
   await respond(takeover, { ok: true, data: signedIn({
     message: '接管配置已准备，正在自动重启 Codex…',
     restartRequired: true,
   }) })
-  assert.match(await page.locator('[data-testid="message"]').textContent(), /Ultra.*Fast/)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /自动重启 Codex/)
+  assert.match(await page.locator('[data-testid="status-line"]').textContent(), /正在重启/)
+  assert.equal(await page.locator('[data-testid="refresh"]').isDisabled(), true)
+  assert.equal(await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot().restarting), true)
   assert.equal(await page.evaluate(syncNativeModels, { version: 'third', models: [] }), null,
     'production synchronization is forbidden outside the Codex main page')
 })

@@ -8,14 +8,50 @@ import {
   textModels,
   chooseModel,
   chooseReasoning,
+  desktopForgotPassword,
   desktopRestartRequired,
   formatQuota,
+  walletDisplayState,
+  originFromEnvironment,
   patchCodexConfig,
   safeError,
   signIn,
   submitPaymentForm,
 } from './yisama.mjs'
 import { makeModelCatalog, providerConfig, restoreOwned } from './codex-config.mjs'
+import { validateRequest } from './desktop-bridge.mjs'
+
+test('wallet display uses settled server values without exposing temporary holds', () => {
+  const status = { quota_per_unit: 500000, quota_display_type: 'USD' }
+  assert.deepEqual(walletDisplayState({ quota: 390000, settled_quota: 500000,
+    pending_quota: 110000, pending_request_count: 1 }, status),
+  { quota: '$1.00', balanceMode: 'settled', pendingSettlement: true })
+  assert.deepEqual(walletDisplayState({ quota: 405000, settled_quota: 405000,
+    pending_quota: 0, pending_request_count: 0 }, status),
+  { quota: '$0.81', balanceMode: 'settled', pendingSettlement: false })
+  assert.deepEqual(walletDisplayState({ quota: 390000 }, status),
+    { quota: '$0.78', balanceMode: 'available', pendingSettlement: false })
+  assert.throws(() => walletDisplayState({ quota: 390000, settled_quota: 500000 }, status), /结算数据/)
+  assert.throws(() => walletDisplayState({ quota: 390000, settled_quota: 500000,
+    pending_quota: 0, pending_request_count: 1 }, status), /结算数据/)
+})
+
+test('password recovery opens only the official reset page and reports launcher failures', async () => {
+  const calls = []
+  assert.deepEqual(await desktopForgotPassword({ open: async (...args) => { calls.push(args) } }),
+    { passwordResetOpened: true })
+  const url = new URL('/forgot-password', originFromEnvironment()).href
+  const expected = process.platform === 'win32'
+    ? ['rundll32.exe', ['url.dll,FileProtocolHandler', url]]
+    : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]]
+  assert.deepEqual(calls, [expected])
+  assert.deepEqual(validateRequest({ id: 1, action: 'forgotPassword',
+    url: 'https://untrusted.test/', email: 'private@example.test', password: 'private', open: 'not-a-launcher' }),
+    { id: 1, action: 'forgotPassword' })
+  await assert.rejects(desktopForgotPassword({ open: async () => { throw new Error('private launcher detail') } }),
+    (error) => /无法打开官网找回密码页面/.test(safeError(error)) &&
+      !safeError(error).includes('private launcher detail'))
+})
 
 test('defaults to All and preserves available groups', () => {
   assert.deepEqual(chooseGroup(undefined, ['auto', 'default', 'premium']), {

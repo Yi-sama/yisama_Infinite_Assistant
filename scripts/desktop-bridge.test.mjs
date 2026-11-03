@@ -89,7 +89,7 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
       return reply({ object: 'list', data: (state.groupModels[key.group] || state.models).map((id) => ({ id })) })
     }
     if (req.headers.authorization !== `Bearer ${dashboardToken}`) return reply({ success: false }, 401)
-    if (url.pathname === '/api/user/self') {
+    if (url.pathname === '/api/user/self' || url.pathname === '/api/user/self/balance') {
       if (state.accountFailure) return reply({ success: false }, state.accountFailure)
       return reply({ success: true, data: state.account })
     }
@@ -217,6 +217,43 @@ test('desktop bridge names groups by the relay display name', async (t) => {
   await bridge.close()
 })
 
+test('desktop balance refresh reads wallet snapshots without caching or estimating request charges', async (t) => {
+  const { env, state } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  let id = 0
+  for (const [quota, expected] of [[500000, '$1.00'], [390000, '$0.78'], [405000, '$0.81']]) {
+    state.account.quota = quota
+    const response = await bridge.request({ id: ++id, action: 'status' })
+    assert.equal(response.ok, true)
+    assert.equal(response.data.quota, expected)
+  }
+  assert.equal(state.calls.filter((call) => call.path === '/api/user/self').length, 3)
+  const closed = await bridge.close()
+  assert.equal(closed.code, 0)
+})
+
+test('lightweight balance requests return settled snapshots without reconfiguring models', async (t) => {
+  const { env, state } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  state.account.quota = 390000
+  Object.assign(state.account, { settled_quota: 500000, pending_quota: 110000, pending_request_count: 1 })
+  const pending = await bridge.request({ id: 1, action: 'balance' })
+  assert.equal(pending.ok, true)
+  assert.deepEqual(pending.data, { quota: '$1.00', balanceMode: 'settled', pendingSettlement: true })
+  Object.assign(state.account, { quota: 405000, settled_quota: 405000, pending_quota: 0, pending_request_count: 0 })
+  const settled = await bridge.request({ id: 2, action: 'balance' })
+  assert.deepEqual(settled.data, { quota: '$0.81', balanceMode: 'settled', pendingSettlement: false })
+  assert.equal(state.calls.filter((call) => call.path === '/api/user/self/balance').length, 2)
+  assert.equal(state.calls.some((call) => /models|token|groups/.test(call.path)), false)
+  assert.equal((await bridge.close()).code, 0)
+})
+
 test('desktop bridge offers only named groups in the relay display order', async (t) => {
   const { env } = await fixture(t, { groups: { auto: { desc: '自动' }, plus: { ratio: 0.2, display_name: 'GPT', display_order: 2 },
     cn: { ratio: 0.15, display_name: '国模' }, claude: { ratio: 0.9, display_name: 'Claude', display_order: 1 }, premium: { ratio: 2 } } })
@@ -247,7 +284,7 @@ test('desktop bridge projects only public state over serialized stdio requests',
 
   const login = await bridge.request({ id: 2, action: 'login' })
   assert.deepEqual(Object.keys(login.data), [
-    'loggedIn', 'configured', 'username', 'quota', 'group', 'groupLabel', 'groups', 'model', 'models',
+    'loggedIn', 'configured', 'username', 'quota', 'balanceMode', 'pendingSettlement', 'group', 'groupLabel', 'groups', 'model', 'models',
     'message', 'restartRequired',
   ])
   assert.equal(login.ok, true)
