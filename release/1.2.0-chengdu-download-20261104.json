@@ -3,20 +3,20 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "1fa6e73a199c0d80f0f018f68ddb18e572a0c5ac1d2ab12b1fb0470e6722bdf0",
-    "bytes": 27544296,
+    "sha256": "5ace55b695f709ee03a640330296ad1856842b8dec58a73eb23a6723bb25fd8e",
+    "bytes": 27543839,
     "signed": false
   },
   "previousInstaller": {
-    "sha256": "ddfa3d049c8686137bff4124c709ba034bf67b856f41a66309b04f61fba6c2d3",
-    "backupDirectory": "work/backup-installer-portable-20261104"
+    "sha256": "1fa6e73a199c0d80f0f018f68ddb18e572a0c5ac1d2ab12b1fb0470e6722bdf0",
+    "backupDirectory": "work/backup-installer-route-20261105"
   },
   "build": {
     "reusesPreviouslyReleasedAssistantPayload": true,
     "script": "work/build-chengdu-release.mjs",
     "bootstrapSha256": "ddf7326168a7ead4f15b17e092a5ca629e9622317b35af6a04a15257b48fa377",
-    "buildId": "60480dd8fd3453f9d2d6543722709fcd2c039162b8c8563aef72513e8bba58da",
-    "assistantBundles": "yisama.mjs and codex-assistant.mjs rebuilt from tag release/1.2.0-startup-controls-20261103 plus only the domestic-route patch; launch-codex.ps1 unchanged"
+    "buildId": "4a92bce70e53c55a88306e55b6c3a9723aad6a2e6cd3f898737dc364b0d65abb",
+    "assistantBundles": "yisama.mjs and codex-assistant.mjs rebuilt from tag release/1.2.0-startup-controls-20261103 plus the domestic-route patch and the signed-out login overlay; launch-codex.ps1 unchanged"
   },
   "codexDownload": {
     "primaryUrl": "https://api-cn.yisama.asia/codex/26.1027.3384.0/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix",
@@ -39,7 +39,8 @@
     "installCodexScriptTests": "1 test file, now covering admin-required fallback, both-fail message, and undetected result",
     "realInstallScriptOnReportedFailure": "0x80073D28 reproduced on the build machine; fallback unpacked and detected as portable 26.1027.30824 (sandboxed LOCALAPPDATA)",
     "routeFallbackTests": "2 new tests, 24/24 in yisama.test.mjs; 52/52 with desktop-bridge",
-    "liveBundledFallback": "primary host blocked: options + login probe served via Chengdu; relay log shows real client IP"
+    "liveBundledFallback": "primary host blocked: options + login probe served via Chengdu; relay log shows real client IP",
+    "panelBrowserTests": "29/29 with Edge (2 new); related suites 108/108"
   },
   "serverUpdated": "chengdu nginx api-cn-yisama.conf (backup api-cn-yisama.conf.bak-codex-20261104T173439)",
   "publicAssistantInstallerUpdated": false,
@@ -61,5 +62,11 @@
     "behavior": "only a connection-level failure tries the next route; HTTP answers never switch; register/password-reset/token writes are not repeated on another route",
     "clientIpPreserved": true,
     "sessionStaysBoundToLogicalOrigin": true
+  },
+  "loginOverlay": {
+    "behavior": "while signed out the panel opens by itself and a full-screen dimming layer with a pointer to the panel covers the page; nothing on the page is identified or modified",
+    "appears": "only after the first status answer shows the user is signed out and only while the panel is open",
+    "dismiss": "closing the panel removes it; it never reopens by itself",
+    "screenshot": "output/playwright/login-gate.png"
   }
 }
