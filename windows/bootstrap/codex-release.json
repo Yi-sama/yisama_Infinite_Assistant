@@ -1,0 +1,11 @@
+{
+  "appVersion": "26.1027.30824",
+  "packageVersion": "26.1027.3384.0",
+  "architecture": "x64",
+  "packageMoniker": "OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0",
+  "size": 1004631986,
+  "sha256": "d442a3d7d5c229f45e5e11995711ac2619c8dbc89e3fa2bc185287dc8db8e76e",
+  "mirrorUrl": "https://api-cn.yisama.asia/codex/26.1027.3384.0/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix",
+  "releaseUrl": "https://github.com/Wangnov/codex-app-mirror/releases/download/codex-app-26.1027.30824/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix"
+}
+

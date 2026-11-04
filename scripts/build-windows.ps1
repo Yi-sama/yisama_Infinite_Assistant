@@ -19,6 +19,9 @@ $installerScript = Join-Path $repoRoot 'installer\yisama.iss'
 $iconFile = Join-Path $windowsRoot 'assets\yisama.ico'
 $releaseBuilder = Join-Path $repoRoot 'scripts\build-release.mjs'
 $launcherSource = Join-Path $repoRoot 'scripts\launch-codex.ps1'
+$codexInstallSource = Join-Path $repoRoot 'scripts\install-codex.ps1'
+$bootstrapRoot = Join-Path $windowsRoot 'bootstrap'
+$bootstrapManifest = Join-Path $bootstrapRoot 'Cargo.toml'
 $licenseSource = Join-Path $repoRoot 'LICENSE.txt'
 $nodeModules = Join-Path $repoRoot 'node_modules'
 $esbuildModule = Join-Path $nodeModules 'esbuild'
@@ -35,7 +38,8 @@ if ([string]::IsNullOrWhiteSpace($IsccPath)) {
 if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) {
     throw 'Inno Setup compiler (ISCC.exe) was not found. Install it with "winget install JRSoftware.InnoSetup" or set YISAMA_ISCC.'
 }
-foreach ($source in @($installerScript, $iconFile, $releaseBuilder, $launcherSource, $licenseSource)) {
+foreach ($source in @($installerScript, $iconFile, $releaseBuilder, $launcherSource, $licenseSource,
+    $codexInstallSource, $bootstrapManifest)) {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required Windows payload source was not found: $source" }
 }
 if (-not (Test-Path -LiteralPath $NodePath -PathType Leaf)) { throw "Node runtime was not found: $NodePath" }
@@ -55,6 +59,43 @@ if ($signingConfigured -and ([string]::IsNullOrWhiteSpace($SignToolPath) -or [st
 if (-not $signingConfigured) {
     if ($RequireSignature) { throw 'Signature is required. Set YISAMA_SIGNTOOL and YISAMA_SIGN_CERT.' }
     Write-Warning 'Windows artifacts will be built unsigned. Configure YISAMA_SIGNTOOL and YISAMA_SIGN_CERT for release signing.'
+}
+
+function Build-CodexBootstrap {
+    param([string]$Destination)
+
+    $cargo = Get-Command cargo.exe -ErrorAction Stop
+    $targetDirectory = Join-Path $bootstrapRoot 'target'
+    & $cargo.Source build --release --locked --manifest-path $bootstrapManifest --target-dir $targetDirectory
+    if ($LASTEXITCODE -ne 0) { throw 'Codex bootstrap build failed.' }
+    $binary = Join-Path $targetDirectory 'release\codex-bootstrap.exe'
+    Copy-Item -LiteralPath $binary -Destination (Join-Path $Destination 'codex-bootstrap.exe')
+    Copy-Item -LiteralPath (Join-Path $bootstrapRoot 'Codex-App-Manager-LICENSE.txt') -Destination $Destination
+
+    $metadataText = & $cargo.Source metadata --locked --format-version 1 `
+        --filter-platform x86_64-pc-windows-msvc --manifest-path $bootstrapManifest
+    if ($LASTEXITCODE -ne 0) { throw 'Could not collect bootstrap dependency licenses.' }
+    $metadata = $metadataText | ConvertFrom-Json
+    $notices = [Collections.Generic.List[string]]::new()
+    foreach ($package in ($metadata.packages | Sort-Object name,version)) {
+        if ($package.name -eq 'yisama-codex-bootstrap') { continue }
+        $directory = Split-Path -Parent $package.manifest_path
+        $licenses = @()
+        # Git workspace members inherit the license from their workspace root.
+        for ($level = 0; ($level -lt 3) -and ($licenses.Count -eq 0); $level++) {
+            $licenses = @(Get-ChildItem -LiteralPath $directory -File |
+                Where-Object { $_.Name -match '^(LICENSE|LICENCE|COPYING|COPYRIGHT)([-._]|$)' })
+            $directory = Split-Path -Parent $directory
+        }
+        if ($licenses.Count -eq 0) { throw "Distribution license is missing for $($package.name)." }
+        $notices.Add("$($package.name) $($package.version) ($($package.license))")
+        foreach ($file in $licenses) {
+            $notices.Add($file.Name)
+            $notices.Add([IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8))
+        }
+    }
+    [IO.File]::WriteAllText((Join-Path $Destination 'Bootstrap-THIRD-PARTY-NOTICES.txt'),
+        ($notices -join "`r`n`r`n"), [Text.UTF8Encoding]::new($false))
 }
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('yisama-windows-build-' + [Guid]::NewGuid().ToString('N'))
@@ -127,6 +168,7 @@ try {
 
     $runtimeRoot = Join-Path $payloadRoot 'runtime'
     New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+    Build-CodexBootstrap -Destination $runtimeRoot
     Copy-Item -LiteralPath $NodePath -Destination (Join-Path $runtimeRoot 'node.exe') -Force
     $nodeLicense = Join-Path $runtimeRoot 'Node-LICENSE.txt'
     if ([string]::IsNullOrWhiteSpace($NodeLicensePath)) {
@@ -165,6 +207,24 @@ try {
         Copy-Item -LiteralPath $sourceDependency -Destination $payloadNodeModules -Recurse -Force
     }
     Invoke-SignArtifact (Join-Path $runtimeRoot 'node.exe')
+    Invoke-SignArtifact (Join-Path $runtimeRoot 'codex-bootstrap.exe')
+
+    $manifestFile = Join-Path $payloadRoot 'release-manifest.json'
+    $manifest = Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $bootstrapHash = (Get-FileHash -LiteralPath (Join-Path $runtimeRoot 'codex-bootstrap.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $launcherHash = (Get-FileHash -LiteralPath (Join-Path $payloadScripts 'launch-codex.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifest.entries | Add-Member -NotePropertyName 'launch-codex.ps1' -NotePropertyValue $launcherHash
+    $manifest | Add-Member -NotePropertyName windowsBootstrap -NotePropertyValue @{
+        engineRevision = '474658de8b3013d6f2ee68ce0cc0402219de11cc'
+        sha256 = $bootstrapHash
+        codexRelease = Get-Content -LiteralPath (Join-Path $bootstrapRoot 'codex-release.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    $hashInput = [Text.Encoding]::UTF8.GetBytes((($manifest.entries | ConvertTo-Json -Compress) + $bootstrapHash))
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { $buildId = ([BitConverter]::ToString($hasher.ComputeHash($hashInput))).Replace('-', '').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+    $manifest | Add-Member -NotePropertyName buildId -NotePropertyValue $buildId
+    [IO.File]::WriteAllText($manifestFile, ($manifest | ConvertTo-Json -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
 
     $appVersion = (Get-Content -LiteralPath (Join-Path $releaseRoot 'package.json') -Raw | ConvertFrom-Json).version
     & $IsccPath '/Qp' "/DPayloadDir=$payloadRoot" "/DAppVersion=$appVersion" `

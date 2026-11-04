@@ -1,0 +1,19 @@
+[package]
+name = "yisama-codex-bootstrap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "codex-bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+codex-win-engine = { git = "https://github.com/Wangnov/Codex-App-Manager", rev = "474658de8b3013d6f2ee68ce0cc0402219de11cc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = "thin"
+

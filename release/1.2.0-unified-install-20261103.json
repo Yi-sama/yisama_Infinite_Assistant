@@ -1,0 +1,29 @@
+{
+  "version": "1.2.0",
+  "releaseDate": "2026-11-03",
+  "installer": {
+    "file": "Yisama-Setup-1.2.0.exe",
+    "sha256": "b664d9e6ed1cb05fd6a2a9e59fd03a133a7ef4335c7bec3ed5ed4b4335f6cf4e",
+    "bytes": 27276738,
+    "signed": false
+  },
+  "previousInstaller": {
+    "sha256": "eaf1d6c70a1e8afd16cfa92e9dc176a63605f311edb5eac140e746e80b7486bb",
+    "backupDirectory": "output/unified-install-previous-release-20261103-20ee6522"
+  },
+  "checks": {
+    "sourceTestsPassed": 171,
+    "sourceTestsSkipped": 8,
+    "sourceTestsFailed": 0,
+    "installerTestsPassed": 3,
+    "rustTestsPassed": 8,
+    "codexWizardInitialization": true,
+    "savedUnicodeLocation": true,
+    "userConfigurationUnchanged": true,
+    "cleanWindowsFirstInstall": "pending_manual",
+    "actualCustomPortableLaunch": "pending_manual"
+  },
+  "localRuntimeUpdated": false,
+  "serverUpdated": false,
+  "githubPushed": false
+}

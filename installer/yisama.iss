@@ -60,6 +60,9 @@ Type: filesandordirs; Name: "{app}\runtime"
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "..\windows\assets\yisama.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\runtime\codex-bootstrap.exe"; DestName: "codex-setup-bootstrap.exe"; Flags: dontcopy
+Source: "..\scripts\install-codex.ps1"; Flags: dontcopy
+Source: "{tmp}\codex-location.json"; DestDir: "{app}"; Flags: external ignoreversion; Check: not IsTestInstall
 
 [Icons]
 Name: "{userdesktop}\Codex - yisama"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
@@ -71,15 +74,367 @@ Name: "{userprograms}\Codex - yisama"; Filename: "{sys}\WindowsPowerShell\v1.0\p
   WorkingDir: "{app}"; IconFilename: "{app}\yisama.ico"; Comment: "Launch Codex with yisama Infinite Assistant"; \
   Flags: runminimized; Check: not IsTestInstall
 
+[Run]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\scripts\launch-codex.ps1"""; \
+  Description: "启动 Codex - yisama"; Flags: postinstall nowait skipifsilent runhidden; Check: not IsTestInstall
+
 [Code]
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   LegacyRunValue = 'YisamaInfiniteAssistant';
 
+type
+  TStartupInfo = record
+    Size: LongWord;
+    Reserved, Desktop, Title: String;
+    X, Y, XSize, YSize, XChars, YChars, Fill, Flags: LongWord;
+    ShowWindow, ReservedSize: Word;
+    ReservedData, StdInput, StdOutput, StdError: LongWord;
+  end;
+  TProcessInfo = record
+    ProcessHandle, ThreadHandle: LongWord;
+    ProcessId, ThreadId: LongWord;
+  end;
+
+{ Inno Setup 6 runs a 32-bit setup process, including on x64 Windows. }
+function CreateProcess(Application: String; CommandLine: String; ProcessAttributes,
+  ThreadAttributes: LongWord; InheritHandles: Boolean; Flags: LongWord;
+  Environment: LongWord; Directory: String; var StartupInfo: TStartupInfo;
+  var ProcessInfo: TProcessInfo): Boolean;
+  external 'CreateProcessW@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: LongWord; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function GetExitCodeProcess(Handle: LongWord; var ExitCode: LongWord): Boolean;
+  external 'GetExitCodeProcess@kernel32.dll stdcall';
+function CloseHandle(Handle: LongWord): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+var
+  CodexPage: TWizardPage;
+  CodexStatus: TNewStaticText;
+  CodexVersion: TNewStaticText;
+  CodexPath: TNewMemo;
+  ExistingChoice, DownloadChoice: TNewRadioButton;
+  BrowseCodexButton, DetectCodexButton: TNewButton;
+  DownloadPage, WorkPage: TOutputProgressWizardPage;
+  SelectedCodex, SelectedExecutable, DetectionStatus: String;
+  BootstrapFile, DetectionFile: String;
+  DownloadCancelFile: String;
+  PauseDownloadButton: TNewButton;
+  SelectionRunning, SelectionTested, DownloadActive, DownloadPaused: Boolean;
+
 { /YISAMATEST=1 installs files only: no Codex check, shortcuts, registry or uninstaller. }
 function IsTestInstall: Boolean;
 begin
   Result := ExpandConstant('{param:YISAMATEST|0}') = '1';
+end;
+
+function IsPreview: Boolean;
+begin
+  Result := IsTestInstall and (ExpandConstant('{param:YISAMAUI|0}') = '1');
+end;
+
+function Quote(Value: String): String;
+begin
+  Result := '"' + Value + '"';
+end;
+
+function RunBootstrap(Arguments: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(BootstrapFile, Arguments, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Result then Result := ResultCode = 0;
+end;
+
+function ReportError: String;
+begin
+  Result := GetIniString('codex', 'message', '无法完成 Codex 检查，请重新检测或选择已有安装。', DetectionFile);
+end;
+
+function DetectCodex(Candidate: String; IgnoreSaved: Boolean): Boolean;
+var
+  Arguments: String;
+begin
+  DeleteFile(DetectionFile);
+  Arguments := 'detect --report ' + Quote(DetectionFile);
+  if Candidate <> '' then
+    Arguments := Arguments + ' --selected ' + Quote(Candidate)
+  else if not IgnoreSaved then
+    Arguments := Arguments + ' --location ' + Quote(AddBackslash(WizardDirValue) + 'codex-location.json');
+  Result := RunBootstrap(Arguments);
+  DetectionStatus := GetIniString('codex', 'status', 'error', DetectionFile);
+  if not Result then
+  begin
+    DetectionStatus := 'error';
+    Exit;
+  end;
+  SelectedCodex := GetIniString('codex', 'root', '', DetectionFile);
+  SelectedExecutable := GetIniString('codex', 'executable', '', DetectionFile);
+  SelectionRunning := GetIniString('codex', 'running', '0', DetectionFile) = '1';
+  SelectionTested := GetIniString('codex', 'tested', '0', DetectionFile) = '1';
+end;
+
+procedure RenderCodex;
+var
+  HasAssistant: Boolean;
+begin
+  HasAssistant := FileExists(AddBackslash(WizardDirValue) + 'scripts\codex-assistant.mjs');
+  if HasAssistant then
+    ExistingChoice.Caption := '保留 Codex，更新或修复助手'
+  else
+    ExistingChoice.Caption := '保留 Codex，仅安装无限助手';
+  ExistingChoice.Enabled := DetectionStatus = 'found';
+  DownloadChoice.Enabled := DetectionStatus = 'missing';
+  ExistingChoice.Checked := ExistingChoice.Enabled;
+  DownloadChoice.Checked := DownloadChoice.Enabled;
+  CodexPath.Text := SelectedExecutable;
+  CodexVersion.Caption := '';
+  if DetectionStatus = 'found' then
+  begin
+    CodexStatus.Caption := '已检测到 Codex';
+    CodexVersion.Caption := '版本 ' + GetIniString('codex', 'version', '未知', DetectionFile);
+    if SelectionRunning then
+      CodexStatus.Caption := 'Codex 正在运行，请完成任务后关闭再继续。'
+    else if not SelectionTested then
+      CodexStatus.Caption := '已检测到 Codex；此版本尚未验证，不会自动更换。';
+  end
+  else if DetectionStatus = 'missing' then
+    CodexStatus.Caption := '未检测到 Codex'
+  else
+    CodexStatus.Caption := '检测未完成：' + ReportError;
+end;
+
+procedure BrowseCodex(Sender: TObject);
+var
+  FileName: String;
+begin
+  FileName := SelectedExecutable;
+  if GetOpenFileName('选择已有 Codex 桌面程序', FileName, '',
+    'Codex 桌面程序|Codex.exe;ChatGPT.exe', '') then
+  begin
+    if not DetectCodex(FileName, True) then
+      SuppressibleMsgBox(ReportError, mbError, MB_OK, IDOK);
+    RenderCodex;
+  end;
+end;
+
+procedure RefreshCodex(Sender: TObject);
+begin
+  SelectedCodex := '';
+  SelectedExecutable := '';
+  DetectCodex('', True);
+  RenderCodex;
+end;
+
+procedure PauseDownload(Sender: TObject);
+begin
+  if not DownloadActive then Exit;
+  DownloadPaused := SaveStringToFile(DownloadCancelFile, 'pause', False);
+  if DownloadPaused then
+  begin
+    PauseDownloadButton.Enabled := False;
+    DownloadPage.SetText('正在暂停下载...', '');
+  end;
+end;
+
+procedure InitializeWizard;
+begin
+  if IsTestInstall and not IsPreview then Exit;
+  SelectedCodex := ExpandConstant('{param:CODEXPATH|}');
+  ExtractTemporaryFile('codex-setup-bootstrap.exe');
+  ExtractTemporaryFile('install-codex.ps1');
+  BootstrapFile := ExpandConstant('{tmp}\codex-setup-bootstrap.exe');
+  DetectionFile := ExpandConstant('{tmp}\codex-detection.ini');
+  CodexPage := CreateCustomPage(wpLicense, '准备 Codex', '已有安装将被保留');
+  CodexStatus := TNewStaticText.Create(CodexPage);
+  CodexStatus.Parent := CodexPage.Surface;
+  CodexStatus.SetBounds(0, 0, CodexPage.SurfaceWidth, ScaleY(42));
+  CodexStatus.AutoSize := False;
+  CodexStatus.WordWrap := True;
+  CodexVersion := TNewStaticText.Create(CodexPage);
+  CodexVersion.Parent := CodexPage.Surface;
+  CodexVersion.SetBounds(0, ScaleY(46), CodexPage.SurfaceWidth, ScaleY(20));
+  CodexPath := TNewMemo.Create(CodexPage);
+  CodexPath.Parent := CodexPage.Surface;
+  CodexPath.SetBounds(0, ScaleY(70), CodexPage.SurfaceWidth, ScaleY(42));
+  CodexPath.ReadOnly := True;
+  CodexPath.WordWrap := True;
+  ExistingChoice := TNewRadioButton.Create(CodexPage);
+  ExistingChoice.Parent := CodexPage.Surface;
+  ExistingChoice.SetBounds(0, ScaleY(124), CodexPage.SurfaceWidth, ScaleY(22));
+  DownloadChoice := TNewRadioButton.Create(CodexPage);
+  DownloadChoice.Parent := CodexPage.Surface;
+  DownloadChoice.SetBounds(0, ScaleY(154), CodexPage.SurfaceWidth, ScaleY(22));
+  DownloadChoice.Caption := '下载并安装 Codex 26.1027.30824（约 958 MB）';
+  BrowseCodexButton := TNewButton.Create(CodexPage);
+  BrowseCodexButton.Parent := CodexPage.Surface;
+  BrowseCodexButton.SetBounds(0, ScaleY(194), ScaleX(160), ScaleY(26));
+  BrowseCodexButton.Caption := '选择已有 Codex...';
+  BrowseCodexButton.OnClick := @BrowseCodex;
+  DetectCodexButton := TNewButton.Create(CodexPage);
+  DetectCodexButton.Parent := CodexPage.Surface;
+  DetectCodexButton.SetBounds(ScaleX(172), ScaleY(194), ScaleX(100), ScaleY(26));
+  DetectCodexButton.Caption := '重新检测';
+  DetectCodexButton.OnClick := @RefreshCodex;
+  DownloadPage := CreateOutputProgressPage('下载 Codex', '');
+  PauseDownloadButton := TNewButton.Create(DownloadPage);
+  PauseDownloadButton.Parent := DownloadPage.Surface;
+  PauseDownloadButton.SetBounds(0, ScaleY(120), ScaleX(120), ScaleY(26));
+  PauseDownloadButton.Caption := '暂停下载';
+  PauseDownloadButton.OnClick := @PauseDownload;
+  WorkPage := CreateOutputProgressPage('准备 Codex', '');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if IsTestInstall and not IsPreview then Exit;
+  if PageID = CodexPage.ID then Result := WizardSilent and not IsPreview;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if IsTestInstall and not IsPreview then Exit;
+  if CurPageID = CodexPage.ID then
+  begin
+    if DetectionStatus = '' then
+    begin
+      DetectCodex(SelectedCodex, False);
+      RenderCodex;
+      Log('Codex preparation page initialized: status=' + DetectionStatus +
+        '; assistant=' + WizardDirValue);
+    end;
+    if IsPreview and not WizardSilent then WizardForm.NextButton.Enabled := False;
+  end;
+end;
+
+function DownloadCodex(PackageFile: String; Size: Integer): Boolean;
+var
+  StartupInfo: TStartupInfo;
+  ProcessInfo: TProcessInfo;
+  ExitCode, WaitResult: LongWord;
+  Arguments, Status: String;
+  Downloaded: Integer;
+begin
+  Result := False;
+  DownloadCancelFile := ExpandConstant('{tmp}\codex-download.pause');
+  DeleteFile(DownloadCancelFile);
+  DeleteFile(DetectionFile);
+  DeleteFile(DetectionFile + '.verifying');
+  DownloadPaused := False;
+  Arguments := Quote(BootstrapFile) + ' download --file ' + Quote(PackageFile) +
+    ' --report ' + Quote(DetectionFile) + ' --cancel ' + Quote(DownloadCancelFile);
+  StartupInfo.Size := SizeOf(StartupInfo);
+  { Keep a real process handle: ewNoWait does not return a PID or exit status. }
+  if not CreateProcess(BootstrapFile, Arguments, 0, 0, False, $08000000,
+    0, ExpandConstant('{tmp}'), StartupInfo, ProcessInfo) then
+    RaiseException('无法启动 Codex 下载，尚未安装。');
+  CloseHandle(ProcessInfo.ThreadHandle);
+  DownloadActive := True;
+  DownloadPage.SetText('正在连接下载源...', '');
+  DownloadPage.SetProgress(0, 100);
+  DownloadPage.Show;
+  PauseDownloadButton.Enabled := True;
+  try
+    repeat
+      Downloaded := 0;
+      FileSize(PackageFile + '.part', Downloaded);
+      if FileExists(DetectionFile + '.verifying') then
+      begin
+        DownloadPage.SetText('正在校验 Codex 安装包...', '');
+        Downloaded := Size;
+        PauseDownloadButton.Enabled := False;
+      end
+      else if not DownloadPaused then
+        DownloadPage.SetText('已下载 ' + IntToStr(Downloaded div 1048576) + ' / ' +
+          IntToStr(Size div 1048576) + ' MB', '');
+      DownloadPage.SetProgress(Downloaded, Size);
+      WaitResult := WaitForSingleObject(ProcessInfo.ProcessHandle, 100);
+    until WaitResult <> 258;
+    if (WaitResult <> 0) or
+      not GetExitCodeProcess(ProcessInfo.ProcessHandle, ExitCode) then
+      RaiseException('无法确认下载结果，已缓存的数据将保留。');
+    Status := GetIniString('codex', 'status', 'error', DetectionFile);
+    if Status = 'paused' then Exit;
+    if (ExitCode <> 0) or (Status <> 'ready') then
+      RaiseException('Codex 下载未完成，尚未安装。已缓存的数据会在下次继续。' + #13#10 + ReportError);
+    Result := True;
+  finally
+    DownloadActive := False;
+    CloseHandle(ProcessInfo.ProcessHandle);
+    DownloadPage.Hide;
+  end;
+end;
+
+function DownloadAndInstallCodex: Boolean;
+var
+  FileName, Hash, PackageFile, Arguments: String;
+  ResultCode, PackageSize: Integer;
+begin
+  Result := False;
+  if IsTestInstall then Exit;
+  WorkPage.SetText('正在确认下载来源...', '');
+  WorkPage.Show;
+  try
+    if not RunBootstrap('source --report ' + Quote(DetectionFile)) then
+      RaiseException(ReportError);
+  finally
+    WorkPage.Hide;
+  end;
+  FileName := GetIniString('codex', 'filename', '', DetectionFile);
+  Hash := GetIniString('codex', 'sha256', '', DetectionFile);
+  PackageSize := GetIniInt('codex', 'size', 0, 0, 2147483647, DetectionFile);
+  if (FileName = '') or (Length(Hash) <> 64) or (PackageSize = 0) then
+    RaiseException('下载信息不完整，尚未安装 Codex。');
+  PackageFile := ExpandConstant('{localappdata}\yisama-infinite-assistant-cache\codex\') +
+    Hash + '\' + FileName;
+  if not DownloadCodex(PackageFile, PackageSize) then Exit;
+  WorkPage.SetText('正在验证并安装 Codex...', '不更改现有账号、会话和配置');
+  WorkPage.Show;
+  try
+    Arguments := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
+      Quote(ExpandConstant('{tmp}\install-codex.ps1')) +
+      ' -BootstrapPath ' + Quote(BootstrapFile) +
+      ' -PackagePath ' + Quote(PackageFile) +
+      ' -LocationFile ' + Quote(AddBackslash(WizardDirValue) + 'codex-location.json') +
+      ' -ReportPath ' + Quote(DetectionFile);
+    if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      Arguments, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      RaiseException('无法启动 Codex 安装程序，尚未安装无限助手。');
+    if (ResultCode <> 0) or (GetIniString('codex', 'status', '', DetectionFile) <> 'found') then
+      RaiseException(ReportError);
+    Result := DetectCodex('', True) and (DetectionStatus = 'found');
+    if not Result then RaiseException('安装后未能检测到 Codex，请重新检测。');
+    RenderCodex;
+  finally
+    WorkPage.Hide;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if IsTestInstall or WizardSilent then Exit;
+  if CurPageID <> CodexPage.ID then Exit;
+  Result := False;
+  try
+    if not DetectCodex(SelectedCodex, False) then RaiseException(ReportError);
+    if SelectionRunning then
+      RaiseException('请先完成任务并关闭 Codex，再点击下一步。安装程序不会结束或重启 Codex。');
+    if DetectionStatus = 'missing' then
+    begin
+      if not DownloadChoice.Checked then RaiseException('请下载 Codex 或选择已有安装。');
+      if not DownloadAndInstallCodex then Exit;
+    end;
+    if (DetectionStatus = 'found') and not SelectionTested then
+      if SuppressibleMsgBox('此 Codex 版本尚未验证。是否保留当前版本并仅安装助手？',
+        mbConfirmation, MB_YESNO, IDNO) <> IDYES then Exit;
+    Result := DetectionStatus = 'found';
+  except
+    SuppressibleMsgBox(GetExceptionMessage, mbError, MB_OK, IDOK);
+  end;
 end;
 
 function IsCodexDesktopPath(Path: String): Boolean;
@@ -90,6 +445,11 @@ begin
   if Path = '' then Exit;
   Name := ExtractFileName(Path);
   if (CompareText(Name, 'ChatGPT.exe') <> 0) and (CompareText(Name, 'Codex.exe') <> 0) then Exit;
+  if (SelectedExecutable <> '') and (CompareText(Path, SelectedExecutable) = 0) then
+  begin
+    Result := True;
+    Exit;
+  end;
   AppDir := ExtractFileDir(Path);
   if CompareText(AppDir, ExpandConstant('{localappdata}\Programs\Codex')) = 0 then
   begin
@@ -165,6 +525,47 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  if IsTestInstall then Exit;
+  if not DetectCodex(SelectedCodex, False) then
+  begin
+    Result := ReportError;
+    Exit;
+  end;
+  if DetectionStatus = 'missing' then
+  begin
+    if not WizardSilent or (ExpandConstant('{param:INSTALLCODEX|0}') <> '1') then
+    begin
+      Result := '未找到 Codex。请选择已有安装，或在交互界面确认下载。';
+      Exit;
+    end;
+    try
+      if not DownloadAndInstallCodex then
+      begin
+        Result := 'Codex 下载或安装未完成，尚未安装无限助手。';
+        Exit;
+      end;
+    except
+      Result := GetExceptionMessage;
+      Exit;
+    end;
+  end;
+  if SelectionRunning or CodexDesktopRunning then
+  begin
+    Result := '请先完成任务并关闭所有 Codex 窗口，再继续安装。安装程序不会结束或重启 Codex。';
+    Exit;
+  end;
+  if WizardSilent and not SelectionTested then
+  begin
+    Result := '此 Codex 版本尚未验证，请使用交互安装程序确认保留当前版本。';
+    Exit;
+  end;
+  if not RunBootstrap('remember --selected ' + Quote(SelectedCodex) +
+    ' --location ' + Quote(ExpandConstant('{tmp}\codex-location.json')) +
+    ' --report ' + Quote(DetectionFile)) then
+  begin
+    Result := ReportError;
+    Exit;
+  end;
   StopBundledAssistant;
 end;
 
@@ -180,13 +581,6 @@ end;
 function InitializeSetup: Boolean;
 begin
   Result := True;
-  if IsTestInstall then Exit;
-  if CodexDesktopRunning then
-  begin
-    SuppressibleMsgBox('请先关闭所有 Codex 桌面窗口，再运行安装程序。安装程序不会停止或重启 Codex。',
-      mbError, MB_OK, IDOK);
-    Result := False;
-  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -202,6 +596,22 @@ var
   ResultCode: Integer;
 begin
   Result := False;
+  if FileExists(ExpandConstant('{app}\runtime\codex-bootstrap.exe')) then
+  begin
+    BootstrapFile := ExpandConstant('{app}\runtime\codex-bootstrap.exe');
+    DetectionFile := ExpandConstant('{tmp}\codex-uninstall.ini');
+    if not RunBootstrap('running --location ' + Quote(ExpandConstant('{app}\codex-location.json')) +
+      ' --report ' + Quote(DetectionFile)) then
+    begin
+      SuppressibleMsgBox('无法确认 Codex 运行状态，卸载已取消。' + #13#10 + ReportError, mbError, MB_OK, IDOK);
+      Exit;
+    end;
+    if GetIniString('codex', 'running', '1', DetectionFile) = '1' then
+    begin
+      SuppressibleMsgBox('请先关闭所有 Codex 桌面窗口，再卸载。', mbError, MB_OK, IDOK);
+      Exit;
+    end;
+  end;
   if CodexDesktopRunning then
   begin
     SuppressibleMsgBox('请先关闭所有 Codex 桌面窗口，再卸载。', mbError, MB_OK, IDOK);

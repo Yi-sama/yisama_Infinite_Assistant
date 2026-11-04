@@ -1,0 +1,26 @@
+{
+  "version": "1.2.0",
+  "releaseDate": "2026-11-04",
+  "installer": { "file": "Yisama-Setup-1.2.0.exe", "sha256": "ead9ad2960b18ae8c646967e5b097baf3dc66245ff6fcd55ada58346dd2ec148", "bytes": 27277947, "signed": false },
+  "previousInstaller": { "sha256": "9b380765b8f8995cd48dffdf8b8a1d467e394dd220beffb075a86d6464d7f39c", "backupDirectory": "work/backup-installer-20261104" },
+  "build": { "reusesPreviouslyReleasedAssistantPayload": true, "script": "work/build-chengdu-release.mjs",
+    "bootstrapSha256": "c29600fca086042463355c4464e2e8b62abbc505515d93a527f7ce8886ac9b4e",
+    "buildId": "0cc2a422339bac8d74e0de0fd72f0b5096fbd00da8cd8aa55e5a7bc230d29685" },
+  "codexDownload": {
+    "primaryUrl": "https://api-cn.yisama.asia/codex/26.1027.3384.0/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix",
+    "primaryHost": "Chengdu 47.109.44.77, nginx /var/www/codex, limit_conn 4 per IP",
+    "fallbackUrl": "https://github.com/Wangnov/codex-app-mirror/releases/download/codex-app-26.1027.30824/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix",
+    "fallbackResumesSamePartial": true,
+    "packageVersion": "26.1027.3384.0", "bytes": 1004631986,
+    "sha256": "d442a3d7d5c229f45e5e11995711ac2619c8dbc89e3fa2bc185287dc8db8e76e"
+  },
+  "checks": {
+    "rustTestsPassed": 13,
+    "packagedBootstrapPauseResumeFromChengdu": { "resumedFrom": 49754112, "completed": 1004631986, "verified": true },
+    "cleanWindowsFirstInstall": "pending_manual",
+    "reportedMachineRetest": "pending_manual"
+  },
+  "serverUpdated": "chengdu nginx api-cn-yisama.conf (backup api-cn-yisama.conf.bak-codex-20261104T173439)",
+  "publicAssistantInstallerUpdated": false,
+  "githubPushed": false
+}

@@ -1,0 +1,47 @@
+{
+  "version": "1.2.0",
+  "releaseDate": "2026-11-04",
+  "installer": {
+    "file": "Yisama-Setup-1.2.0.exe",
+    "sha256": "9b380765b8f8995cd48dffdf8b8a1d467e394dd220beffb075a86d6464d7f39c",
+    "bytes": 27279105,
+    "signed": false
+  },
+  "previousInstaller": {
+    "sha256": "175fb2ef8c5937c083c0ee6b26aef186d059183576af0a3b132e4806c6aa97e9",
+    "backupDirectory": "output/resumable-download-previous-release-20261104-175fb2ef"
+  },
+  "build": {
+    "reusesPreviouslyReleasedAssistantPayload": true,
+    "bootstrapSha256": "5938928ebb6d787034cb5620b30eab9944c0da411cd8ce9413b4f31bc81b9aae",
+    "buildId": "c9f7705ea85e839ae57393c60eb787e934e87e1cedfd4787b5f1188491823819"
+  },
+  "codexDownload": {
+    "url": "https://api.yisama.asia/site/codex/26.1027.3384.0/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix",
+    "packageVersion": "26.1027.3384.0",
+    "bytes": 1004631986,
+    "sha256": "d442a3d7d5c229f45e5e11995711ac2619c8dbc89e3fa2bc185287dc8db8e76e",
+    "queriesLatestManifest": false,
+    "resumable": true,
+    "partialCache": "%LOCALAPPDATA%\\yisama-infinite-assistant-cache\\codex\\<sha256>\\<package>.msix.part",
+    "network": "direct_system_curl_strict_tls",
+    "retainsPartialOnPauseOrNetworkError": true
+  },
+  "checks": {
+    "rustTestsPassed": 12,
+    "launcherAndPrerequisiteTestsPassed": 7,
+    "installerTestsPassed": 5,
+    "nativeInnoPauseAndResume": true,
+    "nativeResumedFromBytes": 145481728,
+    "nativeCompletedBytes": 1004631986,
+    "nativePinnedPackageVerification": true,
+    "userConfigurationUnchanged": true,
+    "cleanWindowsFirstInstall": "pending_manual",
+    "reportedMachineRetest": "pending_manual",
+    "originalReadTimeoutRootCause": "not_established"
+  },
+  "localRuntimeUpdated": false,
+  "serverUpdated": false,
+  "publicAssistantInstallerUpdated": false,
+  "githubPushed": false
+}
