@@ -86,7 +86,8 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
     if (url.pathname === '/v1/models') {
       const key = state.keys.find((item) => req.headers.authorization === `Bearer ${apiKey}-${item.id}`)
       if (!key) return reply({ success: false }, 401)
-      return reply({ object: 'list', data: (state.groupModels[key.group] || state.models).map((id) => ({ id })) })
+      return reply({ object: 'list', data: (state.groupModels[key.group] || state.models)
+        .map((id) => ({ id, ...state.modelMetadata?.[key.group]?.[id] })) })
     }
     if (req.headers.authorization !== `Bearer ${dashboardToken}`) return reply({ success: false }, 401)
     if (url.pathname === '/api/user/self') {
@@ -610,6 +611,87 @@ test('native synchronization ignores model preferences but still tracks Fast and
   assert.equal(grouped.fastEnabled, false, 'a group switch must preserve the disabled Fast setting')
   assert.notEqual(grouped.version, initial.version, 'group changes still refresh the catalog')
   assert.notEqual(grouped.catalogVersion, initial.catalogVersion)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('relay input capabilities survive group changes without inheriting the previous route', async (t) => {
+  const { state, env, files } = await fixture(t)
+  state.groupModels = { auto: ['gpt-5-codex', 'audio-model'], premium: ['gpt-5-codex'] }
+  state.modelMetadata = {
+    auto: { 'gpt-5-codex': { input_modalities: ['text', 'image'] },
+      'audio-model': { input_modalities: ['audio'] } },
+    premium: { 'gpt-5-codex': { input_modalities: ['text'] } },
+  }
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  for (const [id, group, expected] of [[1, 'auto', ['text', 'image']], [2, 'premium', ['text']],
+    [3, 'auto', ['text', 'image']]]) {
+    const response = await bridge.request({ id, action: id === 1 ? 'login' : 'select', group })
+    assert.equal(response.ok, true, response.error)
+    const saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+    const catalog = JSON.parse(await fs.readFile(saved.catalogPath, 'utf8'))
+    assert.deepEqual(catalog.models[0].input_modalities, expected)
+    assert.deepEqual(response.data.models, ['gpt-5-codex'])
+  }
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('status migrates generated text-only defaults while preserving independent capability declarations', async (t) => {
+  const { state, env, files } = await fixture(t)
+  state.models.push('gpt-unknown')
+  const request = async (action) => {
+    const bridge = bridgeClient(env)
+    t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+    const response = await bridge.request({ id: 1, action })
+    assert.equal((await bridge.close()).stderr, '')
+    assert.equal(response.ok, true, response.error)
+    return response.data
+  }
+  await request('login')
+  const previous = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  const legacy = JSON.parse(await fs.readFile(previous.catalogPath, 'utf8'))
+  for (const model of legacy.models) model.input_modalities = ['text']
+  const catalogText = JSON.stringify(legacy) + '\n'
+  const hash = createHash('sha256').update(catalogText).digest('hex')
+  const legacyPath = path.join(env.PLUGIN_DATA, 'model-catalogs', `${hash}.json`)
+  await fs.writeFile(legacyPath, catalogText, 'utf8')
+  const config = parse(await fs.readFile(files.config, 'utf8'))
+  config.model_catalog_json = legacyPath
+  await fs.writeFile(files.config, stringify(config), 'utf8')
+  await fs.writeFile(files.state, JSON.stringify({ ...previous,
+    catalogPath: legacyPath, catalogHash: hash, catalogFiles: [...previous.catalogFiles, legacyPath],
+  }), 'utf8')
+  const cachePath = path.join(env.CODEX_HOME, 'models_cache.json')
+  const cache = JSON.parse(await fs.readFile(cachePath, 'utf8'))
+  cache.models[0].input_modalities = ['text', 'image']
+  cache.models[1].input_modalities = ['text']
+  await fs.writeFile(cachePath, JSON.stringify(cache), 'utf8')
+  const protectedFiles = [path.join(env.CODEX_HOME, 'auth.json'),
+    previous.backups.config, previous.backups.auth]
+  const before = await Promise.all(protectedFiles.map((file) => fs.readFile(file, 'utf8')))
+  await request('status')
+  const migrated = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  assert.notEqual(migrated.catalogHash, hash)
+  const catalog = JSON.parse(await fs.readFile(migrated.catalogPath, 'utf8'))
+  assert.deepEqual(Object.fromEntries(catalog.models.map((model) => [model.slug, model.input_modalities])),
+    { 'gpt-5': ['text'], 'gpt-5-codex': ['text', 'image'], 'gpt-unknown': undefined })
+  assert.equal(Object.hasOwn(catalog.models.find((model) => model.slug === 'gpt-unknown'), 'input_modalities'), false)
+  assert.deepEqual(await Promise.all(protectedFiles.map((file) => fs.readFile(file, 'utf8'))), before)
+  const stable = await fs.readFile(files.state, 'utf8')
+  await request('status')
+  assert.equal(await fs.readFile(files.state, 'utf8'), stable, 'migration must not rewrite on every refresh')
+})
+
+test('invalid relay input capabilities do not silently broaden support or change saved configuration', async (t) => {
+  const { state, env, files, originalConfig } = await fixture(t)
+  state.modelMetadata = { auto: { 'gpt-5-codex': { input_modalities: ['text', 'invalid'] } } }
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const response = await bridge.request({ id: 1, action: 'login' })
+  assert.equal(response.ok, false)
+  assert.match(response.error, /输入能力格式无效/)
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  await assert.rejects(fs.access(path.join(env.CODEX_HOME, 'auth.json')), { code: 'ENOENT' })
   assert.equal((await bridge.close()).stderr, '')
 })
 

@@ -232,7 +232,10 @@ function verifiedReasoningMetadata(slug, existing) {
 }
 
 export function makeModelCatalog(models, known = [], { fast = false } = {}) {
-  const metadata = new Map(known.map((model) => [model.slug, model]))
+  const metadata = new Map()
+  for (const model of known) {
+    metadata.set(model.slug, { ...metadata.get(model.slug), ...model })
+  }
   return { models: models
     .filter((id) => !/(?:^|[-_.])(?:image|imagen|audio|tts|video|embedding|rerank)(?:$|[-_.])/i.test(id))
     .map((slug, index) => {
@@ -247,7 +250,7 @@ export function makeModelCatalog(models, known = [], { fast = false } = {}) {
         web_search_tool_type: 'text_and_image', truncation_policy: { mode: 'tokens', limit: 10000 },
         supports_parallel_tool_calls: false, supports_image_detail_original: false,
         context_window: null, max_context_window: null, effective_context_window_percent: 100,
-        experimental_supported_tools: [], input_modalities: ['text'], supports_search_tool: false,
+        experimental_supported_tools: [], supports_search_tool: false,
         auto_compact_token_limit: null, use_responses_lite: false, service_tiers: [],
         ...existing,
         slug, display_name: existing?.display_name || slug, description: existing?.description || slug,

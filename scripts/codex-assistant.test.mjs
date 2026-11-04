@@ -418,6 +418,23 @@ test('extra native models cannot substitute for required models or their capabil
   }
 })
 
+test('native synchronization does not acknowledge stale input capabilities', async () => {
+  for (const expected of [['text'], ['text', 'image']]) {
+    const { state, window, sync, settings } = nativeSyncFixture()
+    state.needsReload = false
+    Object.assign(settings, {
+      models: ['gpt-owned'],
+      modelSettings: { 'gpt-owned': { inputModalities: expected } },
+    })
+    state.catalog = [{ model: 'gpt-owned',
+      inputModalities: expected.length === 1 ? ['text', 'image'] : ['text'] }]
+    assert.equal((await sync()).status, 'error')
+    assert.equal(state.updates.length, 0)
+    assert.equal(window.__yisamaNativeModelSync.status, 'error')
+    assert.equal(state.authorized, false)
+  }
+})
+
 test('Fast-only synchronization preserves the catalog, query cache, and owned threads', async () => {
   const { state, window, calls, sync, settings } = nativeSyncFixture()
   state.needsReload = false

@@ -70,11 +70,19 @@ async function desktopGroupInfo(session, keep = '') {
 }
 
 async function desktopModels(apiKey, group = '') {
-  const [models, catalog] = await Promise.all([
-    cachedDesktopValue(`models:${originFromEnvironment()}:${group}:${apiKey}`, CATALOG_TTL, () => fetchModels(apiKey)),
+  const [listing, catalog] = await Promise.all([
+    cachedDesktopValue(`models:${originFromEnvironment()}:${group}:${apiKey}`, CATALOG_TTL, () => fetchModelListing(apiKey)),
     desktopTextCatalog(),
   ])
-  return textModels(models, catalog)
+  const models = textModels(listing.models, catalog)
+  const metadata = listing.metadata.filter((item) => models.includes(item.slug)).map((item) => {
+    if (!Array.isArray(item.input_modalities) ||
+      !item.input_modalities.every((value) => value === 'text' || value === 'image')) {
+      throw new UserError('服务端模型输入能力格式无效，请稍后重试。')
+    }
+    return { ...item, input_modalities: [...new Set(item.input_modalities)] }
+  })
+  return { models, metadata }
 }
 
 function desktopDisplay() {
@@ -591,10 +599,17 @@ export async function ensureAssistantKey(token, group, {
   }
 }
 
-export async function fetchModels(apiKey) {
+async function fetchModelListing(apiKey) {
   const response = await requestApi('/models', { token: apiKey, apiPrefix: '/v1' })
   if (!Array.isArray(response.data)) throw new UserError('暂时无法读取模型列表。')
-  return [...new Set(response.data.map((item) => item.id).filter((id) => typeof id === 'string' && id))]
+  const entries = response.data.filter((item) => typeof item?.id === 'string' && item.id)
+  const metadata = entries.filter((item) => Object.hasOwn(item, 'input_modalities'))
+    .map((item) => ({ slug: item.id, input_modalities: item.input_modalities }))
+  return { models: [...new Set(entries.map((item) => item.id))], metadata }
+}
+
+export async function fetchModels(apiKey) {
+  return (await fetchModelListing(apiKey)).models
 }
 
 export function chooseModel(models, preferred) {
@@ -640,7 +655,7 @@ async function supportedReasoning(files, config, model) {
     .filter((effort) => Object.hasOwn(REASONING_LABELS, effort)))]
 }
 
-async function desktopCatalog(files, config, state, models, fast = false) {
+async function desktopCatalog(files, config, state, models, fast = false, relayMetadata = []) {
   const sources = [activeConfig(config).model_catalog_json]
   if (state.backups?.config) {
     const original = parse(await readOptional(state.backups.config) || '')
@@ -649,10 +664,19 @@ async function desktopCatalog(files, config, state, models, fast = false) {
   sources.push('models_cache.json')
   const metadata = []
   for (const file of [...new Set(sources.filter(Boolean))]) {
-    const catalog = await readJson(path.resolve(path.dirname(files.codexConfig), file))
-    if (Array.isArray(catalog?.models)) metadata.push(...catalog.models)
+    const resolved = path.resolve(path.dirname(files.codexConfig), file)
+    const catalog = await readJson(resolved)
+    const owned = resolved === state.catalogPath || state.catalogFiles?.includes(resolved) ||
+      (path.dirname(resolved) === path.resolve(files.pluginData, 'model-catalogs') &&
+        /^[a-f0-9]{64}\.json$/.test(path.basename(resolved)))
+    if (Array.isArray(catalog?.models)) metadata.unshift(...catalog.models.map((model) => {
+      // Generated catalogs contain defaults, not independent capability evidence.
+      if (!owned) return model
+      const { input_modalities, ...rest } = model
+      return rest
+    }))
   }
-  return makeModelCatalog(models, metadata.reverse(), { fast })
+  return makeModelCatalog(models, [...metadata, ...relayMetadata], { fast })
 }
 
 export function chooseReasoning(requested, current, supported) {
@@ -864,10 +888,11 @@ export async function desktopStatus({ message, restartRequired } = {}) {
   const origin = originFromEnvironment()
   const current = await configuredModel(files, state, origin)
   const configured = current.configured
-  const [groups, status, models] = await Promise.all([
+  const [groups, status, listing] = await Promise.all([
     desktopGroupInfo(session, configured ? state.group : ''), desktopDisplay(),
-    current.apiKey ? desktopModels(current.apiKey, state.group) : [],
+    current.apiKey ? desktopModels(current.apiKey, state.group) : { models: [], metadata: [] },
   ])
+  const { models, metadata } = listing
   let model = configured ? current.model || publicText(state.model) : ''
   let fastAvailable = state.fastAvailable
   if (configured && models.length) {
@@ -885,7 +910,7 @@ export async function desktopStatus({ message, restartRequired } = {}) {
       fastAvailable = key.fast_mode_available === true
       fast = fastAvailable && key.fast_mode === true
     }
-    const catalog = await desktopCatalog(files, config, state, models, fastAvailable)
+    const catalog = await desktopCatalog(files, config, state, models, fastAvailable, metadata)
     const hash = createHash('sha256').update(JSON.stringify(catalog) + '\n').digest('hex')
     if (state.catalogHash !== hash || active.model_catalog_json !== state.catalogPath ||
       current.fast !== fast || state.fastAvailable !== fastAvailable) {
@@ -940,6 +965,7 @@ export async function desktopNativeConfiguration() {
     model: config.model,
     models: catalog.models.map((model) => model.slug),
     modelSettings: Object.fromEntries(catalog.models.map((model) => [model.slug, {
+      inputModalities: model.input_modalities ?? ['text', 'image'],
       fastAvailable: model.service_tiers?.some((tier) => tier.id === 'priority') === true,
       serviceTier: current.fast ? model.default_service_tier ?? null : null,
       reasoningEfforts: model.supported_reasoning_levels?.map((level) => level.effort) || [],
@@ -1035,7 +1061,7 @@ async function configureDesktop({
         keyId: canReuse ? previous.keyId : null,
         existingKey: canReuse ? current.apiKey : null,
       })
-    const models = await desktopModels(internalKey.key, selected.value)
+    const { models, metadata } = await desktopModels(internalKey.key, selected.value)
     if (requestedModel && !models.includes(requestedModel)) {
       throw new UserError('该分组暂不支持此模型。')
     }
@@ -1044,7 +1070,7 @@ async function configureDesktop({
     const modelByGroup = rememberModelByGroup(previous, previous.group, active.model)
     const model = requestedModel || chooseModel(models, modelByGroup[selected.value] || active.model)
     const reasoning = highestSupportedReasoning(await supportedReasoning(files, config, model))
-    const catalog = await desktopCatalog(files, config, previous, models, internalKey.fastAvailable)
+    const catalog = await desktopCatalog(files, config, previous, models, internalKey.fastAvailable, metadata)
     const catalogHash = createHash('sha256').update(JSON.stringify(catalog) + '\n').digest('hex')
     const changed = !current.configured || previous.group !== selected.value || current.apiKey !== internalKey.key ||
       active.model !== model || (active.model_reasoning_effort ?? null) !== reasoning ||

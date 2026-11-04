@@ -888,6 +888,12 @@ export async function syncNativeModels(settings, options = {}) {
           if (!models.includes(model.model)) continue
           const expected = settings.modelSettings[model.model]
           const supported = expected?.fastAvailable ?? Boolean(expected?.serviceTier)
+          const inputModalities = model.inputModalities ?? ['text', 'image']
+          if (expected?.inputModalities &&
+            (expected.inputModalities.length !== inputModalities.length ||
+              expected.inputModalities.some((value) => !inputModalities.includes(value)))) {
+            throw new Error('Native input modalities did not change.')
+          }
           if (expected?.reasoningEfforts?.some((effort) =>
             !model.supportedReasoningEfforts?.some((item) => item.reasoningEffort === effort))) {
             throw new Error('Native reasoning levels did not change.')
