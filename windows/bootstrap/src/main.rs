@@ -191,6 +191,29 @@ fn verify_package(path: &Path, pinned: &Release) -> Result<()> {
     Ok(())
 }
 
+/// Installs without administrator rights: the package is unpacked into a normal
+/// folder, as Codex-App-Manager's portable route does. Never replaces a folder
+/// that already has content, and never touches the user's Codex data.
+fn install_portable(file: &Path, root: &Path) -> Result<BTreeMap<String, String>> {
+    if !root.is_absolute() {
+        return Err("Codex installation folder must be an absolute path.".into());
+    }
+    if root.exists() && (!root.is_dir() || fs::read_dir(root)?.next().is_some()) {
+        return Err(format!(
+            "安装文件夹已存在且不是空的，为避免覆盖已有文件，已停止：{}", root.display()
+        ).into());
+    }
+    verify_package(file, &release())?;
+    let report = engine::install_portable_from_msix(file, root, false)?;
+    let found = select(root).map_err(|error| format!("安装后未能识别 Codex：{error}"))?;
+    Ok(BTreeMap::from([
+        ("status".into(), "ready".into()),
+        ("root".into(), found.root.display().to_string()),
+        ("executable".into(), found.executable.display().to_string()),
+        ("version".into(), report.version),
+    ]))
+}
+
 fn source_report() -> BTreeMap<String, String> {
     let pinned = release();
     // Both URLs identify the pinned file; source selection never queries latest.
@@ -216,7 +239,7 @@ fn arguments(args: &[String]) -> Result<BTreeMap<String, String>> {
                 return Err("Repeated bootstrap argument.".into());
             }
             index += 1;
-        } else if ["--report", "--selected", "--location", "--file", "--cancel"].contains(&key.as_str()) {
+        } else if ["--report", "--selected", "--location", "--file", "--cancel", "--root"].contains(&key.as_str()) {
             let value = args.get(index + 1).ok_or("Missing bootstrap argument value.")?;
             if value.starts_with("--") || result.insert(key.clone(), value.clone()).is_some() {
                 return Err("Invalid or repeated bootstrap argument.".into());
@@ -271,6 +294,10 @@ fn run(command: &str, args: &BTreeMap<String, String>) -> Result<BTreeMap<String
             Path::new(args.get("--cancel").ok_or("--cancel is required.")?),
             &release(),
         ),
+        "install-portable" => install_portable(
+            Path::new(args.get("--file").ok_or("--file is required.")?),
+            Path::new(args.get("--root").ok_or("--root is required.")?),
+        ),
         "verify" => {
             verify_package(Path::new(args.get("--file").ok_or("--file is required.")?), &release())?;
             Ok(BTreeMap::from([("status".into(), "ready".into())]))
@@ -285,7 +312,7 @@ fn run(command: &str, args: &BTreeMap<String, String>) -> Result<BTreeMap<String
                 ("sha256".into(), pinned.sha256),
             ]))
         }
-        _ => Err("Usage: codex-bootstrap detect|running|remember|source|download|verify|release [--report file]".into()),
+        _ => Err("Usage: codex-bootstrap detect|running|remember|source|download|verify|install-portable|release [--report file]".into()),
     }
 }
 

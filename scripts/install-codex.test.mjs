@@ -26,6 +26,9 @@ function Read-CodexDesktop {
         ($Scenario -in @('new', 'undetected') -and $script:reads -gt 2 -and $Scenario -ne 'undetected')) {
         return $desktop
     }
+    if ($Scenario -eq 'needs-admin' -and $script:reads -gt 2 -and $script:installedPortable) {
+        return @{ source = 'portable'; executable = $Exe }
+    }
     return $null
 }
 function Assert-CodexPackage {
@@ -41,11 +44,22 @@ function Get-Command {
     [CmdletBinding()] param($Name)
     return @{ Parameters = @{ LiteralPath = $true } }
 }
+$script:portable = 0
+function Install-PortableCodex {
+    param($Bootstrap, $Package)
+    $script:portable++
+    if ($Scenario -eq 'portable-error') { throw 'portable rejected' }
+    if ($Scenario -eq 'needs-admin-undetected') { return }
+    $script:installedPortable = $true
+}
 function Add-AppxPackage {
     [CmdletBinding()] param([string]$LiteralPath)
     $script:adds++
     $script:flags = @($PSBoundParameters.Keys | Sort-Object)
     if ($Scenario -eq 'install-error') { throw 'native install rejected' }
+    if ($Scenario -in @('needs-admin', 'needs-admin-undetected', 'portable-error')) {
+        throw 'Administrator privileges required to install packaged service'
+    }
 }
 $ok = $false
 $message = ''
@@ -54,7 +68,7 @@ try {
     $ok = $null -ne $result
 } catch { $message = $_.Exception.Message }
 @{ ok = $ok; message = $message; reads = $script:reads; checks = $script:checks;
-   adds = $script:adds; flags = $script:flags } | ConvertTo-Json -Compress
+   adds = $script:adds; flags = $script:flags; portable = $script:portable } | ConvertTo-Json -Compress
 `
 
 test('Codex prerequisites preserve existing installs and fail closed without force flags', {
@@ -85,6 +99,16 @@ test('Codex prerequisites preserve existing installs and fail closed without for
   assert.equal(installed.ok, true)
   assert.equal(installed.adds, 1)
   assert.deepEqual(installed.flags, ['ErrorAction', 'LiteralPath'])
+  const unpacked = await run('needs-admin')
+  assert.equal(unpacked.ok, true)
+  assert.equal(unpacked.adds, 1)
+  assert.equal(unpacked.portable, 1)
+  const both = await run('portable-error')
+  assert.equal(both.ok, false)
+  assert.match(both.message, /Administrator privileges required.*portable rejected/)
+  assert.equal((await run('needs-admin-undetected')).ok, false)
+  assert.equal(installed.portable, 0)
+  assert.equal(existing.portable, 0)
   for (const scenario of ['detect-error', 'bad-signature', 'registered', 'install-error', 'undetected']) {
     const result = await run(scenario)
     assert.equal(result.ok, false, scenario)

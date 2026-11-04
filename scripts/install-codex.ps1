@@ -28,6 +28,13 @@ function Assert-CodexPackage {
     if ($LASTEXITCODE -ne 0) { throw 'Codex package verification failed. Nothing was installed.' }
 }
 
+function Install-PortableCodex {
+    param([string]$Bootstrap, [string]$Package)
+    $root = Join-Path $env:LOCALAPPDATA 'Programs\Codex'
+    & $Bootstrap install-portable --file $Package --root $root
+    if ($LASTEXITCODE -ne 0) { throw 'Codex could not be installed. Nothing was changed.' }
+}
+
 function Install-MissingCodex {
     param([string]$Bootstrap, [string]$Package, [string]$Location)
 
@@ -49,9 +56,19 @@ function Install-MissingCodex {
     } else {
         $parameters.Path = $Package
     }
-    Add-AppxPackage @parameters | Out-Null
+    try {
+        Add-AppxPackage @parameters | Out-Null
+    }
+    catch {
+        # Codex ships a packaged service that Windows only registers for an administrator
+        # (0x80073D28). Unpack it into a normal per-user folder instead of asking for elevation.
+        if (Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue) { throw }
+        $registerError = $_.Exception.Message
+        try { Install-PortableCodex -Bootstrap $Bootstrap -Package $Package }
+        catch { throw "$registerError; $($_.Exception.Message)" }
+    }
     $found = Read-CodexDesktop -Bootstrap $Bootstrap -Location $Location
-    if (-not $found -or $found.source -ne 'msix' -or
+    if (-not $found -or $found.source -notin @('msix', 'portable') -or
         -not (Test-Path -LiteralPath $found.executable -PathType Leaf)) {
         throw 'Codex installation did not produce a detectable desktop executable.'
     }
