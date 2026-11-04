@@ -3,19 +3,20 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "ddfa3d049c8686137bff4124c709ba034bf67b856f41a66309b04f61fba6c2d3",
-    "bytes": 27541672,
+    "sha256": "1fa6e73a199c0d80f0f018f68ddb18e572a0c5ac1d2ab12b1fb0470e6722bdf0",
+    "bytes": 27544296,
     "signed": false
   },
   "previousInstaller": {
-    "sha256": "ead9ad2960b18ae8c646967e5b097baf3dc66245ff6fcd55ada58346dd2ec148",
-    "backupDirectory": "work/backup-installer-chengdu-20261104"
+    "sha256": "ddfa3d049c8686137bff4124c709ba034bf67b856f41a66309b04f61fba6c2d3",
+    "backupDirectory": "work/backup-installer-portable-20261104"
   },
   "build": {
     "reusesPreviouslyReleasedAssistantPayload": true,
     "script": "work/build-chengdu-release.mjs",
     "bootstrapSha256": "ddf7326168a7ead4f15b17e092a5ca629e9622317b35af6a04a15257b48fa377",
-    "buildId": "90e35521f7a1404414fa91e07164b67563caac3df3a446a087d7ef97b97189ed"
+    "buildId": "60480dd8fd3453f9d2d6543722709fcd2c039162b8c8563aef72513e8bba58da",
+    "assistantBundles": "yisama.mjs and codex-assistant.mjs rebuilt from tag release/1.2.0-startup-controls-20261103 plus only the domestic-route patch; launch-codex.ps1 unchanged"
   },
   "codexDownload": {
     "primaryUrl": "https://api-cn.yisama.asia/codex/26.1027.3384.0/OpenAI.Codex_26.1027.3384.0_x64__2p2nqsd0c76g0.Msix",
@@ -36,7 +37,9 @@
     "cleanWindowsFirstInstall": "pending_manual",
     "reportedMachineRetest": "pending_manual",
     "installCodexScriptTests": "1 test file, now covering admin-required fallback, both-fail message, and undetected result",
-    "realInstallScriptOnReportedFailure": "0x80073D28 reproduced on the build machine; fallback unpacked and detected as portable 26.1027.30824 (sandboxed LOCALAPPDATA)"
+    "realInstallScriptOnReportedFailure": "0x80073D28 reproduced on the build machine; fallback unpacked and detected as portable 26.1027.30824 (sandboxed LOCALAPPDATA)",
+    "routeFallbackTests": "2 new tests, 24/24 in yisama.test.mjs; 52/52 with desktop-bridge",
+    "liveBundledFallback": "primary host blocked: options + login probe served via Chengdu; relay log shows real client IP"
   },
   "serverUpdated": "chengdu nginx api-cn-yisama.conf (backup api-cn-yisama.conf.bak-codex-20261104T173439)",
   "publicAssistantInstallerUpdated": false,
@@ -50,5 +53,13 @@
     "portableChecks": "size, SHA-256, package identity and OpenAI signature are verified before unpacking",
     "refusesNonEmptyTargetFolder": true,
     "neverTouchesUserCodexData": true
+  },
+  "domesticRoute": {
+    "primary": "https://api.yisama.asia",
+    "fallback": "https://api-cn.yisama.asia",
+    "server": "Chengdu nginx /api/ -> US origin (backup api-cn-yisama.conf.bak-assistant-api-20261104T235253)",
+    "behavior": "only a connection-level failure tries the next route; HTTP answers never switch; register/password-reset/token writes are not repeated on another route",
+    "clientIpPreserved": true,
+    "sessionStaysBoundToLogicalOrigin": true
   }
 }
