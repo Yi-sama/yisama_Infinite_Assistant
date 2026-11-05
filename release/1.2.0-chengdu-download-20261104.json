@@ -3,8 +3,8 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "a1cf0aad7f3b62b1417438f58577ceb88c705a9398023bc60ef1e73874ad7f25",
-    "bytes": 27542274,
+    "sha256": "3c2e52ecd23f4d16d9da5600d97ae875b8dc11c95bfed15cfbd800ed923925f5",
+    "bytes": 27543894,
     "signed": false
   },
   "previousInstaller": {
@@ -80,5 +80,11 @@
     "fix": "commit 3569c81 included in this build: unknown capabilities are omitted so Codex keeps text+image; explicit relay declarations still apply",
     "relayCheck": "2026-11-05 gpt-6.1-sol, gpt-6-luna, gpt-6-sol answered a PNG correctly; gpt-6.1-terra returned 503 at the time"
   },
-  "installerCodexPage": "plain status page without radio buttons; existing Codex is always kept with no unverified-version dialog; screenshot output/installer-page-1.png"
+  "installerCodexPage": "plain status page without radio buttons; existing Codex is always kept with no unverified-version dialog; screenshot output/installer-page-1.png",
+  "computerUse": {
+    "cause": "Statsig gates 410065390 (external browser / Chrome), 410262010 (in-app browser), 1506311413 (computer use) never load in mainland China (reason NoValues), so Codex showed the Chrome row as restricted by organization or region",
+    "fix": "assistant adapts app-initial-*.js: each gate call that matches exactly once becomes true; config requirements and experimental features still apply (live check: requirements null, browser_use_external and computer_use enabled)",
+    "verified": "2026-11-05 live Codex settings > 电脑操控: Chrome row now offers 安装 for the extension; screenshot output/computer-use-settings.png",
+    "cache": "the assistant reload now disables the renderer cache for that reload, because memory-cached modules from an older adapter were reused even with ignoreCache"
+  }
 }
