@@ -3,8 +3,8 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "aad7d4d7a1dbf22458fd7b0478542f04cd65ac68eefa0642db4835162b23527f",
-    "bytes": 27545841,
+    "sha256": "fbc9ba5cd535420371114626cf3cdd8ae46582cad7d218d08f2105b55fc2eeb8",
+    "bytes": 27544663,
     "signed": false
   },
   "previousInstaller": {
@@ -98,5 +98,12 @@
   "remoteExperiments": {
     "scale": "about 420 gate ids and 259 layer parameters in the webview",
     "policy": "fix the loading-forever class at its source (host fallback); patch hidden-feature gates only for commonly used features (Chinese UI, browser control, in-app browser, computer use)"
+  },
+  "bootstrapMessages": {
+    "symptom": "after the portable Codex folder was removed, the installer showed an English error for the stale saved location and for a wrong manual pick",
+    "fix": "a saved portable location whose folder no longer exists reports missing when no other Codex is present (download flow); with another Codex present it asks the user instead of adopting it; user-facing bootstrap messages are Chinese",
+    "bootstrapSha256": "9483e18c0b53bb1d589fef04c5cc8f13278f5ed8cc625f29a1e39f8fd3878ef8",
+    "buildNote": "CARGO_TARGET_DIR is G:/DevCache/rust-target; windows/bootstrap/target/release is a stale copy",
+    "screenshot": "output/installer-stale-location.png"
   }
 }

@@ -53,7 +53,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 fn desktop(installed: engine::InstalledWindowsCodex) -> Result<Desktop> {
     let root = PathBuf::from(&installed.path);
     let executable = engine::installed_app_exe(&root)
-        .ok_or("Codex installation has no app executable. Select its installation again.")?;
+        .ok_or("这个 Codex 安装里找不到主程序。请重新选择 Codex 的安装位置。")?;
     let running = engine::codex_running_for_root(&root)?;
     Ok(Desktop {
         root,
@@ -73,7 +73,7 @@ fn registered() -> Option<engine::InstalledWindowsCodex> {
 fn read_location(file: &Path) -> Result<Location> {
     let saved: Location = serde_json::from_slice(&fs::read(file)?)?;
     if saved.format != 1 || !["msix", "portable"].contains(&saved.source.as_str()) || !saved.root.is_absolute() {
-        return Err("Saved Codex location is invalid. Run the installer to select it again.".into());
+        return Err("之前记录的 Codex 位置无效。请点“重新查找”，或用“手动选择”指定 Codex。".into());
     }
     Ok(saved)
 }
@@ -82,14 +82,14 @@ fn select(path: &Path) -> Result<Desktop> {
     let root = if path.is_file() {
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         if !["codex.exe", "chatgpt.exe"].contains(&name.to_ascii_lowercase().as_str()) {
-            return Err("Select Codex.exe or ChatGPT.exe, not the command-line Codex.".into());
+            return Err("请选择 Codex 桌面程序（Codex.exe 或 ChatGPT.exe），不要选命令行版 Codex。".into());
         }
-        path.parent().ok_or("Codex executable has no parent directory.")?
+        path.parent().ok_or("无法确定 Codex 所在的文件夹，请重新选择。")?
     } else {
         path
     };
     if !root.is_absolute() {
-        return Err("Codex installation path must be absolute.".into());
+        return Err("Codex 的位置必须是完整路径，请重新选择。".into());
     }
     if let Some(installed) = registered() {
         let package = Path::new(&installed.path);
@@ -102,7 +102,7 @@ fn select(path: &Path) -> Result<Desktop> {
             return desktop(installed);
         }
     }
-    Err("This is not a recognizable Codex desktop installation.".into())
+    Err("所选位置不是 Codex 桌面程序。请选择 Codex 安装文件夹里的 Codex.exe 或 ChatGPT.exe。".into())
 }
 
 fn detect(location: Option<&Path>, selected: Option<&Path>) -> Result<Option<Desktop>> {
@@ -113,6 +113,14 @@ fn detect(location: Option<&Path>, selected: Option<&Path>) -> Result<Option<Des
         let saved = read_location(file)?;
         if saved.source == "msix" {
             return registered().map(desktop).transpose();
+        }
+        // A removed folder is the same as no Codex, unless another installation exists:
+        // that one is never adopted silently.
+        if !saved.root.exists() {
+            return match detect(None, None)? {
+                None => Ok(None),
+                Some(_) => Err("之前使用的 Codex 已经不在原来的位置了。请点“重新查找”使用电脑上的 Codex，或用“手动选择”指定。".into()),
+            };
         }
         return select(&saved.root).map(Some);
     }
@@ -174,10 +182,10 @@ fn desktop_report(found: Option<&Desktop>) -> BTreeMap<String, String> {
 
 fn verify_package(path: &Path, pinned: &Release) -> Result<()> {
     if fs::metadata(path)?.len() != pinned.size {
-        return Err("Codex download size does not match the pinned release.".into());
+        return Err("下载的 Codex 大小不对，可能没下载完整。请重新运行安装程序。".into());
     }
     if !engine::sha256_file(path)?.eq_ignore_ascii_case(&pinned.sha256) {
-        return Err("Codex SHA256 verification failed; nothing was installed.".into());
+        return Err("Codex 安装包校验失败，没有安装任何内容。请重新运行安装程序。".into());
     }
     let identity = engine::read_msix_identity(path)?;
     engine::validate_codex_identity(
@@ -186,7 +194,7 @@ fn verify_package(path: &Path, pinned: &Release) -> Result<()> {
         Some(&pinned.architecture),
     )?;
     if !engine::verify_openai_authenticode(path)?.is_valid_openai() {
-        return Err("Codex publisher/signature verification failed; nothing was installed.".into());
+        return Err("Codex 安装包的签名校验失败，没有安装任何内容。".into());
     }
     Ok(())
 }
@@ -196,7 +204,7 @@ fn verify_package(path: &Path, pinned: &Release) -> Result<()> {
 /// that already has content, and never touches the user's Codex data.
 fn install_portable(file: &Path, root: &Path) -> Result<BTreeMap<String, String>> {
     if !root.is_absolute() {
-        return Err("Codex installation folder must be an absolute path.".into());
+        return Err("Codex 的安装文件夹必须是完整路径。".into());
     }
     if root.exists() && (!root.is_dir() || fs::read_dir(root)?.next().is_some()) {
         return Err(format!(
@@ -461,8 +469,15 @@ mod tests {
             format: 1, source: "portable".into(), root: fixture.0.join("missing"),
         }).unwrap()).unwrap();
         let before = fs::read(&file).unwrap();
-        assert!(detect(Some(&file), None).is_err());
+        // Either "no Codex" or an error asking the user; never another installation.
+        assert!(!matches!(detect(Some(&file), None), Ok(Some(_))));
         assert_eq!(fs::read(&file).unwrap(), before);
+        let other = fixture.0.join("other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(&file, serde_json::to_vec(&Location {
+            format: 1, source: "portable".into(), root: other,
+        }).unwrap()).unwrap();
+        assert!(detect(Some(&file), None).is_err(), "an existing folder that is not Codex stays an error");
     }
 
     #[test]
@@ -480,7 +495,7 @@ mod tests {
         assert!(String::from_utf16(&words).unwrap().contains("C:\\\u{5de5}\u{4f5c}\\Codex"));
         let package = fixture.0.join("untrusted.msix");
         fs::write(&package, b"not an MSIX").unwrap();
-        assert!(verify_package(&package, &release()).unwrap_err().to_string().contains("size"));
+        assert!(verify_package(&package, &release()).unwrap_err().to_string().contains("大小"));
     }
 }
 

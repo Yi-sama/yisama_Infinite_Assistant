@@ -67,18 +67,18 @@ fn transfer(mut command: Command, part: &Path, cancel: &Path, size: u64) -> Resu
                 child.stdout.take().unwrap().take(32).read_to_string(&mut response)?;
                 if !status.success() {
                     return Err(format!(
-                        "Download interrupted (curl {}). Partial data retained; run setup again to resume. {}",
+                        "下载中断（curl {}）。已下载的部分会保留，重新运行安装程序会接着下载。{}",
                         status.code().unwrap_or(-1), ini_value(errors.trim())
                     ).into());
                 }
                 if response.trim() != "200" && response.trim() != "206" {
-                    return Err(format!("Unexpected download response: {}", response.trim()).into());
+                    return Err(format!("下载服务器返回了异常结果：{}。请稍后重试。", response.trim()).into());
                 }
                 if resumed_from > 0 && response.trim() != "206" {
-                    return Err("The server did not confirm a partial response; the cached data was retained.".into());
+                    return Err("下载服务器不支持续传，已下载的部分已保留。请稍后重试。".into());
                 }
                 if file_size(part) != size {
-                    return Err("Download is incomplete. Partial data retained for the next attempt.".into());
+                    return Err("下载没有完成，已下载的部分会保留，下次接着下载。".into());
                 }
                 return Ok(true);
             }
@@ -121,18 +121,18 @@ pub(super) fn download(
     fs::create_dir_all(file.parent().ok_or("Missing download directory.")?)?;
     let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false)
         .open(file.with_extension("msix.lock"))?;
-    lock.try_lock().map_err(|_| "Another setup is using this download. Close it before continuing.")?;
+    lock.try_lock().map_err(|_| "另一个安装程序正在下载 Codex。请先关掉它再继续。")?;
     let part = partial_path(file);
     let resumed_from = file_size(&part);
     if file.exists() { verifying(report)?; }
     if file.exists() && !intact(file, pinned)? {
         fs::remove_file(file)?;
-        return Err("The cached package was damaged and removed. Run setup again to download it.".into());
+        return Err("之前下载的安装包已损坏并已删除。请重新运行安装程序下载。".into());
     }
     if !file.exists() {
         if file_size(&part) > pinned.size {
             fs::remove_file(&part)?;
-            return Err("The partial package was invalid and removed. Run setup again to download it.".into());
+            return Err("未下载完的安装包无效，已删除。请重新运行安装程序下载。".into());
         }
         if file_size(&part) != pinned.size {
             let urls = [pinned.mirror_url.as_str(), pinned.release_url.as_str()];
@@ -147,7 +147,7 @@ pub(super) fn download(
         verifying(report)?;
         if !intact(&part, pinned)? {
             fs::remove_file(&part)?;
-            return Err("Codex SHA256 verification failed. The damaged partial package was removed; nothing was installed.".into());
+            return Err("Codex 安装包校验失败，损坏的文件已删除，没有安装任何内容。请重新运行安装程序。".into());
         }
         fs::rename(&part, file)?;
     }
@@ -205,7 +205,7 @@ mod tests {
             command.args(["--proto", "=http"]);
             transfer(command, &part, &cancel, data.len() as u64)
         };
-        assert!(run().unwrap_err().to_string().contains("retained"));
+        assert!(run().unwrap_err().to_string().contains("保留"));
         assert_eq!(fs::read(&part).unwrap(), data[..first]);
         assert!(run().unwrap());
         assert_eq!(fs::read(&part).unwrap(), data);
