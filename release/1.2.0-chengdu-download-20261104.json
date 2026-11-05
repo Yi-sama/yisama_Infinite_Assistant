@@ -3,8 +3,8 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "f418d8741433537d3736f95f7e8bafeef7214e2ab2146504034f0b56089ef0ff",
-    "bytes": 27548791,
+    "sha256": "aad7d4d7a1dbf22458fd7b0478542f04cd65ac68eefa0642db4835162b23527f",
+    "bytes": 27545841,
     "signed": false
   },
   "previousInstaller": {
@@ -91,6 +91,12 @@
     "symptom": "toast 创建聊天分支失败; no thread/fork request reached app-server",
     "cause": "desktop log: AppServerForkNotReadyError execution-config-loading; readPermissionRefreshEnabled returns null when remote experiment assignments are missing, which Codex treats as still loading",
     "fix": "assistant adapts renderer-app-server-managers-*.js: values.permissionRefresh??null becomes ??!1 (the value Codex uses when experiments load without one); one exact match or unchanged",
-    "verified": "unit tests and real chunk only; branching not yet retried after the fix"
+    "verified": "unit tests and real chunk only; branching not yet retried after the fix",
+    "followUp": "after the permission patch branching still failed (log 2026-11-05T11:16:58Z): readSettings/gm returns not-ready because the desktop process returns null execution assignments when its own experiment client cannot reach OpenAI",
+    "fix2": "assistant adapts app-shared-*.js: the host-services setter (variable read with ?.performanceTelemetry) wraps statsigEvaluations; after 10 s a null result becomes the all-off assignments Codex uses when experiments load without values; real assignments always pass through"
+  },
+  "remoteExperiments": {
+    "scale": "about 420 gate ids and 259 layer parameters in the webview",
+    "policy": "fix the loading-forever class at its source (host fallback); patch hidden-feature gates only for commonly used features (Chinese UI, browser control, in-app browser, computer use)"
   }
 }
