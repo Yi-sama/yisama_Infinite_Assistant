@@ -3,8 +3,8 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "5ace55b695f709ee03a640330296ad1856842b8dec58a73eb23a6723bb25fd8e",
-    "bytes": 27543839,
+    "sha256": "a55dc7578ec839947c582a8f9e03dab026a4ff4d1dc0992bc47969807a861507",
+    "bytes": 27545366,
     "signed": false
   },
   "previousInstaller": {
@@ -66,7 +66,8 @@
   "loginOverlay": {
     "behavior": "while signed out the panel opens by itself and a full-screen dimming layer with a pointer to the panel covers the page; nothing on the page is identified or modified",
     "appears": "only after the first status answer shows the user is signed out and only while the panel is open",
-    "dismiss": "closing the panel removes it; it never reopens by itself",
+    "dismiss": "closing the panel hides it for this run; the hint's own button turns it off permanently (localStorage yisama-infinite-assistant-login-hint-dismissed-v1)",
+    "design": "callout attached to the left of the panel with a pointer, spotlight gradient centred on the panel",
     "screenshot": "output/playwright/login-gate.png"
   }
 }
