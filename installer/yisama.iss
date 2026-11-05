@@ -115,7 +115,7 @@ var
   CodexStatus: TNewStaticText;
   CodexVersion: TNewStaticText;
   CodexPath: TNewMemo;
-  ExistingChoice, DownloadChoice: TNewRadioButton;
+  CodexHint: TNewStaticText;
   BrowseCodexButton, DetectCodexButton: TNewButton;
   DownloadPage, WorkPage: TOutputProgressWizardPage;
   SelectedCodex, SelectedExecutable, DetectionStatus: String;
@@ -178,32 +178,40 @@ end;
 
 procedure RenderCodex;
 var
-  HasAssistant: Boolean;
+  Found: Boolean;
 begin
-  HasAssistant := FileExists(AddBackslash(WizardDirValue) + 'scripts\codex-assistant.mjs');
-  if HasAssistant then
-    ExistingChoice.Caption := '保留 Codex，更新或修复助手'
-  else
-    ExistingChoice.Caption := '保留 Codex，仅安装无限助手';
-  ExistingChoice.Enabled := DetectionStatus = 'found';
-  DownloadChoice.Enabled := DetectionStatus = 'missing';
-  ExistingChoice.Checked := ExistingChoice.Enabled;
-  DownloadChoice.Checked := DownloadChoice.Enabled;
+  Found := DetectionStatus = 'found';
+  CodexVersion.Visible := Found;
+  CodexPath.Visible := Found;
   CodexPath.Text := SelectedExecutable;
   CodexVersion.Caption := '';
-  if DetectionStatus = 'found' then
+  CodexHint.Caption := '';
+  if Found then
   begin
-    CodexStatus.Caption := '已检测到 Codex';
-    CodexVersion.Caption := '版本 ' + GetIniString('codex', 'version', '未知', DetectionFile);
+    CodexPage.Description := '已找到 Codex，将直接使用';
+    CodexStatus.Caption := '已找到电脑上的 Codex，不需要重新下载。';
+    CodexVersion.Caption := '版本 ' + GetIniString('codex', 'version', '未知', DetectionFile) + '，位置：';
     if SelectionRunning then
-      CodexStatus.Caption := 'Codex 正在运行，请完成任务后关闭再继续。'
-    else if not SelectionTested then
-      CodexStatus.Caption := '已检测到 Codex；此版本尚未验证，不会自动更换。';
+      CodexHint.Caption := 'Codex 正在运行。请先完成手头的任务并关闭 Codex，再点击“下一步”。'
+    else if FileExists(AddBackslash(WizardDirValue) + 'scripts\codex-assistant.mjs') then
+      CodexHint.Caption := '点击“下一步”更新无限助手。你的账号、会话和设置都会保留。'
+    else
+      CodexHint.Caption := '点击“下一步”安装无限助手。你的账号、会话和设置都会保留。';
   end
   else if DetectionStatus = 'missing' then
-    CodexStatus.Caption := '未检测到 Codex'
+  begin
+    CodexPage.Description := '电脑上还没有 Codex，将自动下载';
+    CodexStatus.Caption := '没有找到 Codex。';
+    CodexHint.Caption := '点击“下一步”会自动下载并安装 Codex（约 958 MB），然后安装无限助手。' + #13#10 +
+      '下载中途可以暂停，下次打开安装程序会接着下载。' + #13#10#13#10 +
+      '如果你已经装过 Codex，请点“手动选择”指定它的位置。';
+  end
   else
-    CodexStatus.Caption := '检测未完成：' + ReportError;
+  begin
+    CodexPage.Description := '暂时无法确认 Codex';
+    CodexStatus.Caption := '检查 Codex 时出了问题。';
+    CodexHint.Caption := ReportError + #13#10 + '请点“重新查找”，或用“手动选择”指定 Codex 的位置。';
+  end;
 end;
 
 procedure BrowseCodex(Sender: TObject);
@@ -247,36 +255,37 @@ begin
   ExtractTemporaryFile('install-codex.ps1');
   BootstrapFile := ExpandConstant('{tmp}\codex-setup-bootstrap.exe');
   DetectionFile := ExpandConstant('{tmp}\codex-detection.ini');
-  CodexPage := CreateCustomPage(wpLicense, '准备 Codex', '已有安装将被保留');
+  CodexPage := CreateCustomPage(wpLicense, '准备 Codex', '正在查找 Codex...');
   CodexStatus := TNewStaticText.Create(CodexPage);
   CodexStatus.Parent := CodexPage.Surface;
-  CodexStatus.SetBounds(0, 0, CodexPage.SurfaceWidth, ScaleY(42));
+  CodexStatus.SetBounds(0, 0, CodexPage.SurfaceWidth, ScaleY(24));
   CodexStatus.AutoSize := False;
   CodexStatus.WordWrap := True;
+  CodexStatus.Font.Size := CodexStatus.Font.Size + 2;
+  CodexStatus.Font.Style := [fsBold];
   CodexVersion := TNewStaticText.Create(CodexPage);
   CodexVersion.Parent := CodexPage.Surface;
-  CodexVersion.SetBounds(0, ScaleY(46), CodexPage.SurfaceWidth, ScaleY(20));
+  CodexVersion.SetBounds(0, ScaleY(36), CodexPage.SurfaceWidth, ScaleY(20));
   CodexPath := TNewMemo.Create(CodexPage);
   CodexPath.Parent := CodexPage.Surface;
-  CodexPath.SetBounds(0, ScaleY(70), CodexPage.SurfaceWidth, ScaleY(42));
+  CodexPath.SetBounds(0, ScaleY(58), CodexPage.SurfaceWidth, ScaleY(38));
   CodexPath.ReadOnly := True;
   CodexPath.WordWrap := True;
-  ExistingChoice := TNewRadioButton.Create(CodexPage);
-  ExistingChoice.Parent := CodexPage.Surface;
-  ExistingChoice.SetBounds(0, ScaleY(124), CodexPage.SurfaceWidth, ScaleY(22));
-  DownloadChoice := TNewRadioButton.Create(CodexPage);
-  DownloadChoice.Parent := CodexPage.Surface;
-  DownloadChoice.SetBounds(0, ScaleY(154), CodexPage.SurfaceWidth, ScaleY(22));
-  DownloadChoice.Caption := '下载并安装 Codex 26.1027.30824（约 958 MB）';
+  CodexPath.TabStop := False;
+  CodexHint := TNewStaticText.Create(CodexPage);
+  CodexHint.Parent := CodexPage.Surface;
+  CodexHint.SetBounds(0, ScaleY(108), CodexPage.SurfaceWidth, ScaleY(80));
+  CodexHint.AutoSize := False;
+  CodexHint.WordWrap := True;
   BrowseCodexButton := TNewButton.Create(CodexPage);
   BrowseCodexButton.Parent := CodexPage.Surface;
-  BrowseCodexButton.SetBounds(0, ScaleY(194), ScaleX(160), ScaleY(26));
-  BrowseCodexButton.Caption := '选择已有 Codex...';
+  BrowseCodexButton.SetBounds(0, CodexPage.SurfaceHeight - ScaleY(26), ScaleX(120), ScaleY(26));
+  BrowseCodexButton.Caption := '手动选择...';
   BrowseCodexButton.OnClick := @BrowseCodex;
   DetectCodexButton := TNewButton.Create(CodexPage);
   DetectCodexButton.Parent := CodexPage.Surface;
-  DetectCodexButton.SetBounds(ScaleX(172), ScaleY(194), ScaleX(100), ScaleY(26));
-  DetectCodexButton.Caption := '重新检测';
+  DetectCodexButton.SetBounds(ScaleX(132), CodexPage.SurfaceHeight - ScaleY(26), ScaleX(100), ScaleY(26));
+  DetectCodexButton.Caption := '重新查找';
   DetectCodexButton.OnClick := @RefreshCodex;
   DownloadPage := CreateOutputProgressPage('下载 Codex', '');
   PauseDownloadButton := TNewButton.Create(DownloadPage);
@@ -422,15 +431,14 @@ begin
   try
     if not DetectCodex(SelectedCodex, False) then RaiseException(ReportError);
     if SelectionRunning then
-      RaiseException('请先完成任务并关闭 Codex，再点击下一步。安装程序不会结束或重启 Codex。');
-    if DetectionStatus = 'missing' then
     begin
-      if not DownloadChoice.Checked then RaiseException('请下载 Codex 或选择已有安装。');
-      if not DownloadAndInstallCodex then Exit;
+      RenderCodex;
+      RaiseException('Codex 正在运行。请先完成手头的任务并关闭 Codex，再点击“下一步”。' + #13#10 +
+        '安装程序不会替你关闭或重启 Codex。');
     end;
-    if (DetectionStatus = 'found') and not SelectionTested then
-      if SuppressibleMsgBox('此 Codex 版本尚未验证。是否保留当前版本并仅安装助手？',
-        mbConfirmation, MB_YESNO, IDNO) <> IDYES then Exit;
+    if DetectionStatus = 'missing' then
+      if not DownloadAndInstallCodex then Exit;
+    { An existing Codex is always kept as is; the assistant adapts to it or stays out of the way. }
     Result := DetectionStatus = 'found';
   except
     SuppressibleMsgBox(GetExceptionMessage, mbError, MB_OK, IDOK);

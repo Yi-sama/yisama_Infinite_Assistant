@@ -3,8 +3,8 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "a55dc7578ec839947c582a8f9e03dab026a4ff4d1dc0992bc47969807a861507",
-    "bytes": 27545366,
+    "sha256": "a1cf0aad7f3b62b1417438f58577ceb88c705a9398023bc60ef1e73874ad7f25",
+    "bytes": 27542274,
     "signed": false
   },
   "previousInstaller": {
@@ -69,5 +69,16 @@
     "dismiss": "closing the panel hides it for this run; the hint's own button turns it off permanently (localStorage yisama-infinite-assistant-login-hint-dismissed-v1)",
     "design": "callout attached to the left of the panel with a pointer, spotlight gradient centred on the panel",
     "screenshot": "output/playwright/login-gate.png"
-  }
+  },
+  "chineseInterface": {
+    "cause": "Codex only uses its bundled translations when the remote experiment 72216192 enable_i18n (ab.chatgpt.com) allows it; unreachable in mainland China so the default false applies",
+    "fix": "assistant adapts initialize-app-host-services-*.js at load: the enable_i18n default becomes true; one exact match or the file loads unchanged; Chinese interfaces reload once",
+    "scope": "web UI only; the native window menu (File/Edit/View/Help) follows the Windows display language"
+  },
+  "imageInputs": {
+    "cause": "the assistant catalog marked models text-only by default (input_modalities [text]) whenever the relay did not declare them",
+    "fix": "commit 3569c81 included in this build: unknown capabilities are omitted so Codex keeps text+image; explicit relay declarations still apply",
+    "relayCheck": "2026-11-05 gpt-6.1-sol, gpt-6-luna, gpt-6-sol answered a PNG correctly; gpt-6.1-terra returned 503 at the time"
+  },
+  "installerCodexPage": "plain status page without radio buttons; existing Codex is always kept with no unverified-version dialog; screenshot output/installer-page-1.png"
 }
