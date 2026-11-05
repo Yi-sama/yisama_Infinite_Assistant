@@ -3,8 +3,8 @@
   "releaseDate": "2026-11-04",
   "installer": {
     "file": "Yisama-Setup-1.2.0.exe",
-    "sha256": "3c2e52ecd23f4d16d9da5600d97ae875b8dc11c95bfed15cfbd800ed923925f5",
-    "bytes": 27543894,
+    "sha256": "f418d8741433537d3736f95f7e8bafeef7214e2ab2146504034f0b56089ef0ff",
+    "bytes": 27548791,
     "signed": false
   },
   "previousInstaller": {
@@ -86,5 +86,11 @@
     "fix": "assistant adapts app-initial-*.js: each gate call that matches exactly once becomes true; config requirements and experimental features still apply (live check: requirements null, browser_use_external and computer_use enabled)",
     "verified": "2026-11-05 live Codex settings > 电脑操控: Chrome row now offers 安装 for the extension; screenshot output/computer-use-settings.png",
     "cache": "the assistant reload now disables the renderer cache for that reload, because memory-cached modules from an older adapter were reused even with ignoreCache"
+  },
+  "chatBranching": {
+    "symptom": "toast 创建聊天分支失败; no thread/fork request reached app-server",
+    "cause": "desktop log: AppServerForkNotReadyError execution-config-loading; readPermissionRefreshEnabled returns null when remote experiment assignments are missing, which Codex treats as still loading",
+    "fix": "assistant adapts renderer-app-server-managers-*.js: values.permissionRefresh??null becomes ??!1 (the value Codex uses when experiments load without one); one exact match or unchanged",
+    "verified": "unit tests and real chunk only; branching not yet retried after the fix"
   }
 }
