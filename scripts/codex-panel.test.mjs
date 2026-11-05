@@ -67,7 +67,10 @@ async function fixture(t, viewport = { width: 1280, height: 800 }, options = {})
     ...response,
   })
   const open = async (data) => {
-    await page.locator('[data-testid="assistant-badge"]').click()
+    const badge = page.locator('[data-testid="assistant-badge"]')
+    // A signed-out user's panel opens by itself after the first status; the badge would close it.
+    if ((await badge.getAttribute('aria-expanded')) === 'true') return
+    await badge.click()
     await respond(await next('status'), { ok: true, data })
   }
   return { page, commands, next, respond, open }
@@ -860,4 +863,57 @@ test('one click on create order still creates it while the typed amount is being
   assert.deepEqual({ amount: pay.amount, method: pay.paymentMethod }, { amount: 5, method: 'alipay' })
   await respond(pay, { ok: true, data: { paymentUrl: 'https://pay.example.test/checkout/1', fields: {}, amount: 5 } })
   assert.equal(await page.locator('[data-testid="recharge-payment"]').isVisible(), true)
+})
+
+test('signed-out users get the panel opened and the page dimmed so the official sign-in is not used', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond } = app
+  const gate = page.locator('[data-testid="login-gate"]')
+  // Nothing covers the page before the first status answer, so a signed-in user never sees a flash.
+  assert.equal(await gate.isVisible(), false)
+  await respond(await next('status'), { ok: true, data: loggedOut })
+  await respond(await next('authOptions'), { ok: true, data: authOptions() })
+  assert.equal(await page.locator('.yisama-panel, [data-testid="assistant-badge"]').first().isVisible(), true)
+  assert.equal(await gate.isVisible(), true)
+  const box = await gate.boundingBox()
+  assert.deepEqual([box.x, box.y, box.width, box.height], [0, 0, 1280, 800])
+  assert.match(await gate.textContent(), /YisamaAPI 账号登录/)
+  assert.match(await gate.textContent(), /Sign in/)
+  // The panel stays above the dim layer and clicking the layer does not dismiss it.
+  await gate.click({ position: { x: 100, y: 100 } })
+  assert.equal(await page.locator('[data-testid="auth-username"]').isVisible(), true)
+  assert.equal(await gate.isVisible(), true)
+  await page.locator('[data-testid="auth-username"]').click()
+  await fs.mkdir(output, { recursive: true })
+  await page.screenshot({ path: path.join(output, 'login-gate.png') })
+  // Closing the panel releases the page; it is not re-opened by later status polls.
+  await page.locator('[data-testid="close"]').click()
+  assert.equal(await gate.isVisible(), false)
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.receive({ id: -1, ok: true }))
+})
+
+test('the dim layer disappears after sign-in and never appears for a signed-in user', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond } = app
+  const gate = page.locator('[data-testid="login-gate"]')
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  assert.equal(await gate.isVisible(), false)
+  assert.equal(await page.locator('[data-testid="auth-username"]').isVisible(), false)
+})
+
+test('the sign-in hint can be turned off for good', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond } = app
+  const gate = page.locator('[data-testid="login-gate"]')
+  await respond(await next('status'), { ok: true, data: loggedOut })
+  await respond(await next('authOptions'), { ok: true, data: authOptions() })
+  assert.equal(await gate.isVisible(), true)
+  await page.locator('[data-testid="login-gate-dismiss"]').click()
+  assert.equal(await gate.isVisible(), false)
+  // The panel itself stays open so the user can still sign in.
+  assert.equal(await page.locator('[data-testid="auth-username"]').isVisible(), true)
+  assert.equal(await page.evaluate(() => localStorage.getItem('yisama-infinite-assistant-login-hint-dismissed-v1')), '1')
 })

@@ -31,6 +31,40 @@ if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') process.env.NODE_TLS_REJEC
 
 class UserError extends Error {}
 
+// Domestic users reach the relay through the Chengdu proxy when Cloudflare is unreachable.
+// Sessions stay bound to the logical origin; only the transport host changes.
+const ROUTE_FALLBACKS = new Map([[DEFAULT_ORIGIN, ['https://api-cn.yisama.asia']]])
+const preferredRoute = new Map()
+const FIRST_ROUTE_TIMEOUT = 8000
+const LAST_ROUTE_TIMEOUT = 30000
+
+export function routesFor(origin) {
+  const all = [origin, ...(ROUTE_FALLBACKS.get(origin) || [])]
+  const preferred = preferredRoute.get(origin)
+  return preferred && all.includes(preferred) ? [preferred, ...all.filter((route) => route !== preferred)] : all
+}
+
+// Only a thrown (connection-level) failure moves to the next route; an HTTP answer never does.
+export async function withRoute(origin, send, { retry = true } = {}) {
+  const routes = routesFor(origin)
+  let failure
+  for (const [index, base] of routes.entries()) {
+    try {
+      const result = await send(base, index < routes.length - 1 ? FIRST_ROUTE_TIMEOUT : LAST_ROUTE_TIMEOUT)
+      preferredRoute.set(origin, base)
+      return result
+    } catch (error) {
+      failure = error
+      if (!retry) break
+    }
+  }
+  throw failure
+}
+
+function cookiesForHost(cookies, base) {
+  return (cookies || []).map((cookie) => ({ ...cookie, domain: new URL(base).hostname }))
+}
+
 let desktopChallenge = null
 const desktopCache = new Map()
 const CATALOG_TTL = 30000
@@ -97,10 +131,16 @@ function desktopAuthError(code, message) {
 }
 
 async function assistantAuthRequest(context, pathname, { method = 'POST', body } = {}) {
-  const url = new URL(`/api/assistant/auth/${pathname}`, originFromEnvironment()).href
+  const origin = originFromEnvironment()
+  // Registration and password reset are not repeated on another route after a lost connection.
+  const repeatable = method === 'GET' || pathname.startsWith('login')
   let response
   try {
-    response = await context.fetch(url, { method, data: body, maxRedirects: 0 })
+    response = await withRoute(origin, async (base, timeout) => {
+      await context.addCookies(cookiesForHost((await context.storageState()).cookies, base))
+      return context.fetch(new URL(`/api/assistant/auth/${pathname}`, base).href,
+        { method, data: body, maxRedirects: 0, timeout })
+    }, { retry: repeatable })
   } catch {
     throw desktopAuthError('AUTH_CONNECTION', '暂时无法连接账号服务，请检查网络后重试。')
   }
@@ -289,10 +329,10 @@ export async function requestApi(pathname, {
   const headers = { Accept: 'application/json' }
   if (token) headers.Authorization = `Bearer ${token}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  const response = await fetchImpl(new URL(`${apiPrefix}${pathname}`, origin), {
-    method, headers, redirect: 'error', signal: AbortSignal.timeout(30000),
+  const response = await withRoute(origin, (base, timeout) => fetchImpl(new URL(`${apiPrefix}${pathname}`, base), {
+    method, headers, redirect: 'error', signal: AbortSignal.timeout(timeout),
     body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  }), { retry: method === 'GET' || pathname.startsWith('/user/login') })
   const payload = await response.json().catch(() => null)
   if (!response.ok || !payload || payload.success === false) throw apiError(response.status)
   return payload
@@ -423,13 +463,17 @@ export async function authenticatedSession({ interactive = true, onPortalOpen } 
         timeout: 30000,
       })
       try {
-        const response = await context.post(new URL('/api/user/auth/refresh', origin).href, { maxRedirects: 0 })
+        const response = await withRoute(origin, async (base, timeout) => {
+          await context.addCookies(cookiesForHost((await context.storageState()).cookies, base))
+          return context.post(new URL('/api/user/auth/refresh', base).href, { maxRedirects: 0, timeout })
+        })
         const payload = await response.json().catch(() => null)
         if (response.ok() && payload?.success && payload.data?.access_token) {
           session = {
             origin, token: accessToken(payload), expiresAt: payload.data.access_expires_at,
             sessionId: payload.data.session?.sid,
-            cookies: (await context.storageState()).cookies.filter((cookie) => cookie.name === 'new_api_refresh'),
+            cookies: cookiesForHost((await context.storageState()).cookies
+              .filter((cookie) => cookie.name === 'new_api_refresh'), origin),
           }
           await writeJson(paths().session, session)
           const current = { ...session, user: payload.data.user }
@@ -1133,14 +1177,15 @@ export async function desktopLogin({ username, password, loginId, twoFactorCode 
       const expiresAt = Math.min(Number(payload.data.expires_at) * 1000 || Infinity, Date.now() + 5 * 60 * 1000)
       desktopChallenge = {
         id: randomUUID(), origin, expiresAt, flowToken: payload.data.flow_token,
-        cookies: (await context.storageState()).cookies,
+        cookies: cookiesForHost((await context.storageState()).cookies, origin),
       }
       return { auth: { step: 'twoFactor', loginId: desktopChallenge.id } }
     }
     const session = {
       origin, token: accessToken(payload), expiresAt: payload.data.access_expires_at,
       sessionId: payload.data.session?.sid,
-      cookies: (await context.storageState()).cookies.filter((cookie) => cookie.name === 'new_api_refresh'),
+      cookies: cookiesForHost((await context.storageState()).cookies
+        .filter((cookie) => cookie.name === 'new_api_refresh'), origin),
     }
     user = payload.data?.user
     if (!Number.isInteger(user?.id) || typeof user?.username !== 'string') {

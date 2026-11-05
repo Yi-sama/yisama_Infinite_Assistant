@@ -11,11 +11,15 @@ import {
   desktopRestartRequired,
   formatQuota,
   patchCodexConfig,
+  requestApi,
+  routesFor,
   safeError,
   signIn,
   submitPaymentForm,
 } from './yisama.mjs'
 import { makeModelCatalog, providerConfig, restoreOwned } from './codex-config.mjs'
+
+const PRIMARY = 'https://api.yisama.asia'
 
 test('defaults to All and preserves available groups', () => {
   assert.deepEqual(chooseGroup(undefined, ['auto', 'default', 'premium']), {
@@ -307,4 +311,33 @@ test('pricing classification keeps only chat models and hides media groups', () 
     ['gpt-x', 'claude-x', 'gpt-free-call', 'unknown-llm'])
   assert.deepEqual(textModels(['gpt-x', 'gpt-image-2'], classifyPricing(null)), ['gpt-x'],
     'without pricing data the name-based filter still applies')
+})
+
+test('a lost connection to the primary host falls back to the Chengdu route and remembers it', async () => {
+  const hosts = []
+  const fetchImpl = async (url) => {
+    hosts.push(new URL(url).host)
+    if (new URL(url).host === 'api.yisama.asia') throw new TypeError('fetch failed')
+    return Response.json({ success: true, data: { ok: 1 } })
+  }
+  assert.deepEqual((await requestApi('/status', { origin: PRIMARY, fetchImpl })).data, { ok: 1 })
+  assert.deepEqual(hosts, ['api.yisama.asia', 'api-cn.yisama.asia'])
+  assert.deepEqual(routesFor(PRIMARY), ['https://api-cn.yisama.asia', PRIMARY])
+  hosts.length = 0
+  await requestApi('/status', { origin: PRIMARY, fetchImpl })
+  assert.deepEqual(hosts, ['api-cn.yisama.asia'])
+})
+
+test('an HTTP answer never switches route, and state-changing calls are not repeated elsewhere', async () => {
+  const hosts = []
+  await assert.rejects(requestApi('/status', { origin: 'https://api.yisama.asia', fetchImpl: async (url) => {
+    hosts.push(new URL(url).host)
+    return Response.json({ success: false }, { status: 401 })
+  } }), (error) => error.status === 401)
+  assert.equal(hosts.length, 1)
+  const posts = []
+  await assert.rejects(requestApi('/token/', { origin: 'https://other.example', method: 'POST', body: {},
+    fetchImpl: async (url) => { posts.push(url.toString()); throw new TypeError('fetch failed') } }))
+  assert.equal(posts.length, 1)
+  assert.deepEqual(routesFor('https://other.example'), ['https://other.example'])
 })

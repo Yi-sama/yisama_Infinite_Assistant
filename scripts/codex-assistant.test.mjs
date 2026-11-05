@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash, webcrypto } from 'node:crypto'
 import { runInNewContext } from 'node:vm'
 import {
-  adaptNativeFastSource, installNativeFast, syncNativeModels, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
+  adaptNativeFastSource, adaptNativeI18nSource, adaptNativeGateSource, adaptNativeRuntimeSource, adaptNativeHostSource, installHostFallback, installNativeFast, syncNativeModels, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
   restartAssistant, restartCodex, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
 } from './codex-assistant.mjs'
 
@@ -36,6 +36,90 @@ test('native controls adapt only the inspected hook sites and reject missing or 
     nativeSource.replace(',conversationId:e', ''), nativeSource.replace('hostId:i,', ''),
     nativeSource.replace('setServiceTier:P}', 'setServiceTier:P()}'), nativeSource.replace('select:', 'pick:')]) {
     assert.throws(() => adaptNativeFastSource(source), /does not support/)
+  }
+})
+
+test('translations are allowed locally only at the one inspected experiment default', () => {
+  const source = 'let s=Ul(`72216192`),c;c=s?.get(`enable_i18n`,!1);let u=s?.get(`locale_source`,`IDE`);'
+  const adapted = adaptNativeI18nSource(source)
+  assert.match(adapted, /c=s\?\.get\(`enable_i18n`,!0\)\|\|!0;/)
+  assert.match(adapted, /`locale_source`,`IDE`/)
+  assert.match(adapted, /__yisamaNativeI18nSourceReady=true/)
+  assert.doesNotThrow(() => new Function(adapted))
+  // Unknown or ambiguous builds are left exactly as shipped.
+  for (const other of ['let a=1;', source + source]) {
+    assert.equal(adaptNativeI18nSource(other).replace(/\nwindow\.__yisamaNativeI18nSourceReady=true;\n$/, ''), other)
+  }
+})
+
+test('browser and computer use experiments are allowed locally only at exact gate calls', () => {
+  const source = 'let a=Mb(`410065390`),b=Mb(`410262010`),c=Mb(`1506311413`),d=Mb(`72216192`);'
+  const adapted = adaptNativeGateSource(source)
+  assert.match(adapted, /a=Mb\(!0\),b=Mb\(!0\),c=Mb\(!0\),d=Mb\(`72216192`\);/)
+  assert.match(adapted, /__yisamaNativeGatesSourceReady=true/)
+  assert.doesNotThrow(() => new Function(adapted))
+  // A repeated gate is ambiguous and stays as shipped; the others are still allowed.
+  const repeated = adaptNativeGateSource(source + 'x=Mb(`410065390`);')
+  assert.equal((repeated.match(/`410065390`/g) || []).length, 2)
+  assert.match(repeated, /b=Mb\(!0\)/)
+})
+
+test('chat branching no longer waits forever for a missing permission-refresh experiment', () => {
+  const source = 'let o={async readPermissionRefreshEnabled(){if(A)return(await A.read())?.values.permissionRefresh??null;return null}};'
+  const adapted = adaptNativeRuntimeSource(source)
+  assert.match(adapted, /\?\.values\.permissionRefresh\?\?!1;return null\}/)
+  assert.match(adapted, /__yisamaNativeRuntimeSourceReady=true/)
+  assert.doesNotThrow(() => new Function(adapted))
+  for (const other of ['let a=1;', source + source]) {
+    assert.equal(adaptNativeRuntimeSource(other).replace(/\nwindow\.__yisamaNativeRuntimeSourceReady=true;\n$/, ''), other)
+  }
+})
+
+test('missing desktop experiment assignments fall back to all-off defaults only after a grace period', async () => {
+  const realNow = Date.now
+  let now = 1000
+  Date.now = () => now
+  try {
+    class Evaluations {
+      #value = null
+      set(value) { this.#value = value }
+      async readExecutionAssignments() { return this.#value }
+      async hasReadyExecutionAssignments() { return this.#value != null }
+      publish(value) { return `published:${value}` }
+    }
+    const evaluations = new Evaluations()
+    const host = installHostFallback({ statsigEvaluations: evaluations, other: 1 })
+    assert.equal(host.other, 1)
+    assert.equal(await host.statsigEvaluations.readExecutionAssignments(), null, 'still loading at startup')
+    assert.equal(await host.statsigEvaluations.hasReadyExecutionAssignments(), false)
+    assert.equal(host.statsigEvaluations.publish('x'), 'published:x', 'other methods keep their private state')
+    now += 10001
+    const fallback = await host.statsigEvaluations.readExecutionAssignments()
+    assert.deepEqual(fallback.defaultEnableFeatures, {})
+    assert.equal(fallback.values.permissionRefresh, false)
+    assert.equal(await host.statsigEvaluations.hasReadyExecutionAssignments(), true)
+    const real = { identity: { userId: 'u' }, values: { permissionRefresh: true }, defaultEnableFeatures: { a: 1 } }
+    evaluations.set(real)
+    assert.equal(await host.statsigEvaluations.readExecutionAssignments(), real, 'real assignments always win')
+    assert.equal(installHostFallback(host), host, 'wrapping is idempotent')
+    assert.equal(installHostFallback({ other: 2 }).other, 2, 'hosts without evaluations are unchanged')
+    const frozen = installHostFallback(Object.freeze({ statsigEvaluations: new Evaluations() }))
+    assert.equal(frozen.statsigEvaluations.__yisamaFallback, true)
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test('host services are wrapped only at the one setter of the telemetry host variable', () => {
+  const source = 'function a(e){x=e}function b(e){KQ=e}var x,KQ;function c(){let t=KQ?.performanceTelemetry;return KQ?.tracing}'
+  const adapted = adaptNativeHostSource(source)
+  assert.match(adapted, /function a\(e\)\{x=e\}/)
+  assert.match(adapted, /function b\(e\)\{KQ=\(function installHostFallback/)
+  assert.match(adapted, /__yisamaNativeHostSourceReady=true/)
+  assert.doesNotThrow(() => new Function(adapted))
+  for (const other of ['let a=1;', source + 'x?.performanceTelemetry;',
+    source + 'function d(e){KQ=e}']) {
+    assert.equal(adaptNativeHostSource(other).replace(/\nwindow\.__yisamaNativeHostSourceReady=true;\n$/, ''), other)
   }
 })
 
@@ -89,7 +173,7 @@ test('native controls preserve the 26.1027 team selector and capture host outsid
   controller.dispose()
 })
 
-function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true, serverDelay = 0 } = {}) {
+function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true, serverDelay = 0, lang } = {}) {
   const listeners = new Set()
   const calls = []
   const authCalls = []
@@ -122,6 +206,7 @@ function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = t
   window.top = window
   runInNewContext(`(${installNativeFast.toString()})()`, {
     window, location: { href: CODEX_PAGE }, crypto: webcrypto, TextEncoder, Uint32Array, Uint8Array,
+    ...(lang ? { document: { documentElement: { lang } } } : {}),
   })
   const controller = window.__yisamaNativeFast
   controller.authorize({ apiKey: key, fastAvailable: true, fastEnabled: true })
@@ -131,6 +216,21 @@ function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = t
   }
   return { window, controller, native, calls, authCalls, key }
 }
+
+test('only a Chinese interface reloads once to pick up the local translation and feature switches', () => {
+  for (const [lang, expected] of [['zh-CN', true], ['zh', true], ['en-US', false], ['zu', false]]) {
+    const { controller, window } = fastFixture({ lang })
+    assert.equal(controller.needsReload(), expected, lang)
+    window.__yisamaNativeI18nSourceReady = true
+    assert.equal(controller.needsReload(), expected, `${lang}: feature gates still missing`)
+    window.__yisamaNativeGatesSourceReady = true
+    assert.equal(controller.needsReload(), expected, `${lang}: runtime defaults still missing`)
+    window.__yisamaNativeRuntimeSourceReady = true
+    assert.equal(controller.needsReload(), expected, `${lang}: host fallback still missing`)
+    window.__yisamaNativeHostSourceReady = true
+    assert.equal(controller.needsReload(), false, lang)
+  }
+})
 
 test('native Fast updates the native UI before the server and preserves native account access', async () => {
   const { controller, native, calls, authCalls, key, window } = fastFixture()
@@ -608,6 +708,9 @@ test('incompatible native Fast resources cannot cause a renderer reload loop', a
   assert.equal((await target.syncModels({})).status, 'pending')
   assert.equal((await target.syncModels({})).status, 'synced')
   assert.equal(calls.filter((method) => method === 'Page.reload').length, 1)
+  // The single reload bypasses modules cached from an earlier adapter.
+  assert.deepEqual(calls.slice(calls.indexOf('Page.reload') - 2, calls.indexOf('Page.reload') + 1),
+    ['Network.enable', 'Network.setCacheDisabled', 'Page.reload'])
   assert.equal(calls.at(-1), 'Runtime.evaluate')
   assert.match(reports[0], /Native model controls: user-requested page reload\.$/)
   assert.equal(reports[1], 'The native model controls did not load. This Codex build may be incompatible.')
@@ -645,12 +748,31 @@ test('native asset interception is scoped, removes stale body headers, and relea
     responseHeaders: [{ name: 'Content-Length', value: '10' }, { name: 'Content-Type', value: 'text/javascript' }],
   })
   assert.deepEqual(calls.at(-1).params.responseHeaders, [{ name: 'Content-Type', value: 'text/javascript' }])
-  assert.equal(Buffer.from(calls.at(-1).params.body, 'base64').toString(), adaptNativeFastSource(nativeSource))
+  assert.equal(Buffer.from(calls.at(-1).params.body, 'base64').toString(), adaptNativeFastSource(adaptNativeGateSource(nativeSource)))
   const before = calls.length
   await assert.rejects(target.adaptNativeScript({ requestId: 'other', responseStatusCode: 200,
     request: { url: 'https://example.com/app-initial-438d1df57f70.js' },
   }), /could not be adapted/)
   assert.deepEqual(calls.slice(before), [{ method: 'Fetch.continueRequest', params: { requestId: 'other' } }])
+})
+
+test('an incompatible Fast adapter still delivers the feature gates and reports the problem', async () => {
+  const calls = []
+  const reports = []
+  const source = 'let g=Mb(`1506311413`);'
+  const target = new AssistantTarget({}, null, { report: (message) => reports.push(message), connectionFactory: () => ({
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'Fetch.getResponseBody') return { body: source }
+      return {}
+    },
+  }) })
+  await target.adaptNativeScript({ requestId: 'gates', responseStatusCode: 200,
+    request: { url: 'app://-/assets/app-initial-ad16eaadf81f.js' }, responseHeaders: [] })
+  const fulfilled = calls.find((call) => call.method === 'Fetch.fulfillRequest')
+  assert.match(Buffer.from(fulfilled.params.body, 'base64').toString(), /g=Mb\(!0\)/)
+  assert.equal(calls.some((call) => call.method === 'Fetch.continueRequest'), false)
+  assert.equal(reports.length, 1)
 })
 
 test('replacement detaches from the old helper and waits until spawning succeeds', async () => {

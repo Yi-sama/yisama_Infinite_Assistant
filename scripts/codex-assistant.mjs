@@ -16,6 +16,101 @@ const ASSISTANT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 export const UPDATE_FILE = path.join(ASSISTANT_ROOT, 'update.json')
 const NATIVE_FAST_ASSET = 'app://-/assets/app-initial-*.js'
 const NATIVE_FAST_ASSET_URL = /^app:\/\/-\/assets\/app-initial-[0-9a-f]+\.js$/
+const NATIVE_I18N_ASSET = 'app://-/assets/initialize-app-host-services-*.js'
+const NATIVE_I18N_ASSET_URL = /^app:\/\/-\/assets\/initialize-app-host-services-[0-9a-f]+\.js$/
+const NATIVE_RUNTIME_ASSET = 'app://-/assets/renderer-app-server-managers-*.js'
+const NATIVE_RUNTIME_ASSET_URL = /^app:\/\/-\/assets\/renderer-app-server-managers-[0-9a-f]+\.js$/
+const NATIVE_HOST_ASSET = 'app://-/assets/app-shared-*.js'
+const NATIVE_HOST_ASSET_URL = /^app:\/\/-\/assets\/app-shared-[0-9a-f]+\.js$/
+
+// Codex ships its full translations but only uses them once a remote experiment
+// (unreachable from mainland China) allows it. Allow them locally; the user's
+// language setting still decides which one is shown. Unknown builds load unchanged.
+export function adaptNativeI18nSource(source) {
+  const gate = /(\.get\(`enable_i18n`,)!1\)/g
+  const matches = [...source.matchAll(gate)]
+  const patched = matches.length === 1 ? source.replace(gate, '$1!0)||!0') : source
+  return patched + '\nwindow.__yisamaNativeI18nSourceReady=true;\n'
+}
+
+// Browser control, the in-app browser and Computer Use are also held back by remote
+// experiments that never load from mainland China. Codex's own settings and the
+// organization requirements still decide whether each feature may run.
+const NATIVE_FEATURE_GATES = ['410065390', '410262010', '1506311413']
+
+export function adaptNativeGateSource(source) {
+  let patched = source
+  for (const gate of NATIVE_FEATURE_GATES) {
+    const call = new RegExp(String.raw`([\w$]+)\(\`${gate}\`\)`, 'g')
+    if ([...patched.matchAll(call)].length === 1) patched = patched.replace(call, '$1(!0)')
+  }
+  return patched + '\nwindow.__yisamaNativeGatesSourceReady=true;\n'
+}
+
+// Branching a chat waits for the permission-refresh experiment. Without remote
+// assignments it stayed "loading" forever; use the value Codex itself uses when
+// its experiments load without one.
+export function adaptNativeRuntimeSource(source) {
+  const pending = /(\.values\.permissionRefresh\?\?)null/g
+  const matches = [...source.matchAll(pending)]
+  const patched = matches.length === 1 ? source.replace(pending, '$1!1') : source
+  return patched + '\nwindow.__yisamaNativeRuntimeSourceReady=true;\n'
+}
+
+// Serialized into the renderer. Codex's desktop process returns no execution assignments
+// when its experiment client cannot reach OpenAI, and branching, scheduled work and
+// project setup then wait forever. After a short grace period, answer with the same
+// all-off assignments Codex itself uses when experiments load without values.
+export function installHostFallback(host) {
+  const evaluations = host?.statsigEvaluations
+  if (!evaluations || evaluations.__yisamaFallback) return host
+  const startedAt = Date.now()
+  const late = () => Date.now() - startedAt > 10000
+  const defaults = () => ({
+    identity: { userId: null, accountId: null, authMethod: null, stableId: null },
+    values: { experimentalFeatureGates: {}, toolCatalog: { restrictedGates: {}, gates: {}, configs: {} },
+      permissionRefresh: false, personality: {}, instructions: {} },
+    defaultEnableFeatures: {},
+  })
+  const wrapped = new Proxy(evaluations, {
+    get(target, key) {
+      if (key === '__yisamaFallback') return true
+      if (key === 'readExecutionAssignments') {
+        return async (...args) => (await target.readExecutionAssignments(...args)) ?? (late() ? defaults() : null)
+      }
+      if (key === 'hasReadyExecutionAssignments') {
+        return async (...args) => (await target.hasReadyExecutionAssignments(...args)) || late()
+      }
+      const value = Reflect.get(target, key, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  try {
+    host.statsigEvaluations = wrapped
+    if (host.statsigEvaluations === wrapped) return host
+  } catch {}
+  // A frozen host cannot be changed or proxied directly; forward through an empty target instead.
+  return new Proxy({}, {
+    get: (_target, key) => key === 'statsigEvaluations' ? wrapped : Reflect.get(host, key, host),
+    has: (_target, key) => key in host,
+  })
+}
+
+// The host services object is the module value read with ?.performanceTelemetry; wrap it where it is stored.
+export function adaptNativeHostSource(source) {
+  const names = new Set([...source.matchAll(/([\w$]+)\?\.performanceTelemetry/g)].map((match) => match[1]))
+  let patched = source
+  if (names.size === 1) {
+    const [name] = names
+    const escaped = name.replace(/\$/g, '\\$')
+    const setter = new RegExp(String.raw`function ([\w$]+)\(e\)\{${escaped}=e\}`, 'g')
+    if ([...source.matchAll(setter)].length === 1) {
+      patched = source.replace(setter, (_match, fn) =>
+        `function ${fn}(e){${name}=(${installHostFallback.toString()})(e)}`)
+    }
+  }
+  return patched + '\nwindow.__yisamaNativeHostSourceReady=true;\n'
+}
 
 // Codex's minified names change between builds, so each hook is found by its code shape
 // and must match exactly once. Neither UI markup nor authentication is replaced.
@@ -126,7 +221,13 @@ export function installNativeFast() {
       const catalogReasoning = authorization?.provider === 'yisama' &&
         Object.values(authorization.modelSettings || {}).some((model) =>
           model.reasoningEfforts?.length)
-      return !disposed && ((authorization?.fastAvailable === true && window.__yisamaNativeFastSourceReady !== true) ||
+      // Only Chinese users need a reload for the translation switch.
+      const chinese = /^zh(-|$)/i.test(globalThis.document?.documentElement?.lang || globalThis.navigator?.language || '')
+      return !disposed && ((chinese && (window.__yisamaNativeI18nSourceReady !== true ||
+        window.__yisamaNativeGatesSourceReady !== true ||
+        window.__yisamaNativeRuntimeSourceReady !== true ||
+        window.__yisamaNativeHostSourceReady !== true)) ||
+        (authorization?.fastAvailable === true && window.__yisamaNativeFastSourceReady !== true) ||
         (catalogReasoning && window.__yisamaNativeReasoningSourceReady !== true))
     },
     access(host, method) {
@@ -502,18 +603,27 @@ export class AssistantTarget {
 
   async adaptNativeScript(params) {
     try {
-      if (!NATIVE_FAST_ASSET_URL.test(params.request.url) || params.responseStatusCode !== 200) {
+      const fast = NATIVE_FAST_ASSET_URL.test(params.request.url)
+      const adapt = fast ? adaptNativeGateSource
+        : NATIVE_I18N_ASSET_URL.test(params.request.url) ? adaptNativeI18nSource
+          : NATIVE_RUNTIME_ASSET_URL.test(params.request.url) ? adaptNativeRuntimeSource
+            : NATIVE_HOST_ASSET_URL.test(params.request.url) ? adaptNativeHostSource : null
+      if (!adapt || params.responseStatusCode !== 200) {
         throw new ConnectionError('The native Fast module could not be adapted.')
       }
       const response = await this.connection.call('Fetch.getResponseBody', { requestId: params.requestId })
       const source = response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body
-      const patched = adaptNativeFastSource(source)
+      let patched = adapt(source)
+      let fastError = null
+      // An incompatible Fast adapter must not also drop the feature gates.
+      if (fast) try { patched = adaptNativeFastSource(patched) } catch (error) { fastError = error }
       await this.connection.call('Fetch.fulfillRequest', {
         requestId: params.requestId, responseCode: 200,
         responseHeaders: (params.responseHeaders || []).filter((header) =>
           !['content-length', 'content-encoding'].includes(header.name.toLowerCase())),
         body: Buffer.from(patched).toString('base64'),
       })
+      if (fastError) this.report(connectionMessage(fastError))
     } catch (error) {
       await this.connection.call('Fetch.continueRequest', { requestId: params.requestId })
       throw error
@@ -584,7 +694,12 @@ export class AssistantTarget {
       if (synced.reloadNativeFast !== true) return synced
       this.nativeFastReloadAttempted = true
       this.report(`${new Date().toISOString()} Native model controls: user-requested page reload.`)
+      // The renderer's memory cache can return modules adapted by an earlier assistant
+      // build even with ignoreCache, so bypass it for this one reload.
+      await this.connection.call('Network.enable')
+      await this.connection.call('Network.setCacheDisabled', { cacheDisabled: true })
       await this.connection.call('Page.reload', { ignoreCache: true })
+      setTimeout(() => this.connection.call('Network.disable').catch(() => {}), 20000).unref?.()
       return { status: 'pending' }
     }
     return synced
@@ -600,7 +715,10 @@ export class AssistantTarget {
     await this.connection.call('Runtime.enable')
     await this.connection.call('Runtime.addBinding', { name: BINDING })
     await this.connection.call('Fetch.enable', {
-      patterns: [{ urlPattern: NATIVE_FAST_ASSET, requestStage: 'Response' }],
+      patterns: [{ urlPattern: NATIVE_FAST_ASSET, requestStage: 'Response' },
+        { urlPattern: NATIVE_I18N_ASSET, requestStage: 'Response' },
+        { urlPattern: NATIVE_RUNTIME_ASSET, requestStage: 'Response' },
+        { urlPattern: NATIVE_HOST_ASSET, requestStage: 'Response' }],
     })
     const source = `${makeAssistantScript()}\n;(${installNativeFast.toString()})();`
     const restored = await this.connection.call('Page.addScriptToEvaluateOnNewDocument', { source })

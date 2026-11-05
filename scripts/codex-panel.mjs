@@ -36,6 +36,7 @@ export function installAssistantUI(options = {}) {
     pendingGroup: '',
     error: '',
     authReady: false,
+    statusKnown: false,
     authMode: 'login',
     registrationEnabled: false,
     passwordLoginEnabled: false,
@@ -57,10 +58,13 @@ export function installAssistantUI(options = {}) {
   let foregroundVersion = 0
   let latestStatusId = 0
   let nativeReloadRequested = false
+  let autoOpened = false
+  const gateKey = 'yisama-infinite-assistant-login-hint-dismissed-v1'
   let dragging = null
   let suppressClick = false
 
   const safe = (fn, fallback) => { try { return fn() } catch { return fallback } }
+  let gateDismissed = safe(() => window.localStorage.getItem(gateKey) === '1', false)
   const addListener = (node, event, listener, options) => {
     node.addEventListener(event, listener, options)
     cleanups.push(() => node.removeEventListener(event, listener, options))
@@ -150,6 +154,19 @@ export function installAssistantUI(options = {}) {
     @keyframes y-twinkle{50%{transform:scale(1.7) rotate(45deg);fill:#fff}}
     ${R} .y-grad-text{background:var(--y-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
 
+    ${R} .yisama-gate{position:fixed;inset:0;--gx:100%;--gy:50%;background:radial-gradient(circle at var(--gx) var(--gy),rgba(7,7,11,.45) 0,rgba(7,7,11,.64) 320px,rgba(7,7,11,.82) 760px);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);pointer-events:auto;cursor:default;-webkit-app-region:no-drag;animation:y-gate-in .32s var(--y-ease)}
+    ${R} .yisama-gate__tip{position:absolute;width:268px;padding:18px 18px 14px;border:1px solid var(--y-line2);border-radius:16px;background:var(--y-bg2);box-shadow:0 24px 60px -20px rgba(0,0,0,.9);color:var(--y-fg);font-family:var(--y-sans)}
+    ${R} .yisama-gate__tip::after{content:'';position:absolute;top:var(--ay,32px);right:-7px;width:12px;height:12px;border:solid var(--y-line2);border-width:1px 1px 0 0;background:var(--y-bg2);transform:rotate(45deg)}
+    ${R} .yisama-gate__tip[data-side="below"]::after{display:none}
+    ${R} .yisama-gate__step{display:flex;align-items:center;gap:8px;color:var(--y-fg3);font:500 10.5px/1 var(--y-mono);letter-spacing:.08em;text-transform:uppercase}
+    ${R} .yisama-gate__step::before{content:'';width:6px;height:6px;border-radius:99px;background:var(--y-mag);box-shadow:0 0 0 4px rgba(224,96,192,.16)}
+    ${R} .yisama-gate__tip strong{display:block;margin-top:12px;font:700 17px/1.35 var(--y-sans)}
+    ${R} .yisama-gate__tip p{margin:8px 0 0;color:var(--y-fg2);font:12.5px/1.65 var(--y-sans)}
+    ${R} .yisama-gate__tip s{color:var(--y-fg3);text-decoration-color:rgba(255,138,122,.7)}
+    ${R} .yisama-gate__ok{display:block;margin:14px 0 0 auto;padding:7px 14px;border:1px solid var(--y-line2);border-radius:99px;color:var(--y-fg);font-size:12px;transition:background .2s,border-color .2s}
+    ${R} .yisama-gate__ok:hover{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.24)}
+    @keyframes y-gate-in{from{opacity:0}}
+    @media (prefers-reduced-motion:reduce){${R} .yisama-gate{animation:none}}
     ${R} .yisama-badge{position:fixed;display:inline-flex;align-items:center;gap:7px;max-width:min(128px,calc(100vw - 16px));height:32px;padding:0 12px 0 7px;border:1px solid transparent;border-radius:99px;background:linear-gradient(var(--y-bg2),var(--y-bg2)) padding-box,linear-gradient(var(--y-line2),var(--y-line2)) border-box;color:var(--y-fg);box-shadow:0 10px 30px -12px rgba(0,0,0,.7),0 0 0 1px rgba(0,0,0,.25);font:600 12px/1 var(--y-mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em;pointer-events:auto;touch-action:none;user-select:none;-webkit-app-region:no-drag;transition:transform .3s var(--y-ease),box-shadow .3s var(--y-ease),background .3s}
     ${R} .yisama-badge:hover,${R} .yisama-badge[aria-expanded="true"]{background:linear-gradient(var(--y-bg2),var(--y-bg2)) padding-box,var(--y-grad) border-box;box-shadow:0 12px 34px -10px rgba(224,96,192,.55),0 0 0 1px rgba(0,0,0,.25)}
     ${R} .yisama-badge:hover{transform:translateY(-1px)}
@@ -533,7 +550,14 @@ export function installAssistantUI(options = {}) {
   qqView.append(qqHead, qqCard)
   content.append(mainView, walletView, qqView)
   panel.append(header, content)
-  root.append(badge, panel)
+  const gate = el('div', { className: 'yisama-gate', hidden: '', 'data-testid': 'login-gate' })
+  const gateTip = el('div', { className: 'yisama-gate__tip' })
+  const gateText = el('p', {})
+  gateText.append('页面上 OpenAI 的 ', el('s', {}, 'Sign in'), ' 在国内无法使用。请在右侧登录或注册，登录后即可使用。')
+  const gateOk = el('button', { type: 'button', className: 'yisama-gate__ok', 'data-testid': 'login-gate-dismiss' }, '知道了，不再提示')
+  gateTip.append(el('span', { className: 'yisama-gate__step' }, '首次使用'), el('strong', {}, '用 YisamaAPI 账号登录'), gateText, gateOk)
+  gate.append(gateTip)
+  root.append(gate, badge, panel)
   document.documentElement.appendChild(root)
 
   const publicState = (data) => ({
@@ -772,9 +796,9 @@ export function installAssistantUI(options = {}) {
       ? `订单已创建：${payment.amount}。请在 10 分钟内完成支付，超时请重新创建订单。` : ''
     rechargePaymentButton.disabled = locked
   }
+  const margin = 8
   const placePanel = () => {
     if (panel.hidden) return
-    const margin = 8
     const gap = 12
     const anchor = badge.getBoundingClientRect()
     const width = panel.offsetWidth
@@ -789,6 +813,17 @@ export function installAssistantUI(options = {}) {
     panel.style.left = `${Math.round(left)}px`
     panel.style.top = `${Math.round(top)}px`
     panel.style.transformOrigin = `${Math.round(clamp(anchor.left + anchor.width / 2 - left, 0, width))}px ${above ? '100%' : '0'}`
+    placeGate(left, top, width)
+  }
+  const placeGate = (left, top, width) => {
+    if (gate.hidden) return
+    gate.style.setProperty('--gx', `${Math.round(left + width / 2)}px`)
+    gate.style.setProperty('--gy', `${Math.round(top + 120)}px`)
+    const tipWidth = gateTip.offsetWidth
+    const beside = left - tipWidth - 18 >= margin
+    gateTip.dataset.side = beside ? 'beside' : 'below'
+    gateTip.style.left = `${Math.round(beside ? left - tipWidth - 18 : clamp(left, margin, window.innerWidth - tipWidth - margin))}px`
+    gateTip.style.top = `${Math.round(beside ? Math.max(margin, top + 36) : margin)}px`
   }
   const render = () => {
     const quota = quotaLabel()
@@ -805,6 +840,8 @@ export function installAssistantUI(options = {}) {
       ? `余额 ${badgeLabel}，余额可能已过期。打开 yisama 无限助手`
       : `${state.loggedIn ? '余额 ' : ''}${badgeLabel}。打开 yisama 无限助手`)
     badge.setAttribute('aria-expanded', String(state.open))
+    // Cover the page only once the assistant is known to be signed out, and only while its panel is open.
+    gate.hidden = gateDismissed || !(state.open && state.statusKnown && !state.loggedIn)
     const opening = state.open && panel.hidden
     panel.hidden = !state.open
     panel.dataset.view = state.view
@@ -1226,6 +1263,11 @@ export function installAssistantUI(options = {}) {
     setOpen(!state.open)
   })
   addListener(closeButton, 'click', () => setOpen(false))
+  addListener(gateOk, 'click', () => {
+    gateDismissed = true
+    safe(() => window.localStorage.setItem(gateKey, '1'))
+    render()
+  })
   addListener(walletBackButton, 'click', () => showView('main'))
   addListener(qqBackButton, 'click', () => showView('main'))
   addListener(helpButton, 'click', () => showView('qq'))
@@ -1521,6 +1563,10 @@ export function installAssistantUI(options = {}) {
         }
       } else failure(entry, response.code)
       if (entry.action !== 'status') foregroundVersion += 1
+      if (entry.action === 'status' && response.ok === true) {
+        state.statusKnown = true
+        if (!state.loggedIn && !autoOpened) { autoOpened = true; state.open = true }
+      }
       render()
       if (startSetup) request('login')
       if (entry.action === 'status' && response.ok === true && !state.loggedIn && !state.authReady) request('authOptions')
