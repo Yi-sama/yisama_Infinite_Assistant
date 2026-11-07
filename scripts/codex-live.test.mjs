@@ -6,13 +6,17 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID, webcrypto } from 'node:crypto'
 import { runInNewContext } from 'node:vm'
+import { pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { configureCodex, makeModelCatalog } from './codex-config.mjs'
-import { syncNativeModels } from './codex-assistant.mjs'
+import { syncNativeModels as sourceSyncNativeModels } from './codex-assistant.mjs'
 
 const binary = process.env.YISAMA_CODEX_BIN
+const syncNativeModels = process.env.YISAMA_TEST_BUNDLED_ASSISTANT
+  ? (await import(pathToFileURL(process.env.YISAMA_TEST_BUNDLED_ASSISTANT).href)).syncNativeModels
+  : sourceSyncNativeModels
 
 for (const initiallyFast of [false, true]) test(`real Codex switches groups without interrupting an answer (${initiallyFast ? 'Fast catalog at launch' : 'Fast catalog added live'})`, {
   skip: !binary && 'Set YISAMA_CODEX_BIN for the live group test.',
@@ -65,10 +69,11 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${server.address().port}`
+  let apiKey = 'sk-first-test-group'
   const initialModel = initiallyFast ? 'gpt-5.5' : 'gemini-3-flash'
   const initialCatalog = makeModelCatalog([initialModel], [], { fast: initiallyFast })
   let state = await configureCodex({
-    files, apiKey: 'sk-first-test-group', origin, model: initialModel, reasoning: null,
+    files, apiKey, origin, model: initialModel, reasoning: null,
     fast: initiallyFast, catalog: initialCatalog,
   })
   const env = { ...process.env, CODEX_HOME: path.dirname(files.codexConfig) }
@@ -143,11 +148,13 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
     } },
   }
   renderer.top = renderer
-  const synchronize = (version, catalog, { catalogVersion = version, fast = true } = {}) =>
+  const synchronize = (version, catalog, {
+    catalogVersion = version, fast = true, previousKeyFingerprint,
+  } = {}) =>
     runInNewContext(`(${syncNativeModels.toString()})(settings)`, {
     window: renderer, location: { href: 'app://-/index.html' },
-    crypto: { randomUUID }, setTimeout, clearTimeout,
-    settings: { version, catalogVersion, apiKey: 'sk-first-test-group', provider: 'yisama',
+    crypto: { randomUUID, subtle: webcrypto.subtle }, TextEncoder, setTimeout, clearTimeout,
+    settings: { version, catalogVersion, apiKey, previousKeyFingerprint, provider: 'yisama',
       model: catalog.models[0].slug, models: catalog.models.map((model) => model.slug),
       modelSettings: Object.fromEntries(catalog.models.map((model) => [model.slug, {
         fastAvailable: model.service_tiers.some((tier) => tier.id === 'priority'),
@@ -160,9 +167,10 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
     ephemeral: true, model: initialModel })
   await rpc('turn/start', { threadId: first.thread.id, input: [{ type: 'text', text: 'Reply OK.' }] })
   await until(() => requests.length === 1)
+  assert.equal(requests[0].auth, `Bearer ${apiKey}`)
   const fastCatalog = makeModelCatalog(['gpt-5.5'], [], { fast: true })
   state = await configureCodex({
-    files, state, apiKey: 'sk-first-test-group', origin, model: 'gpt-5.5', reasoning: null,
+    files, state, apiKey, origin, model: 'gpt-5.5', reasoning: null,
     fast: true, catalog: fastCatalog,
   })
   assert.equal((await synchronize('fast-group', fastCatalog)).status, 'synced')
@@ -195,9 +203,25 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
   assert.ok(!nativeMethods.slice(beforeToggle).some((method) =>
     method === 'account/login/start' || method === 'model/list'))
   assert.equal(invalidations, beforeInvalidations, 'Fast toggles must not invalidate native query caches')
+  const previousKeyFingerprint = createHash('sha256').update(apiKey).digest('hex')
+  apiKey = 'sk-isolated-device-test'
+  state = await configureCodex({
+    files, state, apiKey, origin, model: 'gpt-5.5', reasoning: null,
+    fast: true, catalog: fastCatalog,
+  })
+  const beforeMigration = nativeMethods.filter((method) => method === 'account/login/start').length
+  assert.equal((await synchronize('device-credential', fastCatalog, { previousKeyFingerprint })).status, 'pending')
+  assert.equal(nativeMethods.filter((method) => method === 'account/login/start').length, beforeMigration)
+  assert.equal((await rpc('getAuthStatus', { includeToken: true, refreshToken: false })).authToken,
+    'sk-first-test-group')
+  assert.equal((await rpc('thread/read', { threadId: first.thread.id })).thread.status.type, 'active',
+    'credential migration must leave active replies untouched')
   releaseFirst()
   releaseFirst = null
   await until(async () => (await rpc('thread/read', { threadId: first.thread.id })).thread.status.type !== 'active')
+  assert.equal((await synchronize('device-credential', fastCatalog, { previousKeyFingerprint })).status, 'synced')
+  assert.equal((await rpc('getAuthStatus', { includeToken: true, refreshToken: false })).authToken, apiKey)
+  assert.equal(nativeMethods.filter((method) => method === 'account/login/start').length, beforeMigration + 1)
   await rpc('turn/start', { threadId: first.thread.id,
     serviceTier: fastSettings.serviceTier,
     input: [{ type: 'text', text: 'Reply OK again.' }] })
@@ -207,7 +231,8 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
   // The provider retains its launch-time capabilities even after model/list refreshes.
   // The relay enforces Fast upstream; do not mistake the picker notification for a wire-level refresh.
   assert.equal(requests[1].body.service_tier, initiallyFast ? 'priority' : undefined)
-  assert.equal(requests[1].auth, 'Bearer sk-first-test-group')
+  assert.equal(requests[1].auth, `Bearer ${apiKey}`,
+    'an existing thread must send its next request with the isolated device credential')
   await until(async () => (await rpc('thread/read', { threadId: first.thread.id })).thread.status.type !== 'active')
   const fresh = await rpc('thread/start', { cwd: root, approvalPolicy: 'never', sandbox: 'read-only',
     ephemeral: true, model: 'gpt-5.5', serviceTier: fastSettings.serviceTier })
@@ -215,12 +240,13 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
     input: [{ type: 'text', text: 'Reply OK.' }] })
   await until(() => requests.length >= 3)
   assert.equal(requests[2].body.model, 'gpt-5.5')
+  assert.equal(requests[2].auth, `Bearer ${apiKey}`)
   assert.equal(requests[2].body.service_tier, initiallyFast ? 'priority' : undefined,
     'new threads also retain launch-time provider capabilities; document the native hot-reload limitation')
   await until(async () => (await rpc('thread/read', { threadId: fresh.thread.id })).thread.status.type !== 'active')
   const ordinaryCatalog = makeModelCatalog(['claude-opus-4-6'])
   state = await configureCodex({
-    files, state, apiKey: 'sk-first-test-group', origin, model: 'claude-opus-4-6', reasoning: null,
+    files, state, apiKey, origin, model: 'claude-opus-4-6', reasoning: null,
     fast: false, catalog: ordinaryCatalog,
   })
   const beforeOrdinaryUpdates = settingsUpdates.length
@@ -237,11 +263,11 @@ for (const initiallyFast of [false, true]) test(`real Codex switches groups with
   await until(() => requests.length >= 4)
   assert.equal(requests[3].body.model, 'claude-opus-4-6')
   assert.notEqual(requests[3].body.service_tier, 'priority', 'ordinary groups must clear the previous Fast tier')
-  assert.equal(requests[3].auth, 'Bearer sk-first-test-group')
+  assert.equal(requests[3].auth, `Bearer ${apiKey}`)
   await until(async () => (await rpc('thread/read', { threadId: ordinaryThread.thread.id })).thread.status.type !== 'active')
 
   state = await configureCodex({
-    files, state, apiKey: 'sk-first-test-group', origin, model: initialModel, reasoning: null,
+    files, state, apiKey, origin, model: initialModel, reasoning: null,
     fast: initiallyFast, catalog: initialCatalog,
   })
   const beforeRestoreUpdates = settingsUpdates.length

@@ -398,6 +398,9 @@ function nativeSyncFixture() {
     removeEventListener(_name, listener) { listeners.delete(listener) },
     electronBridge: { async sendMessageFromView({ request }) {
       calls.push(request.method)
+      if (request.method === 'account/login/start' && state.authToken !== undefined && !state.ignoreLogin) {
+        state.authToken = request.params.apiKey
+      }
       if (request.method === 'thread/settings/update') state.updates.push(request.params)
       const result = request.method === 'getAuthStatus'
         ? state.loading ? { authMethod: null, isLoading: true }
@@ -415,11 +418,44 @@ function nativeSyncFixture() {
   }
   window.top = window
   const sync = () => runInNewContext(`(${syncNativeModels.toString()})(settings)`, {
-    window, location: { href: CODEX_PAGE }, settings, crypto: webcrypto, setTimeout, clearTimeout,
+    window, location: { href: CODEX_PAGE }, settings, crypto: webcrypto, TextEncoder, setTimeout, clearTimeout,
     document: { querySelectorAll: () => [{ isContentEditable: true, get textContent() { return state.draft } }] },
   })
   return { state, window, calls, sync, settings }
 }
+
+test('device migration defers during active replies and switches only the verified previous credential when idle', async () => {
+  const { state, window, calls, sync, settings } = nativeSyncFixture()
+  state.needsReload = false
+  state.authToken = 'sk-legacy-device-test'
+  settings.previousKeyFingerprint = createHash('sha256').update(state.authToken).digest('hex')
+  state.threads = { owned: { modelProvider: 'yisama', model: 'gpt-owned', status: { type: 'active' } } }
+  assert.equal((await sync()).status, 'pending')
+  assert.equal(state.authToken, 'sk-legacy-device-test')
+  assert.equal(calls.includes('account/login/start'), false)
+  state.threads.owned.status.type = 'idle'
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(state.authToken, settings.apiKey)
+  assert.equal(calls.filter((method) => method === 'account/login/start').length, 1)
+  assert.equal(window.__yisamaNativeModelSync.status, 'synced')
+  assert.equal(calls.includes('thread/interrupt'), false)
+  assert.equal(calls.includes('logout'), false)
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(calls.filter((method) => method === 'account/login/start').length, 1)
+})
+
+test('device migration rejects foreign accounts and unconfirmed native authentication', async () => {
+  for (const mode of ['foreign', 'unconfirmed']) {
+    const { state, calls, sync, settings } = nativeSyncFixture()
+    state.needsReload = false
+    state.authToken = mode === 'foreign' ? 'sk-foreign-device-test' : 'sk-legacy-device-test'
+    settings.previousKeyFingerprint = createHash('sha256').update('sk-legacy-device-test').digest('hex')
+    state.ignoreLogin = mode === 'unconfirmed'
+    assert.equal((await sync()).status, mode === 'foreign' ? 'account-change' : 'error')
+    assert.equal(state.authorized, false)
+    assert.equal(calls.filter((method) => method === 'account/login/start').length, mode === 'foreign' ? 0 : 1)
+  }
+})
 
 test('native Fast waits for initial mount and authentication without caching a startup error', async () => {
   const { state, window, sync, calls } = nativeSyncFixture()

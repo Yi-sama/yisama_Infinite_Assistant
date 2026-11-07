@@ -32,6 +32,7 @@ test('release builder emits only bundled runtime entries', async (t) => {
   assert.equal(manifest.sourceIncluded, false)
   assert.equal(manifest.sourceMapsIncluded, false)
   assert.equal(manifest.testFilesIncluded, false)
+  assert.equal(manifest.deviceScopedCredentials, true)
 
   const assistant = await fs.readFile(path.join(output, 'scripts', 'codex-assistant.mjs'), 'utf8')
   const yisama = await fs.readFile(path.join(output, 'scripts', 'yisama.mjs'), 'utf8')

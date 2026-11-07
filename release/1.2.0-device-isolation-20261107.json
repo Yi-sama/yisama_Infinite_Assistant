@@ -1,0 +1,48 @@
+{
+  "version": "1.2.0",
+  "releaseDate": "2026-11-07",
+  "installer": {
+    "file": "Yisama-Setup-1.2.0.exe",
+    "sha256": "42ef8e6568af6a634c9a62edc6f7cf3a5d4433a9cf53116aed323aac38045307",
+    "bytes": 27548035,
+    "signed": false
+  },
+  "previousInstaller": {
+    "sha256": "fbc9ba5cd535420371114626cf3cdd8ae46582cad7d218d08f2105b55fc2eeb8",
+    "backupDirectory": "work/fast-device-fix-20261107/official/previous-release"
+  },
+  "build": {
+    "buildId": "1bba40cbc5b9e923acfba7a6a9f975c28adc97c2eb1bc6010cda2abc86401a06",
+    "basedOnLatestOfficialInstaller": true,
+    "preservedPayloadFiles": 184,
+    "changedPayloadFiles": [
+      "release-manifest.json",
+      "scripts/codex-assistant.mjs",
+      "scripts/yisama.mjs"
+    ],
+    "bootstrapSha256": "9483e18c0b53bb1d589fef04c5cc8f13278f5ed8cc625f29a1e39f8fd3878ef8",
+    "entries": {
+      "codex-assistant.mjs": "56cde024daee70c392b34378a9140504b1bec1a415e13250c55b1da7d409da1b",
+      "yisama.mjs": "9c1f235147581e56ab3921d5e8825634326be31dabf3521cbafea2bc1b1e7083",
+      "launch-codex.ps1": "4d36945709c08c838d3d3988ea3bdc5cc6a0eee9852bcd09740eae87c4451ba0"
+    }
+  },
+  "deviceIsolation": {
+    "persistentInstallationIdentity": true,
+    "legacySharedCredentialsNeverModified": true,
+    "migrationPreservesLocalFastModelReasoningAndOriginalBackups": true,
+    "nativeMigrationRequiresTrustedPreviousCredentialAndIdleThreads": true,
+    "transitionalFingerprintRemovedOnlyAfterNativeConfirmation": true
+  },
+  "checks": {
+    "releaseBuilderTestsPassed": 1,
+    "bundledDeviceIsolationTestsPassed": 7,
+    "realCodexMigrationTestsPassed": 2,
+    "packagedInstallerTestsPassed": 5,
+    "personalConfigurationAndAuthenticationUnchanged": true,
+    "unrelatedPayloadFilesByteIdentical": true,
+    "existingWorkspaceStartupMockFailure": "codex-panel.test.mjs:633; not changed in this release"
+  },
+  "publicAssistantInstallerUpdated": false,
+  "githubPushed": false
+}

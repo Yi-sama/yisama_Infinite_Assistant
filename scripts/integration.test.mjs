@@ -170,6 +170,7 @@ async function fixture(t) {
     }
     if (url.pathname === '/api/token/' && req.method === 'PUT') {
       Object.assign(state.keys.find((item) => item.id === body.id), body)
+      state.fast = body.fast_mode
       return reply({ success: true, data: state.keys.find((item) => item.id === body.id) })
     }
     if (/^\/api\/token\/\d+\/key$/.test(url.pathname)) return reply({ success: true, data: { key: apiKey } })
@@ -233,6 +234,8 @@ test('setup, status, group/model switching and restore use isolated local files 
   await cli('select', '--group', 'premium')
   assert.equal(state.keys.length, 1)
   assert.equal(state.keys[0].group, 'premium')
+  assert.equal(state.keys[0].fast_mode, false)
+  assert.equal(parse(await fs.readFile(files.codexConfig, 'utf8')).service_tier, undefined)
   assert.equal(parse(await fs.readFile(files.codexConfig, 'utf8')).model_reasoning_effort, 'ultra')
   await cli('select', '--group', 'all')
   assert.equal(state.keys.length, 1, 'existing assistant credential is reused')

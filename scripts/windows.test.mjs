@@ -128,6 +128,10 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
   assert.equal(manifest.sourceIncluded, false)
   assert.equal(manifest.sourceMapsIncluded, false)
   assert.equal(manifest.testFilesIncluded, false)
+  assert.equal(manifest.deviceScopedCredentials, true)
+  if (process.env.YISAMA_TEST_EXPECTED_BUILD_ID) {
+    assert.equal(manifest.buildId, process.env.YISAMA_TEST_EXPECTED_BUILD_ID)
+  }
   assert.match(manifest.buildId, /^[a-f0-9]{64}$/)
   assert.equal(manifest.windowsBootstrap.engineRevision, '474658de8b3013d6f2ee68ce0cc0402219de11cc')
   assert.equal(manifest.windowsBootstrap.sha256,
@@ -192,7 +196,11 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
     assert.deepEqual(await fs.readFile(`${cache}.part`), bytes)
     await assert.rejects(fs.access(cache))
     await fs.writeFile(cache, 'damaged complete cache', 'utf8')
-    await assert.rejects(exec(bootstrap, args), /cached package was damaged/)
+    await assert.rejects(exec(bootstrap, args), (error) => {
+      assert.equal(error.code, 1)
+      assert.match(error.stderr, /\u5b89\u88c5\u5305\u5df2\u635f\u574f\u5e76\u5df2\u5220\u9664/)
+      return true
+    })
     assert.match(await fs.readFile(report, 'utf16le'), /status=error\r\n/)
     await assert.rejects(fs.access(cache))
     assert.deepEqual(await fs.readFile(`${cache}.part`), bytes)

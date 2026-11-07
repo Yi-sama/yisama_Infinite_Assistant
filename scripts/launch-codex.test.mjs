@@ -165,3 +165,51 @@ test('launcher detects a debug port that another process still holds', {
     '-File', probe, '-Launcher', launcher, '-Busy', String(server.address().port)], { windowsHide: true })
   assert.equal(stdout.trim(), 'busy=False free=True')
 })
+
+const PORTABLE_PROBE = `
+param([string]$Launcher, [string]$Root)
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+foreach ($name in 'Test-CodexDesktopPath', 'Find-CodexExecutable', 'Start-CodexDesktopExecutable') {
+    $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq $name }, $true)
+    Invoke-Expression $function.Extent.Text
+}
+$exe = Join-Path $Root 'app\\Codex.exe'
+$cli = Join-Path $Root 'app\\resources\\codex.exe'
+$script:codexDesktop = @{ source = 'portable'; executable = $exe }
+$env:CODEX_CLI_PATH = ''
+$env:CODEX_WINDOWS_REGISTERED_CORE = 'preserved'
+function Start-Process {
+    param($FilePath, $WorkingDirectory, $ArgumentList, $RedirectStandardError, [switch]$PassThru)
+    if ($env:CODEX_WINDOWS_REGISTERED_CORE) { throw 'registered core leaked into portable launch' }
+    if ($env:CODEX_CLI_PATH -ne $cli) { throw 'bundled CLI was not selected' }
+    if ($FilePath -ne $exe -or $WorkingDirectory -ne (Split-Path -Parent $exe)) { throw 'wrong executable/directory' }
+    if ($ArgumentList -notcontains '--remote-debugging-address=127.0.0.1') { throw 'debug endpoint is not loopback' }
+    return 'started'
+}
+"recognized=$(Test-CodexDesktopPath $exe)"
+"unrelated=$(Test-CodexDesktopPath (Join-Path $Root 'other\\Codex.exe'))"
+"selected=$((Find-CodexExecutable) -eq $exe)"
+Start-CodexDesktopExecutable -Executable $exe -LogPath (Join-Path $Root 'stderr.log')
+"restored=$($env:CODEX_WINDOWS_REGISTERED_CORE -eq 'preserved' -and [string]::IsNullOrEmpty($env:CODEX_CLI_PATH))"
+`
+
+test('portable Codex uses its selected executable and bundled CLI without changing the environment', {
+  skip: process.platform !== 'win32' && 'Windows launcher only.',
+  timeout: 60000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-portable-launch-test-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+  await fs.mkdir(path.join(root, 'app', 'resources'), { recursive: true })
+  await fs.writeFile(path.join(root, 'app', 'Codex.exe'), '')
+  await fs.writeFile(path.join(root, 'app', 'resources', 'codex.exe'), '')
+  const script = path.join(root, 'probe.ps1')
+  await fs.writeFile(script, PORTABLE_PROBE, 'utf8')
+  const { stdout, stderr } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', script, '-Launcher', launcher, '-Root', root], { windowsHide: true })
+  assert.equal(stderr, '')
+  assert.deepEqual(stdout.trim().split(/\r?\n/), [
+    'recognized=True', 'unrelated=False', 'selected=True', 'started', 'restored=True',
+  ])
+})

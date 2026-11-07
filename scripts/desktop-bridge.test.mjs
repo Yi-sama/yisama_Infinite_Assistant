@@ -9,7 +9,7 @@ import path from 'node:path'
 import process from 'node:process'
 import readline from 'node:readline'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { parse, stringify } from 'smol-toml'
 
@@ -108,6 +108,7 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
       } })
     }
     if (url.pathname === '/api/token/' && req.method === 'POST') {
+      if (state.createKeyFailure) return reply({ success: false }, 503)
       state.keys.push({ ...body, id: state.keys.length + 1, status: 1,
         user_id: state.account.id,
         fast_mode_available: !state.fastUnavailableGroups.includes(body.group) })
@@ -169,7 +170,14 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
 }
 
 function bridgeClient(env) {
-  const child = spawn(process.execPath, [bridgeScript], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+  const args = env.YISAMA_TEST_BUNDLED_ASSISTANT ? ['--input-type=module', '-e', `
+    import readline from 'node:readline';
+    import { createRequestQueue } from ${JSON.stringify(pathToFileURL(env.YISAMA_TEST_BUNDLED_ASSISTANT).href)};
+    const request = createRequestQueue();
+    for await (const line of readline.createInterface({ input: process.stdin, crlfDelay: Infinity }))
+      process.stdout.write(JSON.stringify(await request(line)) + '\\n');
+  `] : [bridgeScript]
+  const child = spawn(process.execPath, args, { env, stdio: ['pipe', 'pipe', 'pipe'] })
   const output = readline.createInterface({ input: child.stdout, crlfDelay: Infinity })
   const pending = []
   const responses = []
@@ -336,6 +344,120 @@ test('desktop login defaults to the first available group when All is unavailabl
   const closed = await bridge.close()
   assert.equal(closed.code, 0)
   assert.equal(closed.stderr, '')
+})
+
+test('two installations keep independent credentials, Fast settings and groups across logins', async (t) => {
+  const { state, env, files } = await fixture(t)
+  const secondRoot = path.join(path.dirname(env.PLUGIN_DATA), 'second-device')
+  const secondEnv = { ...env, PLUGIN_DATA: path.join(secondRoot, 'data'),
+    CODEX_HOME: path.join(secondRoot, 'codex') }
+  await fs.mkdir(secondEnv.PLUGIN_DATA, { recursive: true })
+  await fs.mkdir(secondEnv.CODEX_HOME, { recursive: true })
+  await fs.copyFile(files.session, path.join(secondEnv.PLUGIN_DATA, 'session.json'))
+  for (const name of ['config.toml', 'models_cache.json']) {
+    await fs.copyFile(path.join(env.CODEX_HOME, name), path.join(secondEnv.CODEX_HOME, name))
+  }
+  const first = bridgeClient(env)
+  const second = bridgeClient(secondEnv)
+  t.after(() => {
+    for (const bridge of [first, second]) if (bridge.child.exitCode === null) bridge.child.kill()
+  })
+  assert.equal((await first.request({ id: 1, action: 'login' })).ok, true)
+  const firstSaved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  assert.equal((await first.request({ id: 2, action: 'fast', enabled: false,
+    keyFingerprint: firstSaved.keyFingerprint })).ok, true)
+  const firstConfig = parse(await fs.readFile(files.config, 'utf8'))
+  firstConfig.service_tier = 'standard'
+  await fs.writeFile(files.config, stringify(firstConfig), 'utf8')
+
+  assert.equal((await second.request({ id: 1, action: 'login' })).ok, true)
+  const secondStateFile = path.join(secondEnv.PLUGIN_DATA, 'state.json')
+  const secondSaved = JSON.parse(await fs.readFile(secondStateFile, 'utf8'))
+  assert.notEqual(secondSaved.keyId, firstSaved.keyId,
+    'another computer must never reuse the first computer credential')
+  assert.notEqual(secondSaved.keyName, firstSaved.keyName)
+  assert.equal(state.keys.length, 2)
+  assert.equal(state.keys.find((key) => key.id === firstSaved.keyId).fast_mode, false)
+  assert.equal(state.keys.find((key) => key.id === secondSaved.keyId).fast_mode, true)
+  assert.equal((await first.request({ id: 3, action: 'status' })).ok, true)
+  assert.equal(parse(await fs.readFile(files.config, 'utf8')).service_tier, 'standard')
+
+  assert.equal((await second.request({ id: 2, action: 'select', group: 'premium' })).ok, true)
+  assert.equal(state.keys.find((key) => key.id === firstSaved.keyId).group, 'auto')
+  assert.equal((await first.request({ id: 4, action: 'status' })).ok, true)
+  const secondConfigFile = path.join(secondEnv.CODEX_HOME, 'config.toml')
+  const secondConfig = await fs.readFile(secondConfigFile, 'utf8')
+  assert.equal((await first.request({ id: 5, action: 'fast', enabled: true,
+    keyFingerprint: firstSaved.keyFingerprint })).ok, true)
+  assert.equal((await second.request({ id: 3, action: 'status' })).ok, true)
+  assert.equal(await fs.readFile(secondConfigFile, 'utf8'), secondConfig)
+  assert.equal(state.keys.find((key) => key.id === secondSaved.keyId).fast_mode, false)
+
+  assert.equal((await second.request({ id: 4, action: 'restore' })).ok, true)
+  await fs.copyFile(files.session, path.join(secondEnv.PLUGIN_DATA, 'session.json'))
+  assert.equal((await second.request({ id: 5, action: 'login' })).ok, true)
+  assert.equal(JSON.parse(await fs.readFile(secondStateFile, 'utf8')).keyId, secondSaved.keyId,
+    'logging out must not erase this installation identity')
+  assert.equal(state.keys.length, 2)
+  assert.equal((await first.close()).stderr, '')
+  assert.equal((await second.close()).stderr, '')
+})
+
+test('legacy shared credentials migrate without changing another device or the local Fast choice', async (t) => {
+  const { state, env, files } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  assert.equal((await bridge.request({ id: 1, action: 'login' })).ok, true)
+  const legacyState = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  delete legacyState.keyName
+  await fs.writeFile(files.state, JSON.stringify(legacyState), 'utf8')
+  state.keys[0].name = 'yisama-infinite-assistant:codex'
+  const legacyKey = structuredClone(state.keys[0])
+  const config = parse(await fs.readFile(files.config, 'utf8'))
+  config.service_tier = 'standard'
+  config.model = 'gpt-5'
+  config.model_reasoning_effort = 'low'
+  await fs.writeFile(files.config, stringify(config), 'utf8')
+  const authFile = path.join(env.CODEX_HOME, 'auth.json')
+  const originalAuth = await fs.readFile(authFile, 'utf8')
+  const originalConfigBackup = await fs.readFile(
+    path.join(env.PLUGIN_DATA, 'backups/config.original.toml'), 'utf8')
+  const callsBefore = state.calls.length
+
+  const blocked = await bridge.request({ id: 2, action: 'fast', enabled: false,
+    keyFingerprint: legacyState.keyFingerprint })
+  assert.equal(blocked.ok, false, 'Fast must not mutate a legacy credential shared with another computer')
+  assert.deepEqual(state.keys[0], legacyKey)
+  state.createKeyFailure = true
+  assert.equal((await bridge.request({ id: 3, action: 'status' })).ok, false)
+  assert.deepEqual(JSON.parse(await fs.readFile(files.state, 'utf8')), legacyState)
+  assert.deepEqual(parse(await fs.readFile(files.config, 'utf8')), config)
+  assert.equal(await fs.readFile(authFile, 'utf8'), originalAuth)
+  assert.deepEqual(state.keys[0], legacyKey)
+
+  state.createKeyFailure = false
+  const migrated = await bridge.request({ id: 4, action: 'status' })
+  assert.equal(migrated.ok, true, migrated.error)
+  const saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  assert.notEqual(saved.keyId, legacyState.keyId)
+  assert.notEqual(saved.keyFingerprint, legacyState.keyFingerprint)
+  assert.equal(saved.previousKeyFingerprint, legacyState.keyFingerprint)
+  assert.match(saved.keyName, /^yisama:codex:[0-9a-f-]{36}$/)
+  assert.ok(saved.keyName.length <= 50, 'device names must fit the production API limit')
+  assert.deepEqual(state.keys[0], legacyKey, 'old clients must keep their original credential unchanged')
+  assert.equal(state.keys.find((key) => key.id === saved.keyId).fast_mode, false)
+  const migratedConfig = parse(await fs.readFile(files.config, 'utf8'))
+  assert.notEqual(migratedConfig.service_tier, 'fast')
+  assert.notEqual(migratedConfig.service_tier, 'priority')
+  assert.equal(migratedConfig.model, 'gpt-5')
+  assert.equal(migratedConfig.model_reasoning_effort, 'low')
+  assert.equal(await fs.readFile(path.join(env.PLUGIN_DATA, 'backups/config.original.toml'), 'utf8'),
+    originalConfigBackup)
+  assert.ok(state.calls.slice(callsBefore).filter((call) => call.method === 'PUT')
+    .every((call) => call.body.id !== legacyState.keyId))
+  assert.equal((await bridge.request({ id: 5, action: 'status' })).ok, true)
+  assert.equal(state.keys.length, 2, 'later refreshes must reuse the new device credential')
+  assert.equal((await bridge.close()).stderr, '')
 })
 
 test('native Fast changes only the owned key flag and preserves capability after Standard is saved', async (t) => {
@@ -556,15 +678,23 @@ test('native acknowledgment clears restart state only for the verified configura
   const config = parse(await fs.readFile(files.config, 'utf8'))
   const catalog = JSON.parse(await fs.readFile(config.model_catalog_json, 'utf8'))
   assert.ok(catalog.models.every((model) => model.default_service_tier === 'priority'))
-  const moduleUrl = new URL('./yisama.mjs', import.meta.url).href
+  const saved = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  saved.previousKeyFingerprint = createHash('sha256').update('sk-legacy-ack-test').digest('hex')
+  await fs.writeFile(files.state, JSON.stringify(saved), 'utf8')
+  const moduleUrl = env.YISAMA_TEST_BUNDLED_ASSISTANT
+    ? pathToFileURL(path.join(path.dirname(env.YISAMA_TEST_BUNDLED_ASSISTANT), 'yisama.mjs')).href
+    : new URL('./yisama.mjs', import.meta.url).href
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs/promises';
     import { desktopNativeConfiguration, desktopNativeSynced } from ${JSON.stringify(moduleUrl)};
     const current = await desktopNativeConfiguration();
     const rejected = await desktopNativeSynced('outdated-version');
+    const pending = JSON.parse(await fs.readFile(${JSON.stringify(files.state)}, 'utf8')).previousKeyFingerprint;
     const accepted = await desktopNativeSynced(current.version);
-    console.log(JSON.stringify({ rejected, accepted }));
+    const cleared = !JSON.parse(await fs.readFile(${JSON.stringify(files.state)}, 'utf8')).previousKeyFingerprint;
+    console.log(JSON.stringify({ rejected, accepted, pendingMatches: pending === current.previousKeyFingerprint, cleared }));
   `], { env, windowsHide: true, timeout: 10000 })
-  assert.deepEqual(JSON.parse(stdout), { rejected: false, accepted: true })
+  assert.deepEqual(JSON.parse(stdout), { rejected: false, accepted: true, pendingMatches: true, cleared: true })
   assert.equal(JSON.parse(await fs.readFile(files.state, 'utf8')).restartRequired, false)
   assert.equal((await bridge.request({ id: 2, action: 'status' })).data.restartRequired, false)
   assert.equal((await bridge.close()).stderr, '')

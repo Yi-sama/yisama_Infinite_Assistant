@@ -11,6 +11,8 @@ Set-StrictMode -Version Latest
 $appRoot = Split-Path -Parent $PSScriptRoot
 $runtime = Join-Path $appRoot 'runtime\node.exe'
 $assistantScript = Join-Path $PSScriptRoot 'codex-assistant.mjs'
+$bootstrap = Join-Path $appRoot 'runtime\codex-bootstrap.exe'
+$script:codexDesktop = $null
 $dataRoot = Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant'
 $endpointFile = Join-Path $dataRoot 'codex-endpoint.json'
 $startupTimeoutSeconds = 60
@@ -51,6 +53,9 @@ function Test-CodexDesktopPath {
     $full = [IO.Path]::GetFullPath($Path)
     $name = [IO.Path]::GetFileName($full)
     if ($name -notin @('ChatGPT.exe', 'Codex.exe')) { return $false }
+    if ($script:codexDesktop -and [string]::Equals($full,
+        [IO.Path]::GetFullPath([string]$script:codexDesktop.executable),
+        [StringComparison]::OrdinalIgnoreCase)) { return $true }
     if ([string]::Equals((Split-Path -Parent $full), (Join-Path $env:LOCALAPPDATA 'Programs\Codex'), [StringComparison]::OrdinalIgnoreCase)) { return $true }
     $app = Split-Path -Parent $full
     $package = Split-Path -Parent $app
@@ -77,6 +82,11 @@ function Wait-CodexDesktopExit {
 }
 
 function Find-CodexExecutable {
+    if ($script:codexDesktop) {
+        $selected = [string]$script:codexDesktop.executable
+        if (Test-Path -LiteralPath $selected -PathType Leaf) { return $selected }
+        throw 'The selected Codex desktop executable was not found. Run the yisama installer to select it again.'
+    }
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'Programs\Codex\ChatGPT.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Codex\Codex.exe')
@@ -92,6 +102,48 @@ function Find-CodexExecutable {
         }
     }
     throw 'The installed Codex desktop executable was not found.'
+}
+
+function Read-SelectedCodex {
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        # The bootstrap emits UTF-8 JSON even on legacy Windows code pages.
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $json = & $bootstrap detect --location (Join-Path $appRoot 'codex-location.json') --json
+        if ($LASTEXITCODE -ne 0) { throw 'Codex detection failed. Run the yisama installer to select the installation again.' }
+    }
+    finally { [Console]::OutputEncoding = $previousEncoding }
+    $found = $json | ConvertFrom-Json
+    if (-not $found) { throw 'The installed Codex desktop executable was not found.' }
+    return $found
+}
+
+function Start-CodexDesktopExecutable {
+    param([string]$Executable, [string]$LogPath)
+    $oldCli = $env:CODEX_CLI_PATH
+    $oldCore = $env:CODEX_WINDOWS_REGISTERED_CORE
+    try {
+        if ($script:codexDesktop -and $script:codexDesktop.source -eq 'portable') {
+            # Match Manager's portable launch environment without changing the
+            # user's environment, payload, aliases, or configuration on disk.
+            Remove-Item Env:CODEX_WINDOWS_REGISTERED_CORE -ErrorAction SilentlyContinue
+            if ([string]::IsNullOrWhiteSpace($oldCli)) {
+                $root = Split-Path -Parent $Executable
+                $cli = @((Join-Path $root 'resources\codex.exe'), (Join-Path $root 'resources\bin\codex.exe')) |
+                    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+                if ($cli) { $env:CODEX_CLI_PATH = $cli }
+            }
+        }
+        return Start-Process -FilePath $Executable -WorkingDirectory (Split-Path -Parent $Executable) `
+            -ArgumentList @('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0') `
+            -RedirectStandardError $LogPath -PassThru
+    }
+    finally {
+        if ($null -eq $oldCli) { Remove-Item Env:CODEX_CLI_PATH -ErrorAction SilentlyContinue }
+        else { $env:CODEX_CLI_PATH = $oldCli }
+        if ($null -eq $oldCore) { Remove-Item Env:CODEX_WINDOWS_REGISTERED_CORE -ErrorAction SilentlyContinue }
+        else { $env:CODEX_WINDOWS_REGISTERED_CORE = $oldCore }
+    }
 }
 
 function Quote-StartArgument {
@@ -236,13 +288,14 @@ function Write-EndpointFile {
 
 try {
     if ($ValidateOnly) {
-        foreach ($required in @($runtime, $assistantScript)) {
+        foreach ($required in @($runtime, $assistantScript, $bootstrap)) {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required packaged file is missing: $required" }
         }
         Write-Output "Launcher validation passed. Shortcut target: $PSHOME\powershell.exe -File $PSCommandPath"
         exit 0
     }
 
+    $script:codexDesktop = Read-SelectedCodex
     if ($Restart) { Get-CodexDesktopProcesses | Stop-Process -Force -ErrorAction SilentlyContinue }
     if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
         # Closing the window can leave Codex running in the system tray.
@@ -254,6 +307,11 @@ try {
     }
 
     $wallpaper = Get-WallpaperLauncher
+    if ($script:codexDesktop.source -eq 'portable' -and -not [string]::Equals(
+        [IO.Path]::GetFullPath((Split-Path -Parent $script:codexDesktop.executable)),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Codex'), [StringComparison]::OrdinalIgnoreCase)) {
+        $wallpaper = $null
+    }
     if ($wallpaper -and -not (Test-LoopbackPortFree -Port $wallpaper.Port)) {
         Write-LauncherFailure "Port $($wallpaper.Port) is held by another process; starting Codex without Wallpaper Skin."
         $wallpaper = $null
@@ -275,10 +333,11 @@ try {
         New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
         $debugLog = Join-Path $dataRoot ("codex-launch-$([Guid]::NewGuid().ToString('N')).stderr.log")
         try {
-            $codex = Start-Process -FilePath $executable -ArgumentList @('--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0') -RedirectStandardError $debugLog -PassThru
+            $codex = Start-CodexDesktopExecutable -Executable $executable -LogPath $debugLog
             $endpoint = Wait-OwnEndpoint -Process $codex -LogPath $debugLog
         }
         catch [InvalidOperationException] {
+            if ($script:codexDesktop.source -ne 'msix') { throw }
             Write-LauncherFailure "Direct Codex start failed, using app activation: $($_.Exception.Message)"
             $port = Get-FreeLoopbackPort
             $codex = Start-CodexStoreApp -Arguments @('--remote-debugging-address=127.0.0.1', "--remote-debugging-port=$port")

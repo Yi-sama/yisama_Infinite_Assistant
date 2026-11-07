@@ -934,12 +934,40 @@ export async function syncNativeModels(settings, options = {}) {
     if (auth?.isLoading || auth?.authMethod == null) return { status: 'pending' }
     if (auth?.authMethod !== 'apikey' || typeof auth.authToken !== 'string' ||
       auth.authToken.length < 8) throw new Error('Native authentication unavailable.')
+    let migratedCredential = false
     if (typeof settings.apiKey === 'string' && settings.apiKey !== auth.authToken) {
-      fast?.authorize(null)
-      window.__yisamaNativeModelSync = { version: settings.version, status: 'account-change',
-        nextCheckAt: Date.now() + 5000 }
-      runtime.nativeStatus?.('account-change')
-      return { status: 'account-change' }
+      const fingerprint = settings.provider === 'yisama' && typeof settings.previousKeyFingerprint === 'string'
+        ? Array.from(new Uint8Array(
+          await crypto.subtle.digest('SHA-256', new TextEncoder().encode(auth.authToken)),
+        ), (byte) => byte.toString(16).padStart(2, '0')).join('') : null
+      if (!fingerprint || settings.previousKeyFingerprint !== fingerprint) {
+        fast?.authorize(null)
+        window.__yisamaNativeModelSync = { version: settings.version, status: 'account-change',
+          nextCheckAt: Date.now() + 5000 }
+        runtime.nativeStatus?.('account-change')
+        return { status: 'account-change' }
+      }
+      // A different API key resets native sessions; wait until every reply is idle.
+      let cursor = null
+      do {
+        const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
+        for (const threadId of loaded.data) {
+          const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
+          if (thread?.status?.type !== 'idle') {
+            fast?.authorize(null)
+            runtime.nativeStatus?.('pending')
+            return { status: 'pending' }
+          }
+        }
+        cursor = loaded.nextCursor
+      } while (cursor)
+      await rpc('account/login/start', { type: 'apiKey', apiKey: settings.apiKey })
+      const confirmed = await rpc('getAuthStatus', { includeToken: true, refreshToken: false })
+      if (confirmed?.authMethod !== 'apikey' || confirmed.authToken !== settings.apiKey) {
+        throw new Error('Native device credential migration was not confirmed.')
+      }
+      auth.authToken = confirmed.authToken
+      migratedCredential = true
     }
     fast?.authorize(settings.provider === 'yisama' && settings.apiKey === auth.authToken ? settings : null)
     if (previous?.version === settings.version && previous.status === 'synced') {
@@ -986,7 +1014,7 @@ export async function syncNativeModels(settings, options = {}) {
       }
       runtime.nativeStatus?.('syncing')
       stage = 'catalog'
-      await rpc('account/login/start', { type: 'apiKey', apiKey: auth.authToken })
+      if (!migratedCredential) await rpc('account/login/start', { type: 'apiKey', apiKey: auth.authToken })
       const catalog = []
       let cursor = null
       do {

@@ -1,4 +1,5 @@
 import os from 'node:os'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import readline from 'node:readline/promises'
@@ -560,20 +561,35 @@ async function chooseGroupInteractively(groups, requested) {
   return chooseGroup(options[index].value, groups)
 }
 
-function keyName() {
-  return ASSISTANT_KEY_NAME
+async function keyName() {
+  const file = path.join(paths().pluginData, 'device-id')
+  let installationId = await readOptional(file)
+  if (installationId === null) {
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+    try {
+      await fs.writeFile(file, randomUUID(), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+    }
+    installationId = await readOptional(file)
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(installationId)) {
+    throw new UserError('本机设备标识无效，未更改凭证，请联系管理员。')
+  }
+  return `yisama:codex:${installationId}`
 }
 
-async function findAssistantKey(token, group) {
-  const keyword = encodeURIComponent(keyName())
+async function findAssistantKey(token, group, name) {
+  const keyword = encodeURIComponent(name)
   const response = await requestApi(`/token/search?keyword=${keyword}&p=1&size=100`, { token })
-  const items = response.data?.items?.filter((item) => item.name === keyName()) || []
+  const items = response.data?.items?.filter((item) => item.name === name) || []
   return items.find((item) => item.group === group) || items[0]
 }
 
 export async function ensureAssistantKey(token, group, {
   requireFast = true, fastEnabled = true, keyId = null, existingKey = null,
 } = {}) {
+  const name = await keyName()
   const desiredFast = fastEnabled === true
   let key
   if (Number.isInteger(keyId)) {
@@ -583,17 +599,19 @@ export async function ensureAssistantKey(token, group, {
       if (error.status !== 404) throw error
     }
   }
-  key ||= await findAssistantKey(token, group)
+  // Legacy credentials can still belong to another computer; never rename or mutate them.
+  if (key?.name !== name) key = null
+  key ||= await findAssistantKey(token, group, name)
   if (!key) {
     await requestApi('/token/', {
       token, method: 'POST',
       body: {
-        name: keyName(), remain_quota: 0, expired_time: -1,
+        name, remain_quota: 0, expired_time: -1,
         unlimited_quota: true, model_limits_enabled: false, model_limits: '',
         allow_ips: '', group, auto_groups: [], cross_group_retry: group === 'auto', fast_mode: desiredFast,
       },
     })
-    key = await findAssistantKey(token, group)
+    key = await findAssistantKey(token, group, name)
   }
   if (!key || !Number.isInteger(key.id)) throw new UserError('账号准备未完成，请重新设置。')
   const id = key.id
@@ -602,13 +620,13 @@ export async function ensureAssistantKey(token, group, {
   const updateKey = (fastMode) => requestApi('/token/', {
     token, method: 'PUT',
     body: {
-      id, name: keyName(), status: 1, expired_time: -1,
+      id, name, status: 1, expired_time: -1,
       remain_quota: 0, unlimited_quota: true, model_limits_enabled: false, model_limits: '',
       allow_ips: '', group, auto_groups: [], cross_group_retry: group === 'auto', fast_mode: fastMode,
     },
   })
   // Reconcile older owned credentials without rewriting a healthy credential on every selection.
-  if (key.name !== keyName() || key.group !== group || key.status !== 1 ||
+  if (key.name !== name || key.group !== group || key.status !== 1 ||
     key.fast_mode !== expectedFast || key.expired_time !== -1 ||
     key.unlimited_quota !== true || key.model_limits_enabled !== false ||
     (key.model_limits || '') !== '' || (key.allow_ips || '') !== '' ||
@@ -626,7 +644,7 @@ export async function ensureAssistantKey(token, group, {
     finalFastAvailable = key?.fast_mode_available === true
     finalFastEnabled = key?.fast_mode === true
   }
-  if (key?.status !== 1 || key?.group !== group ||
+  if (key?.name !== name || key?.status !== 1 || key?.group !== group ||
     finalFastEnabled !== (desiredFast && finalFastAvailable) ||
     (requireFast && !finalFastAvailable)) {
     throw new UserError('当前分组暂不能启用 Fast，请选择支持的分组。')
@@ -638,7 +656,7 @@ export async function ensureAssistantKey(token, group, {
   }
   if (typeof rawKey !== 'string' || rawKey.length < 8) throw new UserError('账号准备未完成，请重新设置。')
   return {
-    id, group, key: rawKey.startsWith('sk-') ? rawKey : `sk-${rawKey}`,
+    id, name, group, key: rawKey.startsWith('sk-') ? rawKey : `sk-${rawKey}`,
     fastAvailable: finalFastAvailable, fastEnabled: finalFastEnabled,
   }
 }
@@ -775,16 +793,18 @@ async function setup(requestedGroup, requestedReasoning) {
   const session = await authenticatedSession({ onPortalOpen: (message) => console.log(message) })
   const selected = await chooseGroupInteractively(await fetchGroups(session.token), requestedGroup)
   const auth = await readJson(files.codexAuth, {})
+  const current = parse(await readOptional(files.codexConfig) || '')
+  const active = activeConfig(current)
   const canReuse = previous.configured && Number.isInteger(previous.keyId) &&
     typeof auth.OPENAI_API_KEY === 'string' && typeof previous.keyFingerprint === 'string' &&
     createHash('sha256').update(auth.OPENAI_API_KEY).digest('hex') === previous.keyFingerprint
   const internalKey = await ensureAssistantKey(session.token, selected.value, {
+    fastEnabled: canReuse
+      ? previous.group === selected.value && ['fast', 'priority'].includes(active.service_tier) : true,
     keyId: canReuse ? previous.keyId : null,
     existingKey: canReuse ? auth.OPENAI_API_KEY : null,
   })
   const models = await fetchModels(internalKey.key)
-  const current = parse(await readOptional(files.codexConfig) || '')
-  const active = activeConfig(current)
   const modelByGroup = rememberModelByGroup(previous, previous.group, active.model)
   const preferred = modelByGroup[selected.value] || active.model
   const model = chooseModel(models, preferred)
@@ -792,11 +812,13 @@ async function setup(requestedGroup, requestedReasoning) {
     await supportedReasoning(files, current, model))
   const status = await requestApi('/status')
   await configureCodex({
-    files, state: previous, apiKey: internalKey.key, origin, model, reasoning,
+    files, state: previous, apiKey: internalKey.key, origin, model, reasoning, fast: internalKey.fastEnabled,
     statePatch: {
       origin, userId: session.user.id, username: session.user.username,
-      group: selected.value, groupLabel: selected.label, keyId: internalKey.id,
+      group: selected.value, groupLabel: selected.label, keyId: internalKey.id, keyName: internalKey.name,
       keyFingerprint: createHash('sha256').update(internalKey.key).digest('hex'),
+      ...(canReuse && auth.OPENAI_API_KEY !== internalKey.key
+        ? { previousKeyFingerprint: previous.keyFingerprint } : {}),
       model, modelByGroup: { ...modelByGroup, [selected.value]: model },
       fastAvailable: internalKey.fastAvailable,
       configuredAt: new Date().toISOString(),
@@ -806,7 +828,7 @@ async function setup(requestedGroup, requestedReasoning) {
   console.log(`当前分组：${selected.label}`)
   console.log(`当前模型：${model}`)
   showReasoningChange(reasoning, active.model_reasoning_effort)
-  console.log('Fast：已开启（支持线路按 1.5x 计费）')
+  console.log(internalKey.fastEnabled ? 'Fast：已开启（支持线路按 1.5x 计费）' : 'Fast：已关闭（普通模式）')
   console.log(`剩余额度：${formatQuota(session.user, status.data)}`)
   console.log('自定义充值：可打开官方中转站钱包')
   console.log('配置已就绪，请重启 Codex 或新建会话后使用。')
@@ -932,6 +954,9 @@ export async function desktopStatus({ message, restartRequired } = {}) {
   const origin = originFromEnvironment()
   const current = await configuredModel(files, state, origin)
   const configured = current.configured
+  if (configured && state.userId === session.user.id && state.keyName !== await keyName()) {
+    return configureDesktop({ requestedGroup: state.group, preserveGroup: true, migrateDevice: true })
+  }
   const [groups, status, listing] = await Promise.all([
     desktopGroupInfo(session, configured ? state.group : ''), desktopDisplay(),
     current.apiKey ? desktopModels(current.apiKey, state.group) : { models: [], metadata: [] },
@@ -948,7 +973,7 @@ export async function desktopStatus({ message, restartRequired } = {}) {
     let fast = current.fast
     if (Number.isInteger(state.keyId) && state.userId === session.user.id) {
       const key = (await requestApi(`/token/${state.keyId}`, { token: session.token })).data
-      if (key?.id !== state.keyId || key.status !== 1 || key.group !== state.group) {
+      if (key?.id !== state.keyId || key.name !== state.keyName || key.status !== 1 || key.group !== state.group) {
         throw new UserError('当前助手线路已变化，请重新配置。')
       }
       fastAvailable = key.fast_mode_available === true
@@ -991,6 +1016,7 @@ export async function desktopNativeConfiguration() {
   const files = paths()
   const state = await readJson(files.state, {})
   if (!state.configured || !state.catalogPath || !state.catalogHash) return null
+  if (state.keyName !== await keyName()) return null
   const config = activeConfig(parse(await readOptional(files.codexConfig) || ''))
   if (config.model_provider !== PROVIDER_ID || config.model_catalog_json !== state.catalogPath) return null
   const current = await configuredModel(files, state, originFromEnvironment())
@@ -1003,6 +1029,7 @@ export async function desktopNativeConfiguration() {
     catalogVersion,
     version: createHash('sha256').update(JSON.stringify([catalogVersion, current.fast])).digest('hex'),
     apiKey: current.apiKey,
+    previousKeyFingerprint: state.previousKeyFingerprint,
     provider: PROVIDER_ID,
     fastAvailable: catalog.models.some((model) => model.service_tiers?.some((tier) => tier.id === 'priority')),
     fastEnabled: current.fast,
@@ -1035,7 +1062,8 @@ export async function desktopFastMode({ enabled, keyFingerprint } = {}) {
   const sessionUsable = session?.origin === origin && typeof session.token === 'string' &&
     (!session.expiresAt || session.expiresAt * 1000 > Date.now() + 30000)
   if (!sessionUsable) session = await authenticatedSession({ interactive: false })
-  if (!current.configured || state.keyFingerprint !== keyFingerprint || !Number.isInteger(state.keyId)) {
+  if (!current.configured || state.keyFingerprint !== keyFingerprint || !Number.isInteger(state.keyId) ||
+    state.keyName !== await keyName()) {
     throw new UserError('当前账号不属于助手，未更改 Fast。')
   }
   const readKey = async () => (await requestApi(`/token/${state.keyId}`, { token: session.token })).data
@@ -1047,7 +1075,8 @@ export async function desktopFastMode({ enabled, keyFingerprint } = {}) {
     session = await authenticatedSession({ interactive: false })
     key = await readKey()
   }
-  if (key?.id !== state.keyId || key.user_id !== state.userId || key.status !== 1 || key.group !== state.group ||
+  if (key?.id !== state.keyId || key.name !== state.keyName || key.user_id !== state.userId ||
+    key.status !== 1 || key.group !== state.group ||
     (enabled && key.fast_mode_available !== true)) {
     throw new UserError('当前线路无法更改 Fast。')
   }
@@ -1057,7 +1086,7 @@ export async function desktopFastMode({ enabled, keyFingerprint } = {}) {
       token: session.token, method: 'PUT', body: { id: state.keyId, fast_mode: enabled },
     })
     const saved = updated.data
-    if (saved?.fast_mode !== enabled || saved.user_id !== state.userId ||
+    if (saved?.name !== state.keyName || saved.fast_mode !== enabled || saved.user_id !== state.userId ||
       saved.group !== state.group || saved.status !== 1) {
       throw new UserError('服务端未确认 Fast 设置。')
     }
@@ -1069,12 +1098,15 @@ export async function desktopNativeSynced(version) {
   if ((await desktopNativeConfiguration())?.version !== version) return false
   const files = paths()
   const state = await readJson(files.state, {})
-  if (state.restartRequired) await writeJson(files.state, { ...state, restartRequired: false })
+  if (state.restartRequired || state.previousKeyFingerprint) {
+    const { previousKeyFingerprint, ...saved } = state
+    await writeJson(files.state, { ...saved, restartRequired: false })
+  }
   return true
 }
 
 async function configureDesktop({
-  requestedGroup, requestedModel, preserveGroup = false, forceRestart = false,
+  requestedGroup, requestedModel, preserveGroup = false, forceRestart = false, migrateDevice = false,
 } = {}) {
   const files = paths()
   const previous = await readJson(files.state, {})
@@ -1093,11 +1125,13 @@ async function configureDesktop({
   const selected = chooseGroup(group, availableGroups)
   const canReuse = previous.configured && previous.userId === session.user.id &&
     current.apiKey && Number.isInteger(previous.keyId)
+  const deviceKeyName = await keyName()
+  const ownsDeviceKey = canReuse && previous.keyName === deviceKeyName
   const groupChanged = previous.configured && previous.group !== selected.value
   try {
-    const internalKey = requestedModel && canReuse && previous.group === selected.value
+    const internalKey = requestedModel && ownsDeviceKey && previous.group === selected.value
       ? {
-        id: previous.keyId, group: selected.value, key: current.apiKey,
+        id: previous.keyId, name: deviceKeyName, group: selected.value, key: current.apiKey,
         fastAvailable: previous.fastAvailable ?? current.fast, fastEnabled: current.fast,
       }
       : await ensureAssistantKey(session.token, selected.value, {
@@ -1112,11 +1146,14 @@ async function configureDesktop({
     const config = parse(await readOptional(files.codexConfig) || '')
     const active = activeConfig(config)
     const modelByGroup = rememberModelByGroup(previous, previous.group, active.model)
-    const model = requestedModel || chooseModel(models, modelByGroup[selected.value] || active.model)
-    const reasoning = highestSupportedReasoning(await supportedReasoning(files, config, model))
+    const model = requestedModel || chooseModel(models,
+      migrateDevice ? active.model : modelByGroup[selected.value] || active.model)
+    const reasoning = migrateDevice ? active.model_reasoning_effort
+      : highestSupportedReasoning(await supportedReasoning(files, config, model))
     const catalog = await desktopCatalog(files, config, previous, models, internalKey.fastAvailable, metadata)
     const catalogHash = createHash('sha256').update(JSON.stringify(catalog) + '\n').digest('hex')
-    const changed = !current.configured || previous.group !== selected.value || current.apiKey !== internalKey.key ||
+    const changed = !current.configured || previous.keyName !== internalKey.name ||
+      previous.group !== selected.value || current.apiKey !== internalKey.key ||
       active.model !== model || (active.model_reasoning_effort ?? null) !== reasoning ||
       current.fast !== internalKey.fastEnabled || previous.fastAvailable !== internalKey.fastAvailable ||
       previous.catalogHash !== catalogHash || active.model_catalog_json !== previous.catalogPath
@@ -1125,8 +1162,10 @@ async function configureDesktop({
       fast: internalKey.fastEnabled, catalog,
       statePatch: {
         origin, userId: session.user.id, username: session.user.username,
-        group: selected.value, groupLabel: selected.label, keyId: internalKey.id,
+        group: selected.value, groupLabel: selected.label, keyId: internalKey.id, keyName: internalKey.name,
         keyFingerprint: createHash('sha256').update(internalKey.key).digest('hex'),
+        ...(canReuse && current.apiKey !== internalKey.key
+          ? { previousKeyFingerprint: previous.keyFingerprint } : {}),
         model, modelByGroup: { ...modelByGroup, [selected.value]: model },
         fastAvailable: internalKey.fastAvailable, configuredAt: new Date().toISOString(), restartRequired: true,
       },
@@ -1141,7 +1180,7 @@ async function configureDesktop({
       restartRequired: forceRestart || changed || desktopRestartRequired(previous),
     })
   } catch (error) {
-    if (canReuse && previous.group !== selected.value) {
+    if (ownsDeviceKey && previous.group !== selected.value) {
       try {
         await ensureAssistantKey(session.token, previous.group, {
           requireFast: false, fastEnabled: current.fast,
