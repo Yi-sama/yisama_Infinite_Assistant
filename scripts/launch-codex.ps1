@@ -2,7 +2,9 @@
 param(
     [switch]$ValidateOnly,
     # Sent by the assistant after a takeover: close Codex without asking, then reopen it.
-    [switch]$Restart
+    [switch]$Restart,
+    [string]$UpdateInstaller,
+    [string]$UpdateSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -296,6 +298,16 @@ try {
     }
 
     $script:codexDesktop = Read-SelectedCodex
+    if ($UpdateInstaller) {
+        if (-not $Restart -or $UpdateSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid update request.' }
+        $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant-cache\updates')) + '\'
+        $updatePath = [IO.Path]::GetFullPath($UpdateInstaller)
+        if (-not $updatePath.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            [IO.Path]::GetExtension($updatePath) -ne '.exe') { throw 'Invalid update installer path.' }
+        if ((Get-FileHash -LiteralPath $updatePath -Algorithm SHA256).Hash -ne $UpdateSha256) {
+            throw 'Update installer verification failed. Codex has not been closed.'
+        }
+    }
     if ($Restart) { Get-CodexDesktopProcesses | Stop-Process -Force -ErrorAction SilentlyContinue }
     if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
         # Closing the window can leave Codex running in the system tray.
@@ -304,6 +316,17 @@ try {
         if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
             throw 'Codex 仍在运行，无法结束。请在任务管理器里结束 Codex 后再试。'
         }
+    }
+
+    if ($UpdateInstaller) {
+        # The parent helper uses runtime\node.exe, which the installer must be able to replace.
+        $install = Start-Process -FilePath $updatePath -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES',
+            '/NORESTART', '/SP-', ('/DIR="' + $appRoot + '"')) -WindowStyle Hidden -PassThru -Wait
+        if ($install.ExitCode -ne 0) {
+            Write-LauncherFailure "Update installer failed with exit code $($install.ExitCode); reopening Codex."
+            Show-LauncherError '更新安装未完成，将重新打开 Codex。请稍后重试更新。'
+        }
+        $script:codexDesktop = Read-SelectedCodex
     }
 
     $wallpaper = Get-WallpaperLauncher
@@ -350,6 +373,15 @@ try {
     $readyLog = Join-Path $dataRoot ("assistant-$($endpoint.processId).stdout.log")
     $errorLog = Join-Path $dataRoot ("assistant-$($endpoint.processId).stderr.log")
     $assistant = Start-Process -FilePath $runtime -ArgumentList @((Quote-StartArgument $assistantScript), '--endpoint-file', (Quote-StartArgument $endpointFile), '--process-id', $endpoint.processId) -WorkingDirectory $appRoot -WindowStyle Hidden -RedirectStandardOutput $readyLog -RedirectStandardError $errorLog -PassThru
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $assistant.Refresh()
+        if ($assistant.HasExited) { throw "The yisama assistant exited during startup. See $errorLog." }
+        if ((Test-Path -LiteralPath $readyLog) -and
+            (Select-String -LiteralPath $readyLog -Pattern '"ready":true' -Quiet)) { break }
+        if ([DateTime]::UtcNow -ge $deadline) { throw "The yisama assistant did not become ready. See $errorLog." }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
 }
 catch {
     if (-not $ValidateOnly) {

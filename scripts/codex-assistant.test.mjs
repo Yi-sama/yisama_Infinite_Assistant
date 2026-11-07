@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createHash, webcrypto } from 'node:crypto'
 import { runInNewContext } from 'node:vm'
 import {
-  adaptNativeFastSource, adaptNativeI18nSource, adaptNativeGateSource, adaptNativeRuntimeSource, adaptNativeHostSource, installHostFallback, installNativeFast, syncNativeModels, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
+  adaptNativeFastSource, adaptNativeI18nSource, adaptNativeGateSource, adaptNativeRuntimeSource, adaptNativeHostSource, installHostFallback, installNativeFast, installNativeStartup, syncNativeModels, codexRestartBlocker, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
   restartAssistant, restartCodex, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
 } from './codex-assistant.mjs'
 
@@ -22,6 +22,59 @@ const nativeSourceFor = ({ access = 'Jlo', setter = 'P', models = 'Vso', teamCat
 function _fo(e,t,n,r,i){let l=g(e),u=l.hostId,d={hostId:u,conversationId:e},b=h(u),S=b?.authMethod??null,C={authMethod:S,hostId:x};return {hasManagedNewThreadSettings:I,hostId:L,serviceTierAccess:R,serviceTierSettings:z,setServiceTier:${setter}}}
 var D2=Sc(J,({additionalAvailableModels:e,authMethod:t,enabledReasoningEfforts:n,hasConfiguredModelCatalog:r,hostId:i,includeUltraReasoningEffort:a,isCustomModelProvider:o},{get:d})=>({select:({data:n${teamCatalog ? ',isTeamCatalog:i=!1' : ''}})=>${teamCatalog ? '({...' : ''}${models}({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})${teamCatalog ? ',isTeamCatalog:i})' : ''}}))`
 const nativeSource = nativeSourceFor()
+
+function startupFixture({ age = 1000, navigation = 'navigate', startedAt } = {}) {
+  const clock = { now: Date.now() }
+  const listeners = new Map()
+  let expire
+  const window = {
+    performance: { getEntriesByType: () => [{ type: navigation }] },
+    setTimeout(callback) { expire = callback; return 1 },
+    clearTimeout() { expire = null },
+    addEventListener(type, listener) { listeners.set(type, listener) },
+    removeEventListener(type) { listeners.delete(type) },
+  }
+  window.top = window
+  const install = () => runInNewContext(`(${installNativeStartup.toString()})(startedAt)`, {
+    window, location: { href: CODEX_PAGE }, startedAt: startedAt ?? new Date(clock.now - age).toISOString(),
+    Date: { now: () => clock.now, parse: Date.parse },
+  })
+  install()
+  return { clock, window, listeners, install, expire: () => expire?.() }
+}
+
+test('startup loading is tied to a fresh Codex process, not helper updates or document reloads', () => {
+  for (const options of [{ age: 31000 }, { age: -1000 }, { startedAt: 'invalid' },
+    { navigation: 'reload' }, { navigation: 'back_forward' }]) {
+    const { window, listeners } = startupFixture(options)
+    assert.equal(window.__yisamaNativeStartup.pending(), false, JSON.stringify(options))
+    assert.equal(listeners.size, 0)
+  }
+  const { window, listeners, install, expire } = startupFixture()
+  const startup = window.__yisamaNativeStartup
+  assert.equal(startup.pending(), true)
+  assert.equal(listeners.size, 3)
+  expire()
+  assert.equal(startup.pending(), false)
+  assert.equal(listeners.size, 0)
+  install()
+  assert.equal(window.__yisamaNativeStartup, startup, 'replacing the helper must not rearm startup')
+  assert.equal(startup.pending(), false)
+})
+
+test('startup loading expires or is cancelled permanently as soon as the user interacts', () => {
+  for (const type of ['pointerdown', 'keydown', 'input']) {
+    const { window, listeners, install } = startupFixture()
+    listeners.get(type)()
+    assert.equal(window.__yisamaNativeStartup.pending(), false, type)
+    assert.equal(listeners.size, 0)
+    install()
+    assert.equal(window.__yisamaNativeStartup.pending(), false, `${type}: no delayed refresh`)
+  }
+  const { window, clock } = startupFixture()
+  clock.now += 30000
+  assert.equal(window.__yisamaNativeStartup.pending(), false, 'the deadline also applies while RPCs run')
+})
 
 test('native controls adapt only the inspected hook sites and reject missing or repeated matches', () => {
   const adapted = adaptNativeFastSource(nativeSource)
@@ -401,6 +454,7 @@ function nativeSyncFixture() {
       if (request.method === 'account/login/start' && state.authToken !== undefined && !state.ignoreLogin) {
         state.authToken = request.params.apiKey
       }
+      if (request.method === 'thread/read') state.onThreadRead?.()
       if (request.method === 'thread/settings/update') state.updates.push(request.params)
       const result = request.method === 'getAuthStatus'
         ? state.loading ? { authMethod: null, isLoading: true }
@@ -709,6 +763,62 @@ test('native controls never reload automatically when drafts or active replies c
   assert.equal((await sync()).status, 'synced')
 })
 
+test('a fresh Codex launch loads missing native controls once without a button click', async () => {
+  const { state, window, sync } = nativeSyncFixture()
+  let pending = true
+  window.__yisamaNativeStartup = {
+    pending: () => pending,
+    cancel() { pending = false },
+  }
+  state.queryReady = false
+  assert.equal((await sync()).status, 'pending')
+  assert.equal(pending, true, 'startup waits for the initial query provider')
+  state.queryReady = true
+  const result = await sync()
+  assert.equal(result.reloadNativeFast, true)
+  assert.equal(result.startupReload, true)
+  assert.equal(state.reloadRequested, false)
+  assert.equal(pending, false)
+  assert.equal((await sync()).reloadNativeFast, undefined, 'startup cannot queue another refresh')
+  state.needsReload = false
+  assert.equal((await sync()).status, 'synced')
+})
+
+test('startup loading is never deferred until drafts, panels, or active replies clear', async () => {
+  for (const field of ['draft', 'panelOpen', 'active', 'onThreadRead']) {
+    const { state, window, sync } = nativeSyncFixture()
+    let pending = true
+    window.__yisamaNativeStartup = {
+      pending: () => pending,
+      cancel() { pending = false },
+    }
+    state[field] = field === 'draft' ? 'unsent' : field === 'onThreadRead' ? () => { pending = false } : true
+    assert.equal((await sync()).reloadNativeFast, undefined, field)
+    assert.equal(pending, false, field)
+    state[field] = field === 'draft' ? '' : field === 'onThreadRead' ? undefined : false
+    for (let poll = 0; poll < 3; poll++) {
+      assert.equal((await sync()).reloadNativeFast, undefined, `${field}: no delayed refresh`)
+    }
+    state.reloadRequested = true
+    assert.equal((await sync()).reloadNativeFast, true, 'manual refresh remains available')
+  }
+})
+
+test('already loaded controls consume startup without reloading later catalog revisions', async () => {
+  const { state, window, settings, sync } = nativeSyncFixture()
+  let pending = true
+  window.__yisamaNativeStartup = {
+    pending: () => pending,
+    cancel() { pending = false },
+  }
+  state.needsReload = false
+  assert.equal((await sync()).status, 'synced')
+  assert.equal(pending, false)
+  state.needsReload = true
+  settings.version = 'later-group'
+  assert.equal((await sync()).reloadNativeFast, undefined)
+})
+
 test('a blocked or failed explicit reload is consumed and cannot run later without another click', async () => {
   for (const blockedBy of ['draft', 'active', 'loading', 'mounted', 'failMethod']) {
     const { state, sync } = nativeSyncFixture()
@@ -831,19 +941,63 @@ test('replacement detaches from the old helper and waits until spawning succeeds
   }), /spawn failed/)
 })
 
-test('Codex restart runs the packaged launcher detached with -Restart', async () => {
-  let unreferenced = false
-  await restartCodex((executable, args, options) => {
+test('Codex restart keeps its helper alive until the hidden packaged launcher finishes', async () => {
+  let launcher
+  let finished = false
+  const restarting = restartCodex((executable, args, options) => {
     assert.equal(path.basename(executable).toLowerCase(), 'powershell.exe')
     assert.equal(path.basename(args[args.indexOf('-File') + 1]), 'launch-codex.ps1')
     assert.equal(args.at(-1), '-Restart')
-    assert.deepEqual(options, { detached: true, stdio: 'ignore', windowsHide: true })
-    const child = new EventEmitter()
-    child.unref = () => { unreferenced = true }
-    queueMicrotask(() => child.emit('spawn'))
-    return child
-  })
-  assert.equal(unreferenced, true)
+    assert.deepEqual(options, { detached: false, stdio: 'ignore', windowsHide: true })
+    launcher = new EventEmitter()
+    launcher.unref = () => assert.fail('PowerShell must remain referenced until the launcher finishes.')
+    queueMicrotask(() => launcher.emit('spawn'))
+    return launcher
+  }).then(() => { finished = true })
+  await delay(0)
+  assert.equal(finished, false)
+  launcher.emit('close', 0)
+  await restarting
+  assert.equal(finished, true)
+})
+
+test('Codex restart reports launcher startup and execution failures', async () => {
+  for (const code of [1, null]) {
+    await assert.rejects(restartCodex(() => {
+      const launcher = new EventEmitter()
+      queueMicrotask(() => {
+        launcher.emit('spawn')
+        setImmediate(() => launcher.emit('close', code))
+      })
+      return launcher
+    }), /Codex could not restart/)
+  }
+  await assert.rejects(restartCodex(() => {
+    const launcher = new EventEmitter()
+    queueMicrotask(() => launcher.emit('error', new Error('isolated launcher spawn failure')))
+    return launcher
+  }), /isolated launcher spawn failure/)
+})
+
+test('restart executes a real hidden PowerShell process and observes its result without closing Codex', {
+  skip: process.platform !== 'win32',
+}, async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-restart-process-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const script = path.join(directory, 'isolated launcher.ps1')
+  const marker = path.join(directory, 'executed.txt')
+  await fs.writeFile(script, `[CmdletBinding()]\nparam([switch]$Restart)\n` +
+    `if (-not $Restart) { exit 7 }\n` +
+    `[IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'restarted-test-only')\nexit 0\n`, 'utf8')
+  const launch = (executable, args, options) => {
+    const replaced = [...args]
+    replaced[replaced.indexOf('-File') + 1] = script
+    return spawn(executable, replaced, options)
+  }
+  await restartCodex(launch)
+  assert.equal(await fs.readFile(marker, 'utf8'), 'restarted-test-only')
+  await fs.writeFile(script, 'param([switch]$Restart)\nexit 9\n', 'utf8')
+  await assert.rejects(restartCodex(launch), /Codex could not restart/)
 })
 
 test('Codex start time uses the verified desktop PID without WMI or a visible shell', {
@@ -865,7 +1019,7 @@ function sequence(values) {
   return async () => values[Math.min(index++, values.length - 1)]
 }
 
-function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus } = {}) {
+function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus, restartBlocker = null } = {}) {
   const connections = []
   return {
     connections,
@@ -886,6 +1040,9 @@ function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus } = {
           if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: `script-${connections.length}` }
           if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function syncNativeModels')) {
             return { result: { value: { status: syncStatus } } }
+          }
+          if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function codexRestartBlocker')) {
+            return { result: { value: restartBlocker } }
           }
           if (method === 'Runtime.evaluate' && params.expression.includes('const runtime =')) {
             return { result: { value: state() } }
@@ -933,6 +1090,24 @@ test('assistant accepts only local Codex main-page endpoints', () => {
     { webSocketDebuggerUrl: 'ws://user@127.0.0.1:41234/devtools/page/workspace' },
     { webSocketDebuggerUrl: 'ws://127.0.0.1:41234/devtools/browser/workspace' },
   ]) assert.equal(allowedTarget({ ...target, ...replacement }, 41234), false)
+})
+
+test('update checks do not hold up account actions but are included in queue drain', async () => {
+  let complete
+  const request = createRequestQueue(({ action }) => action === 'checkUpdate'
+    ? new Promise((resolve) => { complete = resolve }) : { loggedIn: true })
+  const check = request(JSON.stringify({ id: 1, action: 'checkUpdate' }))
+  const status = await request(JSON.stringify({ id: 2, action: 'status' }))
+  assert.equal(status.ok, true)
+  assert.equal(request.isIdle(), false)
+  let drained = false
+  const drain = request.drain().then(() => { drained = true })
+  await Promise.resolve()
+  assert.equal(drained, false)
+  complete({ available: false })
+  await check
+  await drain
+  assert.equal(request.isIdle(), true)
 })
 
 test('assistant serializes UI actions and rejects malformed commands before the backend', async () => {
@@ -1051,20 +1226,234 @@ test('an in-flight UI reply prevents reload until its response has been sent', a
 
 test('a takeover restarts Codex once its reply has been sent', async () => {
   for (const [action, expected] of [['reconfigure', { restartCodex: true }], ['status', undefined]]) {
-    const { factory } = makeConnectionFactory({
-      onEnable(onEvent) {
-        onEvent({ method: 'Runtime.bindingCalled', params: {
-          name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
-        } })
-      },
-    })
+    let send
+    const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
     let polls = 0
     const result = await runAssistant(assistantOptions({
       handler: async () => ({ loggedIn: true }), restartDelayMs: 0,
       isRunning: () => ++polls <= 5, connectionFactory: factory,
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: {
+          name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
+        } })
+      },
     }))
     assert.deepEqual(result, expected, action)
+    assert.ok(connections[0].calls.some((call) => call.method === 'Runtime.evaluate' &&
+      call.params.expression.includes('"id":1,"ok":true')))
   }
+})
+
+test('restore restarts only after its successful reply and never resynchronizes the old account', async () => {
+  for (const [restored, expected] of [[true, { restartCodex: true }], [false, undefined]]) {
+    let send
+    let configured = true
+    const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+    let polls = 0
+    const result = await runAssistant(assistantOptions({
+      handler: async () => {
+        configured = false
+        return { loggedIn: false, restartRequired: restored }
+      },
+      nativeConfiguration: async () => configured ? { version: 'owned-before-restore', models: [] } : null,
+      restartDelayMs: 0,
+      isRunning: () => ++polls <= 5,
+      connectionFactory: factory,
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: {
+          name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+        } })
+      },
+    }))
+    const calls = connections[0].calls
+    const reply = calls.findIndex((call) => call.method === 'Runtime.evaluate' &&
+      call.params.expression.includes('"id":1,"ok":true'))
+    assert.notEqual(reply, -1, 'the logout result must reach the panel before restarting')
+    const laterSyncs = calls.slice(reply + 1).filter((call) =>
+      call.method === 'Runtime.evaluate' && call.params.expression.startsWith('(async function syncNativeModels'))
+    assert.ok(laterSyncs.every((call) => call.params.expression.endsWith('(null)')),
+      'restoration must never log back in using the account cached in Codex')
+    assert.deepEqual(result, expected)
+  }
+})
+
+test('blocked account changes leave the account untouched and never restart later', async () => {
+  for (const action of ['restore', 'reconfigure']) {
+    for (const blocker of ['draft', 'busy', 'unavailable']) {
+      let send
+      let handled = false
+      const { factory, connections } = makeConnectionFactory({
+        restartBlocker: blocker, onEnable: (onEvent) => { send = onEvent },
+      })
+      let polls = 0
+      const result = await runAssistant(assistantOptions({
+        handler: async () => { handled = true; return { restartRequired: true } },
+        restartDelayMs: 0, isRunning: () => ++polls <= 4, connectionFactory: factory,
+        onReady() {
+          send({ method: 'Runtime.bindingCalled', params: {
+            name: 'yisamaAssistantCommand', payload: JSON.stringify({ id: 1, action }), executionContextId: 1,
+          } })
+        },
+      }))
+      assert.equal(handled, false, blocker)
+      assert.equal(result, undefined, blocker)
+      const code = `${action === 'restore' ? 'RESTORE' : 'RESTART'}_${blocker === 'unavailable' ? 'CHECK_FAILED' : 'BLOCKED'}`
+      assert.ok(connections[0].calls.some((call) => call.method === 'Runtime.evaluate' &&
+        call.params.expression.includes(code)))
+    }
+  }
+})
+
+test('a failed restore cannot schedule a restart or claim that logout succeeded', async () => {
+  let send
+  const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+  let polls = 0
+  const result = await runAssistant(assistantOptions({
+    handler: async () => { throw new Error('Isolated restore failure.') },
+    restartDelayMs: 0, isRunning: () => ++polls <= 4, connectionFactory: factory,
+    onReady() {
+      send({ method: 'Runtime.bindingCalled', params: {
+        name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+      } })
+    },
+  }))
+  assert.equal(result, undefined)
+  assert.ok(connections[0].calls.some((call) => call.method === 'Runtime.evaluate' &&
+    call.params.expression.includes('"id":1,"ok":false')))
+})
+
+test('restore cannot race a model poll into writing the previous account back', async () => {
+  let send
+  let requested = false
+  let restored = false
+  const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+  let polls = 0
+  await runAssistant(assistantOptions({
+    handler: async () => { restored = true; return { loggedIn: false, restartRequired: true } },
+    nativeConfiguration: async () => {
+      if (requested) return null
+      requested = true
+      send({ method: 'Runtime.bindingCalled', params: {
+        name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"restore"}', executionContextId: 1,
+      } })
+      await new Promise(setImmediate)
+      return { version: 'account-read-before-restore', models: [] }
+    },
+    restartDelayMs: 0, isRunning: () => ++polls <= 4, connectionFactory: factory,
+  }))
+  assert.equal(restored, true)
+  const calls = connections[0].calls
+  const reply = calls.findIndex((call) => call.method === 'Runtime.evaluate' &&
+    call.params.expression.includes('"id":1,"ok":true'))
+  assert.notEqual(reply, -1)
+  assert.ok(!calls.slice(reply + 1).some((call) => call.method === 'Runtime.evaluate' &&
+    call.params.expression.includes('account-read-before-restore')))
+})
+
+test('restart preflight checks drafts and active threads without changing authentication', async () => {
+  for (const [draft, active, failure, expected] of [
+    ['', false, '', null],
+    ['unsent message', false, '', 'draft'],
+    ['', true, '', 'busy'],
+    ['', false, 'thread/loaded/list', 'unavailable'],
+  ]) {
+    const { state, window, calls } = nativeSyncFixture()
+    Object.assign(state, { draft, active, failMethod: failure })
+    const blocker = await runInNewContext(`(${codexRestartBlocker.toString()})()`, {
+      window, location: { href: CODEX_PAGE }, crypto: webcrypto, setTimeout, clearTimeout,
+      document: { querySelectorAll: () => [{ isContentEditable: true, get textContent() { return state.draft } }] },
+    })
+    assert.equal(blocker, expected)
+    assert.ok(calls.every((method) => ['thread/loaded/list', 'thread/read'].includes(method)))
+  }
+})
+
+test('hidden and read-only fields do not falsely prevent restarting', async () => {
+  for (const node of [
+    { value: 'hidden username', closest: () => ({}) },
+    { value: 'invisible form', getClientRects: () => [] },
+    { value: 'displayed account', readOnly: true },
+    { value: 'disabled field', disabled: true },
+  ]) {
+    const { window } = nativeSyncFixture()
+    const blocker = await runInNewContext(`(${codexRestartBlocker.toString()})()`, {
+      window, location: { href: CODEX_PAGE }, crypto: webcrypto, setTimeout, clearTimeout,
+      document: { querySelectorAll: () => [node] },
+    })
+    assert.equal(blocker, null)
+  }
+})
+
+test('a launcher failure reaches the still-mounted panel and permits a second restart attempt', async () => {
+  let send
+  let attempts = 0
+  const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+  let polls = 0
+  const reports = []
+  const result = await runAssistant(assistantOptions({
+    handler: async () => ({ restartRequired: true }), restartDelayMs: 0,
+    restart: async () => { attempts++; throw new Error('isolated restart failure') },
+    report: (message) => reports.push(message),
+    isRunning: () => ++polls <= 5, connectionFactory: factory,
+    onReady() {
+      send({ method: 'Runtime.bindingCalled', params: {
+        name: 'yisamaAssistantCommand', payload: '{"id":1,"action":"reconfigure"}', executionContextId: 1,
+      } })
+    },
+  }))
+  assert.equal(result, undefined)
+  assert.equal(attempts, 1, 'a failed restart must not retry or close Codex later')
+  assert.equal(reports.length, 1)
+  const calls = connections[0].calls
+  const notify = calls.findIndex((call) => call.params?.expression?.includes('restartFailed'))
+  const dispose = calls.findIndex((call) => call.method === 'Runtime.removeBinding')
+  assert.ok(notify !== -1 && dispose > notify, 'the failure must be shown before renderer cleanup')
+})
+
+test('interrupting tasks requires explicit consent and unavailable activity checks are never bypassed', async () => {
+  for (const [blocker, consent, expected] of [
+    ['busy', false, false], ['draft', false, false], ['busy', true, true],
+    ['draft', true, true], ['unavailable', true, false],
+  ]) {
+    let send
+    let restarted = false
+    const { factory } = makeConnectionFactory({ restartBlocker: blocker, onEnable: (event) => { send = event } })
+    let polls = 0
+    await runAssistant(assistantOptions({
+      handler: async () => ({ restartRequired: true }), restartDelayMs: 0,
+      restart: async () => { restarted = true },
+      isRunning: () => ++polls <= 5, connectionFactory: factory,
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: { name: 'yisamaAssistantCommand',
+          payload: JSON.stringify({ id: 1, action: 'reconfigure', allowInterrupt: consent }), executionContextId: 1 } })
+      },
+    }))
+    assert.equal(restarted, expected, `${blocker}, consent=${consent}`)
+  }
+})
+
+test('prepared updates only reach the launcher after the success reply and are not exposed to the UI', async () => {
+  let send
+  let plan
+  const { factory, connections } = makeConnectionFactory({ onEnable: (onEvent) => { send = onEvent } })
+  let polls = 0
+  const installer = { path: path.resolve('isolated-setup.exe'), sha256: 'a'.repeat(64) }
+  const result = await runAssistant(assistantOptions({
+    handler: async () => ({ restartRequired: true, updateInstaller: installer }), restartDelayMs: 0,
+    restart: async (_spawn, options) => {
+      plan = options
+      assert.ok(connections[0].calls.some((call) => call.params?.expression?.includes('"id":1,"ok":true')))
+    },
+    isRunning: () => ++polls <= 5, connectionFactory: factory,
+    onReady() {
+      send({ method: 'Runtime.bindingCalled', params: { name: 'yisamaAssistantCommand',
+        payload: JSON.stringify({ id: 1, action: 'installUpdate', updateId: 'b'.repeat(64) }), executionContextId: 1 } })
+    },
+  }))
+  assert.deepEqual(result, { restarted: true })
+  assert.deepEqual(plan, { installer })
+  const reply = connections[0].calls.find((call) => call.params?.expression?.includes('"id":1,"ok":true'))
+  assert.ok(!reply.params.expression.includes('isolated-setup.exe'))
 })
 
 test('invalid update markers never reload the helper', async () => {

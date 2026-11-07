@@ -36,7 +36,7 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
     for await (const chunk of req) chunks.push(chunk)
     const text = Buffer.concat(chunks).toString('utf8')
     const body = text ? JSON.parse(text) : undefined
-    state.calls.push({ path: url.pathname, method: req.method, body })
+    state.calls.push({ path: url.pathname, method: req.method, body, email: url.searchParams.get('email') })
     const reply = (data, status = 200) => {
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(data))
@@ -78,6 +78,17 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
       return reply({ success: true })
     }
     if (url.pathname === '/api/assistant/auth/verification') return reply({ success: true })
+    if (url.pathname === '/api/assistant/auth/password-reset/verification') {
+      return state.resetSendFailure
+        ? reply({ success: false, message: dashboardToken }, state.resetSendFailure)
+        : reply({ success: true })
+    }
+    if (url.pathname === '/api/assistant/auth/password-reset') {
+      if (body.verification_code !== '987654') {
+        return reply({ success: false, message: `Bad code ${body.verification_code}; ${body.password}; ${dashboardToken}` })
+      }
+      return reply({ success: true })
+    }
     if (url.pathname === '/api/user/auth/refresh') {
       if (req.headers.cookie !== 'new_api_refresh=desktop-refresh' || req.headers.origin !== origin ||
         req.headers['x-auth-session'] !== 'desktop-session') return reply({ success: false }, 401)
@@ -90,7 +101,7 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
         .map((id) => ({ id, ...state.modelMetadata?.[key.group]?.[id] })) })
     }
     if (req.headers.authorization !== `Bearer ${dashboardToken}`) return reply({ success: false }, 401)
-    if (url.pathname === '/api/user/self') {
+    if (url.pathname === '/api/user/self' || url.pathname === '/api/user/self/balance') {
       if (state.accountFailure) return reply({ success: false }, state.accountFailure)
       return reply({ success: true, data: state.account })
     }
@@ -226,6 +237,43 @@ test('desktop bridge names groups by the relay display name', async (t) => {
   await bridge.close()
 })
 
+test('desktop balance refresh reads wallet snapshots without caching or estimating request charges', async (t) => {
+  const { env, state } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  let id = 0
+  for (const [quota, expected] of [[500000, '$1.00'], [390000, '$0.78'], [405000, '$0.81']]) {
+    state.account.quota = quota
+    const response = await bridge.request({ id: ++id, action: 'status' })
+    assert.equal(response.ok, true)
+    assert.equal(response.data.quota, expected)
+  }
+  assert.equal(state.calls.filter((call) => call.path === '/api/user/self').length, 3)
+  const closed = await bridge.close()
+  assert.equal(closed.code, 0)
+})
+
+test('lightweight balance requests return settled snapshots without reconfiguring models', async (t) => {
+  const { env, state } = await fixture(t)
+  const bridge = bridgeClient(env)
+  t.after(() => {
+    if (!bridge.child.killed && bridge.child.exitCode === null) bridge.child.kill()
+  })
+  state.account.quota = 390000
+  Object.assign(state.account, { settled_quota: 500000, pending_quota: 110000, pending_request_count: 1 })
+  const pending = await bridge.request({ id: 1, action: 'balance' })
+  assert.equal(pending.ok, true)
+  assert.deepEqual(pending.data, { quota: '$1.00', balanceMode: 'settled', pendingSettlement: true })
+  Object.assign(state.account, { quota: 405000, settled_quota: 405000, pending_quota: 0, pending_request_count: 0 })
+  const settled = await bridge.request({ id: 2, action: 'balance' })
+  assert.deepEqual(settled.data, { quota: '$0.81', balanceMode: 'settled', pendingSettlement: false })
+  assert.equal(state.calls.filter((call) => call.path === '/api/user/self/balance').length, 2)
+  assert.equal(state.calls.some((call) => /models|token|groups/.test(call.path)), false)
+  assert.equal((await bridge.close()).code, 0)
+})
+
 test('desktop bridge offers only named groups in the relay display order', async (t) => {
   const { env } = await fixture(t, { groups: { auto: { desc: '自动' }, plus: { ratio: 0.2, display_name: 'GPT', display_order: 2 },
     cn: { ratio: 0.15, display_name: '国模' }, claude: { ratio: 0.9, display_name: 'Claude', display_order: 1 }, premium: { ratio: 2 } } })
@@ -256,7 +304,7 @@ test('desktop bridge projects only public state over serialized stdio requests',
 
   const login = await bridge.request({ id: 2, action: 'login' })
   assert.deepEqual(Object.keys(login.data), [
-    'loggedIn', 'configured', 'username', 'quota', 'group', 'groupLabel', 'groups', 'model', 'models',
+    'loggedIn', 'configured', 'username', 'quota', 'balanceMode', 'pendingSettlement', 'group', 'groupLabel', 'groups', 'model', 'models',
     'message', 'restartRequired',
   ])
   assert.equal(login.ok, true)
@@ -744,6 +792,39 @@ test('native synchronization ignores model preferences but still tracks Fast and
   assert.equal((await bridge.close()).stderr, '')
 })
 
+test('relay model order changes preserve configuration and the native catalog revision', async (t) => {
+  const { state, env, files } = await fixture(t)
+  const request = async (action) => {
+    const bridge = bridgeClient(env)
+    t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+    const response = await bridge.request({ id: 1, action })
+    assert.equal((await bridge.close()).stderr, '')
+    assert.equal(response.ok, true, response.error)
+    return response.data
+  }
+  await request('login')
+  const initial = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  const protectedFiles = [files.state, files.config, path.join(env.CODEX_HOME, 'auth.json'),
+    initial.backups.appliedConfig, initial.backups.appliedAuth]
+  const before = await Promise.all(protectedFiles.map((file) => fs.readFile(file, 'utf8')))
+
+  state.models.reverse()
+  const refreshed = await request('status')
+  assert.equal(state.calls.filter((call) => call.path === '/v1/models').length, 2,
+    'the new bridge must fetch the reordered response rather than reuse its cache')
+  assert.equal(refreshed.model, 'gpt-5-codex')
+  assert.equal(JSON.parse(await fs.readFile(files.state, 'utf8')).catalogHash, initial.catalogHash,
+    'the same models in a different order must not trigger native synchronization')
+  assert.deepEqual(await Promise.all(protectedFiles.map((file) => fs.readFile(file, 'utf8'))), before)
+
+  state.models.push('gpt-new')
+  await request('status')
+  const changed = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  assert.notEqual(changed.catalogHash, initial.catalogHash, 'a genuinely new model still updates the catalog')
+  const catalog = JSON.parse(await fs.readFile(changed.catalogPath, 'utf8'))
+  assert.deepEqual(catalog.models.map((model) => model.slug), ['gpt-5', 'gpt-5-codex', 'gpt-new'])
+})
+
 test('relay input capabilities survive group changes without inheriting the previous route', async (t) => {
   const { state, env, files } = await fixture(t)
   state.groupModels = { auto: ['gpt-5-codex', 'audio-model'], premium: ['gpt-5-codex'] }
@@ -1029,6 +1110,42 @@ test('model selection reuses its credential and catalog while balance refreshes 
   assert.equal(refreshed.data.model, 'gpt-5')
   assert.equal(state.calls.filter((call) => call.path === '/api/status').length, 1)
   assert.equal(state.calls.filter((call) => call.path === '/v1/models').length, 1)
+  assert.equal((await bridge.close()).stderr, '')
+})
+
+test('password reset stays local and never changes saved configuration or sessions', async (t) => {
+  const { state, env, files, originalConfig } = await fixture(t, { cached: false })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const email = 'reset+local@example.test'
+  const sent = await bridge.request({ id: 1, action: 'sendPasswordResetVerification', email,
+    password: 'never-send-this' })
+  assert.equal(sent.data.passwordResetVerificationSent, true)
+  assert.equal(state.calls[0].email, email)
+  assert.equal(state.calls[0].method, 'GET')
+  assert.equal(state.calls[0].body, undefined)
+  const wrong = await bridge.request({ id: 2, action: 'resetPassword', email,
+    verificationCode: '000000', password: 'secret-new-password' })
+  assert.equal(wrong.code, 'AUTH_REJECTED')
+  assert.match(wrong.error, /密码重置失败/)
+  const reset = await bridge.request({ id: 3, action: 'resetPassword', email,
+    verificationCode: '987654', password: 'secret-new-password', role: 100 })
+  assert.equal(reset.data.passwordReset, true)
+  assert.deepEqual(state.calls[2].body, {
+    email, verification_code: '987654', password: 'secret-new-password',
+  })
+  state.resetSendFailure = 400
+  const rejected = await bridge.request({ id: 4, action: 'sendPasswordResetVerification', email })
+  assert.match(rejected.error, /验证码发送失败/)
+  state.resetSendFailure = 429
+  const limited = await bridge.request({ id: 5, action: 'sendPasswordResetVerification', email })
+  assert.equal(limited.code, 'AUTH_RATE_LIMIT')
+  assert.equal(await fs.readFile(files.config, 'utf8'), originalConfig)
+  for (const file of [files.session, files.state, path.join(env.CODEX_HOME, 'auth.json')]) {
+    await assert.rejects(fs.access(file), { code: 'ENOENT' })
+  }
+  assert.equal(state.calls.every((call) => call.path.startsWith('/api/assistant/auth/password-reset')), true)
+  assert.doesNotMatch(JSON.stringify([sent, wrong, reset, rejected, limited]), /secret-new-password|000000|987654|dashboard-token/)
   assert.equal((await bridge.close()).stderr, '')
 })
 

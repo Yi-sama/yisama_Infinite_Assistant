@@ -10,6 +10,8 @@ import {
   chooseReasoning,
   desktopRestartRequired,
   formatQuota,
+  walletDisplayState,
+  originFromEnvironment,
   patchCodexConfig,
   requestApi,
   routesFor,
@@ -18,8 +20,37 @@ import {
   submitPaymentForm,
 } from './yisama.mjs'
 import { makeModelCatalog, providerConfig, restoreOwned } from './codex-config.mjs'
+import { validateRequest } from './desktop-bridge.mjs'
 
 const PRIMARY = 'https://api.yisama.asia'
+
+test('wallet display uses settled server values without exposing temporary holds', () => {
+  const status = { quota_per_unit: 500000, quota_display_type: 'USD' }
+  assert.deepEqual(walletDisplayState({ quota: 390000, settled_quota: 500000,
+    pending_quota: 110000, pending_request_count: 1 }, status),
+  { quota: '$1.00', balanceMode: 'settled', pendingSettlement: true })
+  assert.deepEqual(walletDisplayState({ quota: 405000, settled_quota: 405000,
+    pending_quota: 0, pending_request_count: 0 }, status),
+  { quota: '$0.81', balanceMode: 'settled', pendingSettlement: false })
+  assert.deepEqual(walletDisplayState({ quota: 390000 }, status),
+    { quota: '$0.78', balanceMode: 'available', pendingSettlement: false })
+  assert.throws(() => walletDisplayState({ quota: 390000, settled_quota: 500000 }, status), /结算数据/)
+  assert.throws(() => walletDisplayState({ quota: 390000, settled_quota: 500000,
+    pending_quota: 0, pending_request_count: 1 }, status), /结算数据/)
+})
+
+test('password recovery validates local requests and drops unrelated fields', () => {
+  const reset = { id: 1, action: 'resetPassword', email: 'demo@example.test',
+    verificationCode: '123456', password: 'new-password' }
+  assert.deepEqual(validateRequest({ ...reset, role: 100, url: 'https://untrusted.test' }), reset)
+  assert.deepEqual(validateRequest({ id: 2, action: 'sendPasswordResetVerification', email: reset.email,
+    password: reset.password }), { id: 2, action: 'sendPasswordResetVerification', email: reset.email })
+  for (const fields of [{ email: '' }, { verificationCode: '' }, { verificationCode: 'abcdef' },
+    { verificationCode: '12345' }, { password: 'short' }, { password: 'x'.repeat(21) }]) {
+    assert.throws(() => validateRequest({ ...reset, ...fields }), /invalid bridge request/)
+  }
+  assert.throws(() => validateRequest({ id: 3, action: 'forgotPassword' }), /invalid bridge request/)
+})
 
 test('defaults to All and preserves available groups', () => {
   assert.deepEqual(chooseGroup(undefined, ['auto', 'default', 'premium']), {

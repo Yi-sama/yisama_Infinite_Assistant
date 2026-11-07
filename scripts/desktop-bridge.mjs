@@ -1,11 +1,14 @@
 import process from 'node:process'
 import readline from 'node:readline'
 import { pathToFileURL } from 'node:url'
+import { checkForUpdates, prepareUpdate } from './online-update.mjs'
 import {
   desktopLogin,
   desktopAuthOptions,
   desktopRegister,
   desktopSendVerification,
+  desktopSendPasswordResetVerification,
+  desktopResetPassword,
   desktopRechargeInfo,
   desktopRechargeAmount,
   desktopRechargePay,
@@ -15,15 +18,17 @@ import {
   desktopSelect,
   desktopReconfigure,
   desktopStatus,
+  desktopBalance,
   desktopFastMode,
   safeError,
   publicErrorCode,
 } from './yisama.mjs'
 
 const MAX_LINE_LENGTH = 16 * 1024
-const ACTIONS = new Set(['status', 'login', 'authOptions', 'register', 'sendVerification',
+const ACTIONS = new Set(['status', 'balance', 'login', 'authOptions', 'register', 'sendVerification',
+  'sendPasswordResetVerification', 'resetPassword',
   'select', 'reconfigure', 'rechargeInfo', 'rechargeAmount', 'rechargePay', 'recharge', 'redeem',
-  'restore', 'fast'])
+  'restore', 'fast', 'checkUpdate', 'installUpdate'])
 
 function requestId(value) {
   return Number.isFinite(value) ? value : null
@@ -38,10 +43,22 @@ export function validateRequest(value) {
     verificationCode: 100, loginId: 100, twoFactorCode: 100, paymentMethod: 40, redeemCode: 200 }
   const allowed = value.action === 'login' ? ['username', 'password', 'loginId', 'twoFactorCode']
     : value.action === 'register' ? ['username', 'password', 'email', 'verificationCode']
-      : value.action === 'sendVerification' ? ['email'] : value.action === 'select' ? ['group', 'model']
+      : ['sendVerification', 'sendPasswordResetVerification'].includes(value.action) ? ['email']
+        : value.action === 'resetPassword' ? ['email', 'verificationCode', 'password']
+          : value.action === 'select' ? ['group', 'model']
         : value.action === 'redeem' ? ['redeemCode']
         : ['rechargeAmount', 'rechargePay'].includes(value.action) ? ['paymentMethod'] : []
   const request = { id: value.id, action: value.action }
+  if (value.allowInterrupt !== undefined) {
+    if (!['restore', 'reconfigure', 'installUpdate'].includes(value.action) || typeof value.allowInterrupt !== 'boolean') {
+      throw new Error('invalid bridge request')
+    }
+    request.allowInterrupt = value.allowInterrupt
+  }
+  if (value.action === 'installUpdate') {
+    if (!/^[a-f0-9]{64}$/.test(value.updateId)) throw new Error('invalid bridge request')
+    request.updateId = value.updateId
+  }
   if (value.action === 'fast') {
     if (typeof value.enabled !== 'boolean' || !/^[0-9a-f]{64}$/.test(value.keyFingerprint)) {
       throw new Error('invalid bridge request')
@@ -74,18 +91,30 @@ export function validateRequest(value) {
     request.username.length > 20 || request.password.length < 8 || request.password.length > 20)) {
     throw new Error('invalid bridge request')
   }
-  if (value.action === 'sendVerification' && !request.email) throw new Error('invalid bridge request')
+  if (['sendVerification', 'sendPasswordResetVerification'].includes(value.action) && !request.email) {
+    throw new Error('invalid bridge request')
+  }
+  if (value.action === 'resetPassword' &&
+    (!request.email || !request.verificationCode || !request.password ||
+      !/^[0-9]{6}$/.test(request.verificationCode) || request.password.length < 8 || request.password.length > 20)) {
+    throw new Error('invalid bridge request')
+  }
   if (value.action === 'redeem' && !request.redeemCode) throw new Error('invalid bridge request')
   return request
 }
 
 export async function handleRequest(request) {
   const { action, group, model, ...details } = validateRequest(request)
+  if (action === 'checkUpdate') return checkForUpdates()
+  if (action === 'installUpdate') return prepareUpdate(details.updateId)
   if (action === 'status') return desktopStatus()
+  if (action === 'balance') return desktopBalance()
   if (action === 'authOptions') return desktopAuthOptions()
   if (action === 'login') return desktopLogin(details)
   if (action === 'register') return desktopRegister(details)
   if (action === 'sendVerification') return desktopSendVerification(details)
+  if (action === 'sendPasswordResetVerification') return desktopSendPasswordResetVerification(details)
+  if (action === 'resetPassword') return desktopResetPassword(details)
   if (action === 'select') return desktopSelect({ group, model })
   if (action === 'reconfigure') return desktopReconfigure()
   if (action === 'rechargeInfo') return desktopRechargeInfo()

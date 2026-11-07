@@ -30,7 +30,7 @@ const REASONING_LABELS = {
 const execFileAsync = promisify(execFile)
 if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') process.env.NODE_TLS_REJECT_UNAUTHORIZED = '1'
 
-class UserError extends Error {}
+export class UserError extends Error {}
 
 // Domestic users reach the relay through the Chengdu proxy when Cloudflare is unreachable.
 // Sessions stay bound to the logical origin; only the transport host changes.
@@ -161,8 +161,10 @@ async function assistantAuthRequest(context, pathname, { method = 'POST', body }
     }
     throw desktopAuthError('AUTH_REJECTED', pathname === 'register'
       ? '注册未完成，请检查账号、密码和邮箱验证码。'
-      : pathname.startsWith('verification')
+      : pathname.startsWith('verification') || pathname.startsWith('password-reset/verification')
         ? '验证码发送失败，请检查邮箱或稍后重试。'
+        : pathname === 'password-reset'
+          ? '密码重置失败，请检查验证码和新密码后重试。'
         : '登录未完成，请检查账号、密码或二次验证码。')
   }
   return payload
@@ -209,6 +211,29 @@ export async function desktopSendVerification({ email } = {}) {
   try {
     await assistantAuthRequest(context, `verification?email=${encodeURIComponent(email)}`, { method: 'GET' })
     return { verificationSent: true, message: '验证码已发送，请查看邮箱。' }
+  } finally {
+    await context.dispose()
+  }
+}
+
+export async function desktopSendPasswordResetVerification({ email } = {}) {
+  const context = await desktopAuthContext()
+  try {
+    await assistantAuthRequest(context,
+      `password-reset/verification?email=${encodeURIComponent(email)}`, { method: 'GET' })
+    return { passwordResetVerificationSent: true, message: '如果邮箱已注册，验证码将发送到邮箱。' }
+  } finally {
+    await context.dispose()
+  }
+}
+
+export async function desktopResetPassword({ email, verificationCode, password } = {}) {
+  const context = await desktopAuthContext()
+  try {
+    await assistantAuthRequest(context, 'password-reset', {
+      body: { email, verification_code: verificationCode, password },
+    })
+    return { passwordReset: true, message: '密码已重置，请使用新密码登录。' }
   } finally {
     await context.dispose()
   }
@@ -738,7 +763,8 @@ async function desktopCatalog(files, config, state, models, fast = false, relayM
       return rest
     }))
   }
-  return makeModelCatalog(models, [...metadata, ...relayMetadata], { fast })
+  // Relay response ordering alone must not create a new native catalog revision.
+  return makeModelCatalog([...models].sort(), [...metadata, ...relayMetadata], { fast })
 }
 
 export function chooseReasoning(requested, current, supported) {
@@ -781,6 +807,21 @@ export function formatQuota(user, status) {
   if (type === 'CNY') return `¥${(value * Number(status.usd_exchange_rate || 1)).toFixed(2)}`
   if (type === 'CUSTOM') return `${status.custom_currency_symbol || ''}${(value * Number(status.custom_currency_exchange_rate || 1)).toFixed(2)}`
   return `$${value.toFixed(2)}`
+}
+
+export function walletDisplayState(user, status) {
+  const fields = ['settled_quota', 'pending_quota', 'pending_request_count']
+  const hasSettlement = fields.some((field) => user?.[field] !== undefined)
+  if (hasSettlement && (!['quota', ...fields].every((field) => Number.isSafeInteger(user?.[field])) ||
+    user.pending_quota < 0 || user.pending_request_count < 0 ||
+    user.settled_quota !== user.quota + user.pending_quota)) {
+    throw new UserError('余额结算数据暂不可用，请稍后刷新。')
+  }
+  return {
+    quota: formatQuota(hasSettlement ? { quota: user.settled_quota } : user, status),
+    balanceMode: hasSettlement ? 'settled' : 'available',
+    pendingSettlement: hasSettlement && user.pending_request_count > 0,
+  }
 }
 
 async function setup(requestedGroup, requestedReasoning) {
@@ -884,12 +925,15 @@ function publicText(value) {
 function publicState({
   loggedIn = false, configured = false, username = '', quota = '', group = '', groupLabel = '',
   groups = [], model = '', models = [], message = '', restartRequired = false,
+  balanceMode = 'available', pendingSettlement = false,
 } = {}) {
   return {
     loggedIn: Boolean(loggedIn),
     configured: Boolean(configured),
     username: publicText(username),
     quota: publicText(quota),
+    balanceMode: balanceMode === 'settled' ? 'settled' : 'available',
+    pendingSettlement: balanceMode === 'settled' && pendingSettlement === true,
     group: publicText(group),
     groupLabel: publicText(groupLabel),
     groups: publicGroups(groups),
@@ -999,7 +1043,7 @@ export async function desktopStatus({ message, restartRequired } = {}) {
     loggedIn: true,
     configured,
     username: session.user?.display_name || session.user?.username,
-    quota: formatQuota(session.user, status.data),
+    ...walletDisplayState(session.user, status.data),
     group: configured ? state.group : '',
     groupLabel: configured ? state.groupLabel : '',
     groups,
@@ -1010,6 +1054,24 @@ export async function desktopStatus({ message, restartRequired } = {}) {
       : '已登录 yisama 账号，尚未配置 Codex。'),
     restartRequired: needsRestart,
   })
+}
+
+export async function desktopBalance() {
+  let session = await readJson(paths().session)
+  if (session?.origin !== originFromEnvironment() || typeof session.token !== 'string' ||
+    (session.expiresAt && session.expiresAt * 1000 <= Date.now() + 30000)) {
+    session = await authenticatedSession({ interactive: false })
+  }
+  let user
+  try {
+    user = (await requestApi('/user/self/balance', { token: session.token })).data
+  } catch (error) {
+    if (error.status !== 401 && error.status !== 404) throw error
+    session = await authenticatedSession({ interactive: false })
+    user = session.user
+  }
+  const status = await desktopDisplay()
+  return walletDisplayState(user, status.data)
 }
 
 export async function desktopNativeConfiguration() {
@@ -1173,7 +1235,7 @@ async function configureDesktop({
     return publicState({
       loggedIn: true, configured: true,
       username: session.user?.display_name || session.user?.username,
-      quota: formatQuota(session.user, status.data),
+      ...walletDisplayState(session.user, status.data),
       group: selected.value, groupLabel: selected.label,
       groups: groupInfo, model, models,
       message: internalKey.fastEnabled ? '分组已保存。' : '分组已保存，使用普通模式。',
@@ -1275,7 +1337,7 @@ export async function desktopRestore() {
   }
   await restoreCodex(files, state)
   return publicState({
-    message: '已恢复本机配置。请重启 Codex 或新建会话后使用。',
+    message: '已退出登录、停用助手并恢复原配置，正在自动重启 Codex…',
     restartRequired: true,
   })
 }
@@ -1352,12 +1414,12 @@ async function restore() {
   console.log('已移除助手配置并保留后续个人改动，请重启 Codex。')
 }
 
-async function openRecharge() {
-  const url = new URL('/wallet', originFromEnvironment()).href
+async function openPortalPage(pathname, open = execFileAsync) {
+  const url = new URL(pathname, originFromEnvironment()).href
   if (process.platform === 'win32') {
-    await execFileAsync('rundll32.exe', ['url.dll,FileProtocolHandler', url])
+    await open('rundll32.exe', ['url.dll,FileProtocolHandler', url])
   } else {
-    await execFileAsync(process.platform === 'darwin' ? 'open' : 'xdg-open', [url])
+    await open(process.platform === 'darwin' ? 'open' : 'xdg-open', [url])
   }
 }
 
@@ -1480,12 +1542,12 @@ export async function desktopRedeem({ redeemCode } = {}) {
 }
 
 export async function desktopRecharge() {
-  await openRecharge()
+  await openPortalPage('/wallet')
   return desktopStatus({ message: '已在外部浏览器打开官方站点钱包。' })
 }
 
 async function recharge() {
-  await openRecharge()
+  await openPortalPage('/wallet')
   console.log('已打开官方中转站钱包，可选择自定义金额充值。')
 }
 

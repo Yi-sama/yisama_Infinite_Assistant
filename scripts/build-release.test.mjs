@@ -6,8 +6,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import { webcrypto } from 'node:crypto'
+import { runInNewContext } from 'node:vm'
 
 const repository = fileURLToPath(new URL('..', import.meta.url))
 const exec = promisify(execFile)
@@ -49,4 +51,24 @@ test('release builder emits only bundled runtime entries', async (t) => {
   assert.match(help, /in-Codex assistant/)
   // Online licensing is opt-in (YISAMA_REQUIRE_LICENSE=1); default releases skip it.
   assert.equal(manifest.licenseRequired, false)
+
+  const bundled = await import(pathToFileURL(path.join(output, 'scripts', 'codex-assistant.mjs')).href)
+  const listeners = new Set()
+  const methods = []
+  const window = {
+    __yisamaInfiniteAssistant: { snapshot: () => ({ loggedIn: true }) },
+    addEventListener(_type, listener) { listeners.add(listener) },
+    removeEventListener(_type, listener) { listeners.delete(listener) },
+    electronBridge: { async sendMessageFromView({ hostId, request }) {
+      methods.push(request.method)
+      for (const listener of listeners) listener({ data: { type: 'mcp-response', hostId,
+        message: { id: request.id, result: { data: [], nextCursor: null } } } })
+    } },
+  }
+  window.top = window
+  assert.equal(await runInNewContext(`(${bundled.codexRestartBlocker.toString()})()`, {
+    window, location: { href: 'app://-/index.html' }, crypto: webcrypto,
+    setTimeout, clearTimeout, document: { querySelectorAll: () => [] },
+  }), null, 'the minified restart check must execute independently inside the renderer')
+  assert.deepEqual(methods, ['thread/loaded/list'])
 })

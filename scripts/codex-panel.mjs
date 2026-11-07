@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 // Kept self-contained because this function is serialized into Codex through CDP.
 export function installAssistantUI(options = {}) {
   const ROOT_ID = 'yisama-infinite-assistant-ui'
@@ -24,6 +26,8 @@ export function installAssistantUI(options = {}) {
     configured: false,
     username: '',
     quota: '',
+    balanceMode: 'available',
+    pendingSettlement: false,
     group: '',
     groupLabel: '',
     groups: [],
@@ -31,6 +35,9 @@ export function installAssistantUI(options = {}) {
     models: [],
     message: '',
     restartRequired: false,
+    restarting: false,
+    update: null,
+    updateOpen: false,
     setupPending: false,
     staleQuota: false,
     pendingGroup: '',
@@ -43,6 +50,7 @@ export function installAssistantUI(options = {}) {
     emailVerificationEnabled: false,
     loginId: '',
     verificationRetryAt: 0,
+    passwordResetRetryAt: 0,
     nativeSync: '',
     view: 'main',
     rechargeInfo: null,
@@ -57,6 +65,12 @@ export function installAssistantUI(options = {}) {
   let sequence = 0
   let foregroundVersion = 0
   let latestStatusId = 0
+  let latestBalanceId = 0
+  let balanceRequest = null
+  let dailyUpdateRequest = null
+  let dailyUpdate = null
+  let dailyUpdateAttempted = false
+  let nextBalanceAt = Date.now() + 15000
   let nativeReloadRequested = false
   let autoOpened = false
   const gateKey = 'yisama-infinite-assistant-login-hint-dismissed-v1'
@@ -81,6 +95,12 @@ export function installAssistantUI(options = {}) {
     return node
   }
   const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value))
+  const restartConsent = (testId) => {
+    const label = el('label', { className: 'y-restart-consent' })
+    const input = el('input', { type: 'checkbox', 'data-testid': testId })
+    label.append(input, document.createTextNode('允许中断运行中的任务并丢弃未发送草稿'))
+    return { label, input }
+  }
   const timeoutFor = (action) => {
     const override = options.requestTimeouts?.[action]
     if (Number.isFinite(override) && override > 0) return override
@@ -183,14 +203,26 @@ export function installAssistantUI(options = {}) {
     ${R} .y-head .y-mark{width:24px;height:24px}
     ${R} .y-head .y-mark path[fill]{stroke:var(--y-bg2);stroke-width:1}
     ${R} .y-wordmark{display:flex;align-items:baseline;gap:7px;min-width:0;flex:1 1 auto;white-space:nowrap;overflow:hidden}
-    ${R} .y-wordmark strong{font-weight:750;font-size:15px;letter-spacing:-.02em}
-    ${R} .y-wordmark small{color:var(--y-fg3);font:500 10px/1 var(--y-mono);letter-spacing:.08em;text-transform:uppercase}
-    ${R} .y-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:99px;color:var(--y-fg3);transition:background .2s,color .2s,transform .4s var(--y-ease)}
+    ${R} .y-wordmark strong{font-weight:750;font-size:15px;letter-spacing:0}
+    ${R} .y-wordmark small{color:var(--y-fg3);font:500 10px/1 var(--y-mono);letter-spacing:0;text-transform:uppercase}
+    ${R} .y-icon{display:grid;place-items:center;width:30px;height:30px;flex:0 0 30px;border-radius:99px;color:var(--y-fg3);transition:background .2s,color .2s,transform .4s var(--y-ease)}
+    ${R} .y-update p{white-space:pre-wrap;overflow-wrap:anywhere}
+    ${R} .y-update h3{margin:0 0 8px;font-size:15px;letter-spacing:0}
+    ${R} .y-update-notice{position:fixed;right:16px;bottom:56px;width:min(300px,calc(100vw - 32px));padding:16px;border:1px solid var(--y-line2);border-radius:8px;background:var(--y-bg2);color:var(--y-fg);pointer-events:auto;box-shadow:0 12px 36px #0006;-webkit-app-region:no-drag}
+    ${R} .y-update-notice strong{font-size:14px;letter-spacing:0}
+    ${R} .y-update-notice p{margin:8px 0 12px;font-size:12px;line-height:1.5;overflow-wrap:anywhere;letter-spacing:0}
+    ${R} .y-update-notice footer{display:flex;justify-content:flex-end;gap:8px}
+    ${R} .y-restart-consent{display:flex;align-items:flex-start;gap:8px;margin:10px 0;color:var(--y-fg2);font-size:11px;line-height:1.6;letter-spacing:0}
+    ${R} .y-restart-consent input{appearance:auto;flex:0 0 14px;width:14px;height:14px;margin-top:2px;accent-color:var(--y-cyan)}
     ${R} .y-icon:hover:not(:disabled){background:rgba(255,255,255,.06);color:var(--y-fg)}
     ${R} .y-icon:disabled{opacity:.35}
     ${R} .y-icon[data-testid="refresh"]:active:not(:disabled){transform:rotate(-120deg)}
     ${R} .y-icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
     ${R} .y-body{min-height:0;flex:1 1 auto;overflow:auto;padding:4px 16px 16px;scrollbar-width:thin;scrollbar-color:var(--y-line2) transparent}
+    ${R} .y-account-footer{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;min-width:0}
+    ${R} .y-account-footer>.y-link{grid-column:2;grid-row:1;padding-inline:0}
+    ${R} .y-account-footer>.y-version{grid-column:3;grid-row:1;justify-self:end}
+    ${R} .y-version{color:var(--y-fg3);font-size:11px;line-height:16px;letter-spacing:0;white-space:nowrap}
     ${R} .y-view[hidden]{display:none}
     ${R} .y-wallet{display:flex;flex-direction:column;gap:12px;padding:2px 0 0}
     ${R} .y-wallet__head{display:flex;align-items:center;gap:8px}
@@ -231,6 +263,7 @@ export function installAssistantUI(options = {}) {
     ${R} .y-meter__value{display:flex;align-items:flex-end;gap:10px;min-width:0;margin-top:6px}
     ${R} .y-balance{display:block;min-width:0;overflow:hidden;padding-bottom:2px;font:800 42px/1.05 var(--y-sans);font-variant-numeric:tabular-nums;letter-spacing:-.045em;white-space:nowrap;background:linear-gradient(100deg,#e060c0 0%,#8060e0 24%,#20c0e0 50%,#e060c0 75%,#8060e0 100%) 0 0/200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 6px 22px rgba(224,96,192,.28))}
     ${R} .y-balance[data-long="true"]{font-size:22px;letter-spacing:-.02em}
+    ${R} .y-quota-note{display:block;margin:8px 0 0;color:var(--y-fg3);font-size:11px;line-height:1.5}
         ${R} .y-meter__value small{flex:0 0 auto;margin-bottom:8px;padding:2px 7px;border:1px solid rgba(242,180,92,.35);border-radius:99px;color:var(--y-amber);font:600 10px/1.4 var(--y-mono)}
     ${R} .y-status{display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--y-fg2);font-size:12px}
     ${R} .y-pill{flex:0 0 auto;padding:2px 8px;border-radius:99px;background:var(--y-grad);color:#fff;font:700 10px/1.4 var(--y-sans);letter-spacing:.04em}
@@ -359,6 +392,12 @@ export function installAssistantUI(options = {}) {
   const header = el('header', { className: 'y-head' })
   const wordmark = el('div', { className: 'y-wordmark' })
   wordmark.append(el('strong', {}, 'YisamaAPI'), el('small', {}, '无限助手'))
+  const updateButton = el('button', {
+    type: 'button', className: 'y-icon', title: '检查更新', 'aria-label': '检查更新', 'data-testid': 'update',
+  })
+  updateButton.append(svg('0 0 24 24', [
+    { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3' },
+  ]))
   const refreshButton = el('button', {
     type: 'button', className: 'y-icon', title: '刷新账户状态', 'aria-label': '刷新账户状态', 'data-testid': 'refresh',
   })
@@ -367,13 +406,32 @@ export function installAssistantUI(options = {}) {
     type: 'button', className: 'y-icon', title: '关闭', 'aria-label': '关闭', 'data-testid': 'close',
   })
   closeButton.append(svg('0 0 24 24', [{ d: 'M6 6l12 12M18 6L6 18' }]))
-  header.append(fillMark(brandMark('y-head__mark')), wordmark, refreshButton, closeButton)
+  header.append(fillMark(brandMark('y-head__mark')), wordmark, updateButton, refreshButton, closeButton)
 
   const content = el('div', { className: 'y-body' })
+  const updateConfirmation = el('section', {
+    className: 'y-confirm y-update', hidden: '', 'data-testid': 'update-confirmation',
+  })
+  const updateHeading = el('h3', {}, '检查更新')
+  const updateDescription = el('p', { role: 'status', 'data-testid': 'update-description' })
+  const updateConsent = restartConsent('update-allow-interrupt')
+  const updateActions = el('div')
+  const cancelUpdate = el('button', {
+    type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'cancel-update',
+  }, '取消')
+  const confirmUpdate = el('button', {
+    type: 'button', className: 'y-button y-button--accent', 'data-testid': 'confirm-update',
+  }, '更新并重启 Codex')
+  updateActions.append(cancelUpdate, confirmUpdate)
+  updateConfirmation.append(updateHeading, updateDescription, updateConsent.label, updateActions)
   const balance = el('section', { className: 'y-meter', 'aria-label': '账户' })
+  const quotaExplanation = () => state.balanceMode === 'settled'
+    ? '已结算余额不扣除进行中请求的预扣，实际费用结算后自动更新；额度校验仍以后台可用余额为准。'
+    : '当前服务端返回可用余额，可能包含进行中请求的预扣；最终费用以调用日志为准。'
   const meterTop = el('div', { className: 'y-kicker' })
   const account = el('strong', { 'data-testid': 'username', title: '账号' })
-  meterTop.append(el('span', {}, 'Balance · 余额'), account)
+  const balanceLabel = el('span', {}, 'Balance · 余额')
+  meterTop.append(balanceLabel, account)
   const meterValue = el('div', { className: 'y-meter__value' })
   const balanceValue = el('strong', { className: 'y-balance', 'data-testid': 'panel-balance' }, '—')
   const balanceStale = el('small', { hidden: '', 'data-testid': 'stale-note' }, '余额可能已过期')
@@ -382,7 +440,8 @@ export function installAssistantUI(options = {}) {
   const statusPill = el('span', { className: 'y-pill', 'aria-hidden': 'true' }, 'LIVE')
   const statusText_ = el('span', {}, '正在读取账户状态')
   statusLine.append(statusPill, statusText_)
-  balance.append(meterTop, meterValue, statusLine)
+  const quotaNote = el('small', { className: 'y-quota-note', 'data-testid': 'quota-note' })
+  balance.append(meterTop, meterValue, quotaNote, statusLine)
 
   const fields = el('section', { className: 'y-fields', hidden: '' })
   const groupLabel = el('div', { className: 'y-section-label', id: 'yisama-assistant-group-label' })
@@ -407,13 +466,21 @@ export function installAssistantUI(options = {}) {
   }, '使用此模型')
   const takeoverButton = el('button', {
     type: 'button', className: 'y-button y-button--accent y-button--wide y-takeover', 'data-testid': 'takeover',
-  }, '接管 Codex（重启后生效）')
+  }, '重启 Codex 并应用登录')
   takeoverButton.append(svg('0 0 24 24', [{ d: 'M5 12h13M13 6l6 6-6 6' }]))
   const nativeReloadButton = el('button', {
     type: 'button', className: 'y-button y-button--accent y-button--wide y-takeover',
     'data-testid': 'native-reload', hidden: '',
   }, '刷新并加载控件')
-  fields.append(groupLabel, groupSearch, groupSelect, applyButton, takeoverButton, nativeReloadButton)
+  const restartConfirmation = el('section', { className: 'y-confirm', hidden: '', 'data-testid': 'restart-confirmation' })
+  const restartConfirmationText = el('p', {}, '将应用当前登录和模型配置，并自动关闭、重新打开 Codex。请先保存草稿并等待任务完成。')
+  const takeoverConsent = restartConsent('restart-allow-interrupt')
+  const restartActions = el('div')
+  const cancelRestart = el('button', { type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'cancel-restart' }, '取消')
+  const confirmRestart = el('button', { type: 'button', className: 'y-button y-button--accent', 'data-testid': 'confirm-restart' }, '确认并自动重启')
+  restartActions.append(cancelRestart, confirmRestart)
+  restartConfirmation.append(restartConfirmationText, takeoverConsent.label, restartActions)
+  fields.append(groupLabel, groupSearch, groupSelect, applyButton, takeoverButton, nativeReloadButton, restartConfirmation)
 
   const notice = el('div', { className: 'y-notice', role: 'status', hidden: '', 'data-testid': 'message' })
 
@@ -468,15 +535,23 @@ export function installAssistantUI(options = {}) {
   redeemPane.append(redeemInput, redeemSubmit, shopLink)
   const helpButton = el('button', { type: 'button', className: 'y-help', 'data-testid': 'help' }, '遇到问题？加入交流群')
   helpButton.prepend(svg('0 0 24 24', [{ d: 'M12 21a9 9 0 1 0-8-4.9L3 21l4.2-1A9 9 0 0 0 12 21z' }, { d: 'M9.5 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.8-.9 1.4M12 16.5h.01' }]))
-  const restoreButton = el('button', { type: 'button', className: 'y-link', 'data-testid': 'restore' }, '退出并恢复原配置')
-  actions.append(rechargeButton, helpButton, restoreButton)
+  const restoreButton = el('button', { type: 'button', className: 'y-link', 'data-testid': 'restore' }, '退出登录并恢复原配置')
+  const version = typeof options.version === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(options.version)
+    ? `v.${options.version}` : ''
+  const versionLabel = el('span', {
+    className: 'y-version', 'data-testid': 'assistant-version', title: `当前版本 ${version}`,
+  }, version)
+  const accountFooter = el('div', { className: 'y-account-footer' })
+  accountFooter.append(restoreButton, versionLabel)
+  actions.append(rechargeButton, helpButton, accountFooter)
   const confirmation = el('section', { className: 'y-confirm', hidden: '', 'data-testid': 'restore-confirmation' })
-  const confirmationText = el('p', {}, '退出账户，并把 Codex 配置恢复到使用助手之前的状态？恢复后需要重启 Codex 才会生效。')
+  const confirmationText = el('p', {}, '将退出 yisama 登录、停用助手线路，并恢复使用助手之前的配置。确认后会自动关闭并重新打开 Codex，请先保存草稿并等待任务完成。')
+  const restoreConsent = restartConsent('restore-allow-interrupt')
   const confirmationActions = el('div')
   const cancelRestore = el('button', { type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'cancel-restore' }, '取消')
-  const confirmRestore = el('button', { type: 'button', className: 'y-button y-button--danger', 'data-testid': 'confirm-restore' }, '退出并恢复')
+  const confirmRestore = el('button', { type: 'button', className: 'y-button y-button--danger', 'data-testid': 'confirm-restore' }, '确认退出并重启')
   confirmationActions.append(cancelRestore, confirmRestore)
-  confirmation.append(confirmationText, confirmationActions)
+  confirmation.append(confirmationText, restoreConsent.label, confirmationActions)
 
   const loggedOut = el('section', { className: 'y-auth', 'data-testid': 'logged-out' })
   const authIntro = el('div', { className: 'y-auth__intro' })
@@ -497,6 +572,10 @@ export function installAssistantUI(options = {}) {
   }
   const usernameField = inputField('username', '用户名或邮箱', { type: 'text', autocomplete: 'username', maxlength: 200, required: '' })
   const passwordField = inputField('password', '密码', { type: 'password', autocomplete: 'current-password', maxlength: 1024, required: '' })
+  const forgotPasswordButton = el('button', {
+    type: 'button', className: 'y-link', title: '找回密码',
+    'data-testid': 'forgot-password',
+  }, '忘记密码？')
   const confirmField = inputField('confirm-password', '确认密码', { type: 'password', autocomplete: 'new-password', maxlength: 20 })
   const emailField = inputField('email', '邮箱', { type: 'email', autocomplete: 'email', maxlength: 254 })
   const verificationField = inputField('verification-code', '邮箱验证码', { type: 'text', autocomplete: 'one-time-code', inputmode: 'numeric', maxlength: 6 })
@@ -505,13 +584,35 @@ export function installAssistantUI(options = {}) {
   verificationRow.append(verificationField.input, sendVerificationButton)
   verificationField.field.append(verificationRow)
   const loginButton = el('button', { type: 'submit', className: 'y-button y-button--accent y-button--wide', 'data-testid': 'login' }, '登录')
-  authForm.append(usernameField.field, passwordField.field, confirmField.field, emailField.field, verificationField.field, loginButton)
+  authForm.append(usernameField.field, passwordField.field, forgotPasswordButton,
+    confirmField.field, emailField.field, verificationField.field, loginButton)
   const twoFactorForm = el('form', { className: 'yisama-auth-form', hidden: '', 'data-testid': 'two-factor-form' })
   const twoFactorField = inputField('two-factor', '二次验证码或备用码', { type: 'text', autocomplete: 'one-time-code', maxlength: 100, required: '' })
   const twoFactorButton = el('button', { type: 'submit', className: 'y-button y-button--accent y-button--wide', 'data-testid': 'verify-login' }, '验证并登录')
   const backToLogin = el('button', { type: 'button', className: 'y-button y-button--quiet y-button--wide', 'data-testid': 'back-to-login' }, '返回登录')
   twoFactorForm.append(el('h2', {}, '二次验证'), twoFactorField.field, twoFactorButton, backToLogin)
-  loggedOut.append(authIntro, authTabs, authForm, twoFactorForm)
+  const passwordResetForm = el('form', { className: 'yisama-auth-form', hidden: '', 'data-testid': 'password-reset-form' })
+  const passwordResetEmail = inputField('reset-email', '注册邮箱', { type: 'email', autocomplete: 'email', maxlength: 254, required: '' })
+  const passwordResetCode = inputField('reset-code', '邮箱验证码', {
+    type: 'text', inputmode: 'numeric', pattern: '[0-9]{6}', autocomplete: 'one-time-code', maxlength: 6, required: '',
+  })
+  const passwordResetCodeRow = el('div', { className: 'yisama-verification-row' })
+  const sendPasswordResetButton = el('button', {
+    type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'send-password-reset-verification',
+  }, '发送验证码')
+  passwordResetCodeRow.append(passwordResetCode.input, sendPasswordResetButton)
+  passwordResetCode.field.append(passwordResetCodeRow)
+  const passwordResetPassword = inputField('reset-password', '新密码', { type: 'password', autocomplete: 'new-password', minlength: 8, maxlength: 20, required: '' })
+  const passwordResetConfirm = inputField('reset-confirm-password', '确认新密码', { type: 'password', autocomplete: 'new-password', minlength: 8, maxlength: 20, required: '' })
+  const passwordResetSubmit = el('button', {
+    type: 'submit', className: 'y-button y-button--accent y-button--wide', 'data-testid': 'reset-password',
+  }, '重置密码')
+  const passwordResetBack = el('button', {
+    type: 'button', className: 'y-button y-button--quiet y-button--wide', 'data-testid': 'password-reset-back',
+  }, '返回登录')
+  passwordResetForm.append(el('h2', {}, '找回密码'), passwordResetEmail.field, passwordResetCode.field,
+    passwordResetPassword.field, passwordResetConfirm.field, passwordResetSubmit, passwordResetBack)
+  loggedOut.append(authIntro, authTabs, authForm, twoFactorForm, passwordResetForm)
   const mainView = el('section', { className: 'y-view', 'data-testid': 'main-view' })
   mainView.append(balance, fields, notice, confirmation, loggedOut, actions)
   const walletView = el('section', { className: 'y-view y-wallet', hidden: '', 'data-testid': 'wallet-page' })
@@ -525,7 +626,8 @@ export function installAssistantUI(options = {}) {
   walletHead.append(walletBackButton, walletTitle)
   const walletBalance = el('div', { className: 'y-wallet__balance' })
   const walletBalanceDetails = el('div')
-  walletBalanceDetails.append(el('div', { className: 'y-wallet__balance-label' }, 'Current balance'))
+  const walletBalanceLabel = el('div', { className: 'y-wallet__balance-label' }, '余额')
+  walletBalanceDetails.append(walletBalanceLabel)
   const walletBalanceValue = el('strong', { 'data-testid': 'wallet-balance' }, '—')
   walletBalanceDetails.append(walletBalanceValue)
   const walletAccount = el('span', { className: 'y-wallet__account', 'data-testid': 'wallet-account' })
@@ -549,6 +651,7 @@ export function installAssistantUI(options = {}) {
   qqCard.append(el('strong', {}, QQ_GROUP.name), qqImage, qqNumber, el('p', {}, '用手机 QQ 扫码，或搜索群号加入。使用中遇到问题，欢迎进群交流。'))
   qqView.append(qqHead, qqCard)
   content.append(mainView, walletView, qqView)
+  content.prepend(updateConfirmation)
   panel.append(header, content)
   const gate = el('div', { className: 'yisama-gate', hidden: '', 'data-testid': 'login-gate' })
   const gateTip = el('div', { className: 'yisama-gate__tip' })
@@ -557,7 +660,21 @@ export function installAssistantUI(options = {}) {
   const gateOk = el('button', { type: 'button', className: 'yisama-gate__ok', 'data-testid': 'login-gate-dismiss' }, '知道了，不再提示')
   gateTip.append(el('span', { className: 'yisama-gate__step' }, '首次使用'), el('strong', {}, '用 YisamaAPI 账号登录'), gateText, gateOk)
   gate.append(gateTip)
-  root.append(gate, badge, panel)
+  const updateNotice = el('section', {
+    className: 'y-update-notice', role: 'status', hidden: '', 'data-testid': 'update-notice',
+    'aria-label': '无限助手有新版本',
+  })
+  const updateNoticeText = el('p')
+  const updateLater = el('button', {
+    type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'update-later',
+  }, '稍后')
+  const updateView = el('button', {
+    type: 'button', className: 'y-button y-button--accent', 'data-testid': 'update-view',
+  }, '查看更新')
+  const updateNoticeActions = el('footer')
+  updateNoticeActions.append(updateLater, updateView)
+  updateNotice.append(el('strong', {}, '无限助手有新版本'), updateNoticeText, updateNoticeActions)
+  root.append(gate, badge, panel, updateNotice)
   document.documentElement.appendChild(root)
 
   const publicState = (data) => ({
@@ -565,6 +682,8 @@ export function installAssistantUI(options = {}) {
     configured: data?.configured === true,
     username: cleanText(data?.username, 120),
     quota: cleanText(data?.quota, 80),
+    balanceMode: data?.balanceMode === 'settled' ? 'settled' : 'available',
+    pendingSettlement: data?.balanceMode === 'settled' && data?.pendingSettlement === true,
     group: cleanText(data?.group, 200),
     groupLabel: cleanText(data?.groupLabel, 200),
     groups: selectValues(data?.groups, (group) => {
@@ -583,8 +702,9 @@ export function installAssistantUI(options = {}) {
   // One place per kind of information: the status line carries the steady state,
   // the notice carries errors and fresh messages, and is hidden when it would repeat the status line.
   const statusText = () => {
+    if (state.restarting) return '正在重启 Codex'
     if (state.nativeSync === 'pending' || state.nativeSync === 'syncing') return '正在同步 Codex 模型'
-    if (state.nativeSync === 'account-change') return '主实例尚未接管，当前对话未被中断。'
+    if (state.nativeSync === 'account-change') return '登录已更新，需重启 Codex 生效'
     if (state.nativeSync === 'error') return '配置已保存，Codex 模型尚未同步。'
     if (state.nativeSync === 'unsupported') return '当前 Codex 版本暂不支持 Ultra、Fast，其余功能正常'
     if (state.nativeSync === 'reload-required') return '原生模型控件待加载'
@@ -592,11 +712,13 @@ export function installAssistantUI(options = {}) {
     if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置'
     if (state.pendingGroup) return '正在切换模型'
     if (state.staleQuota) return '余额暂未刷新'
+    if (state.loggedIn && state.pendingSettlement) return '结算中'
     if (state.loggedIn && state.configured) return '已准备就绪'
     if (state.loggedIn) return '账户已登录，尚未准备配置'
     return '未登录'
   }
   const statusKind = () => {
+    if (state.restarting) return 'busy'
     if (state.staleQuota || ['error', 'account-change', 'unsupported', 'reload-required', 'reload-blocked'].includes(state.nativeSync)) return 'warning'
     if (state.setupPending || state.pendingGroup || ['pending', 'syncing'].includes(state.nativeSync)) return 'busy'
     return state.loggedIn && state.configured ? 'normal' : 'off'
@@ -605,7 +727,8 @@ export function installAssistantUI(options = {}) {
   const noticeText = () => {
     if (state.error) return state.error
     if (state.nativeSync === 'account-change') {
-      return '重启并接管后，可使用当前模型支持的 Ultra、Fast（1.5x 计费）等能力。'
+      if (restartConfirmation.dataset.open === 'true') return ''
+      return '确认后将自动关闭并重新打开 Codex，应用当前登录和模型配置。请先保存草稿并等待任务完成。'
     }
     if (['reload-required', 'reload-blocked'].includes(state.nativeSync)) {
       return '加载 Ultra、Fast 控件需要刷新 Codex 页面。请先保存草稿并等待任务完成。'
@@ -624,7 +747,7 @@ export function installAssistantUI(options = {}) {
     if (text === shownQuota) return
     const animate = shownQuota !== null && shownQuota !== '—' && !panel.hidden && !reducedMotion()
     shownQuota = text
-    balanceValue.title = text
+    balanceValue.title = `${text}。${quotaExplanation()}`
     balanceValue.dataset.long = String(text.length > 11)
     balanceValue.textContent = text
     // Animate the whole number: per-character layers would escape the gradient text clip.
@@ -827,18 +950,47 @@ export function installAssistantUI(options = {}) {
   }
   const render = () => {
     const quota = quotaLabel()
-    const busy = hasForegroundPending()
+    const busy = hasForegroundPending() || state.restarting
+    updateButton.disabled = busy || state.setupPending
+    updateConfirmation.hidden = !state.updateOpen
+    updateHeading.textContent = hasActivePending('checkUpdate') ? '正在检查更新'
+      : hasActivePending('installUpdate') ? '正在下载并校验' : state.restarting ? '正在重启 Codex'
+        : state.update?.available ? `发现新版本 ${state.update.latestVersion}` : '软件更新'
+    updateDescription.textContent = hasActivePending('checkUpdate') ? '正在获取版本信息…'
+      : hasActivePending('installUpdate') ? '下载完成并校验通过后，将自动关闭、更新并重新打开 Codex。'
+        : state.restarting ? '更新包已校验，正在关闭、更新并重新打开 Codex。'
+          : state.error || (state.update?.available
+            ? `当前版本 ${state.update.currentVersion} → ${state.update.latestVersion}\n${(state.update.size / 1048576).toFixed(1)} MB\n${state.update.notes}\n\n更新需要重启 Codex。请先保存草稿并等待所有任务结束，确认后自动安装并重新打开。`
+            : state.update ? `当前版本 ${state.update.currentVersion}，已是最新版本。` : '')
+    confirmUpdate.hidden = !state.update?.available || state.restarting
+    updateConsent.label.hidden = !state.update?.available || state.restarting
+    for (const consent of [updateConsent, takeoverConsent, restoreConsent]) consent.input.disabled = busy
+    confirmUpdate.disabled = busy
+    updateView.disabled = busy || state.setupPending
+    if (state.restarting) updateNotice.hidden = true
+    cancelUpdate.disabled = hasActivePending('installUpdate') || state.restarting
+    cancelUpdate.textContent = state.update?.available ? '取消' : '关闭'
     const walletOpen = state.view === 'wallet'
     const qqOpen = state.view === 'qq'
     const badgeLabel = state.loggedIn ? quota : '登录'
     badgeText.textContent = badgeLabel
-    badgeText.title = state.loggedIn ? `余额 ${quota}` : '登录'
+    const quotaName = state.balanceMode === 'settled' ? '已结算余额' : '可用余额'
+    balanceLabel.textContent = `Balance · ${quotaName}`
+    walletBalanceLabel.textContent = quotaName
+    quotaNote.textContent = state.balanceMode === 'settled'
+      ? state.pendingSettlement ? '结算中' : '已结算'
+      : '含请求预扣，结算后多退少补'
+    quotaNote.title = quotaExplanation()
+    walletBalanceValue.title = quotaExplanation()
+    balanceValue.title = `${quota}。${quotaExplanation()}`
+    badge.title = state.loggedIn ? `${quotaName} ${quota}。${quotaExplanation()}` : '登录 yisama 无限助手'
+    badgeText.title = badge.title
     badgeStale.hidden = !(state.staleQuota && Boolean(state.quota))
     badge.dataset.stale = String(state.staleQuota && Boolean(state.quota))
     badge.dataset.busy = String(busy || state.setupPending || ['pending', 'syncing'].includes(state.nativeSync))
     badge.setAttribute('aria-label', state.staleQuota && state.quota
-      ? `余额 ${badgeLabel}，余额可能已过期。打开 yisama 无限助手`
-      : `${state.loggedIn ? '余额 ' : ''}${badgeLabel}。打开 yisama 无限助手`)
+      ? `${quotaName} ${badgeLabel}，余额可能已过期。打开 yisama 无限助手`
+      : `${state.loggedIn ? `${quotaName} ` : ''}${badgeLabel}。打开 yisama 无限助手`)
     badge.setAttribute('aria-expanded', String(state.open))
     // Cover the page only once the assistant is known to be signed out, and only while its panel is open.
     gate.hidden = gateDismissed || !(state.open && state.statusKnown && !state.loggedIn)
@@ -860,7 +1012,8 @@ export function installAssistantUI(options = {}) {
     const message = noticeText()
     // Logged out, the notice sits right above the submit button, where the user is looking.
     const [noticeParent, noticeBefore] = state.loggedIn ? [mainView, confirmation]
-      : state.loginId ? [twoFactorForm, twoFactorButton] : [authForm, loginButton]
+      : state.authMode === 'reset' ? [passwordResetForm, passwordResetSubmit]
+        : state.loginId ? [twoFactorForm, twoFactorButton] : [authForm, loginButton]
     if (notice.nextSibling !== noticeBefore) noticeParent.insertBefore(notice, noticeBefore)
     notice.textContent = message
     notice.hidden = !message
@@ -870,13 +1023,18 @@ export function installAssistantUI(options = {}) {
     walletNotice.hidden = !walletMessage || state.view === 'main'
     walletNotice.dataset.error = String(Boolean(state.error))
     fields.hidden = !state.loggedIn
-    actions.hidden = !state.loggedIn
+    actions.hidden = !state.loggedIn && !state.configured
+    rechargeButton.hidden = !state.loggedIn
+    helpButton.hidden = !state.loggedIn
     loggedOut.hidden = state.loggedIn
     mainView.hidden = walletOpen || qqOpen
     qqView.hidden = !qqOpen
     walletView.hidden = !walletOpen || !state.loggedIn
-    confirmation.hidden = confirmation.dataset.open !== 'true' || !state.loggedIn
+    confirmation.hidden = confirmation.dataset.open !== 'true' || (!state.loggedIn && !state.configured)
     restoreButton.hidden = !confirmation.hidden
+    restoreButton.disabled = busy
+    confirmRestore.disabled = busy
+    cancelRestore.disabled = busy
     rechargePanel.hidden = !walletOpen || !state.loggedIn || state.walletTab !== 'pay'
     redeemPane.hidden = !walletOpen || !state.loggedIn || state.walletTab !== 'redeem'
     walletTabs.dataset.tab = state.walletTab
@@ -894,7 +1052,10 @@ export function installAssistantUI(options = {}) {
       renderGroups(selectedGroup, busy || !state.groups.length)
       const accountMismatch = state.nativeSync === 'account-change' && state.configured
       applyButton.hidden = state.configured
-      takeoverButton.hidden = !accountMismatch
+      restartConfirmation.hidden = !accountMismatch || restartConfirmation.dataset.open !== 'true' || state.restarting
+      takeoverButton.hidden = !accountMismatch || !restartConfirmation.hidden || state.restarting
+      confirmRestart.disabled = busy
+      cancelRestart.disabled = busy
       nativeReloadButton.hidden = !state.configured || !['reload-required', 'reload-blocked'].includes(state.nativeSync)
       nativeReloadButton.disabled = busy || state.setupPending || Boolean(state.pendingGroup)
       applyButton.textContent = state.groups.length ? '使用此模型' : '重试准备'
@@ -903,17 +1064,17 @@ export function installAssistantUI(options = {}) {
       account.textContent = state.username || '—'
       rechargeButton.disabled = busy && !hasActivePending('rechargeInfo')
       renderRecharge(busy)
-      restoreButton.disabled = busy
-      confirmRestore.disabled = busy
     }
-    refreshButton.disabled = hasActivePending('status')
+    refreshButton.disabled = hasActivePending('status') || state.restarting
     const registering = state.authMode === 'register'
+    const resetting = state.authMode === 'reset'
     const secondStep = Boolean(state.loginId)
-    authIntro.hidden = secondStep
-    authTabs.hidden = secondStep
-    authTabs.dataset.mode = state.authMode
-    authForm.hidden = secondStep
+    authIntro.hidden = secondStep || resetting
+    authTabs.hidden = secondStep || resetting
+    authTabs.dataset.mode = registering ? 'register' : 'login'
+    authForm.hidden = secondStep || resetting
     twoFactorForm.hidden = !secondStep
+    passwordResetForm.hidden = !resetting
     loginTab.setAttribute('aria-selected', String(!registering))
     registerTab.setAttribute('aria-selected', String(registering))
     loginTab.disabled = busy
@@ -922,6 +1083,8 @@ export function installAssistantUI(options = {}) {
     passwordField.input.maxLength = registering ? 20 : 1024
     passwordField.input.minLength = registering ? 8 : 1
     passwordField.input.autocomplete = registering ? 'new-password' : 'current-password'
+    forgotPasswordButton.hidden = registering
+    forgotPasswordButton.disabled = busy
     confirmField.field.hidden = !registering
     confirmField.input.required = registering
     const verifyEmail = registering && state.emailVerificationEnabled
@@ -940,6 +1103,16 @@ export function installAssistantUI(options = {}) {
     const retryAfter = Math.max(0, Math.ceil((state.verificationRetryAt - Date.now()) / 1000))
     sendVerificationButton.disabled = busy || retryAfter > 0
     sendVerificationButton.textContent = hasActivePending('sendVerification') ? '正在发送…' : retryAfter ? `${retryAfter}s 后重发` : '发送验证码'
+    for (const field of [passwordResetEmail, passwordResetCode, passwordResetPassword, passwordResetConfirm]) {
+      field.input.disabled = busy
+    }
+    const resetRetryAfter = Math.max(0, Math.ceil((state.passwordResetRetryAt - Date.now()) / 1000))
+    sendPasswordResetButton.disabled = busy || resetRetryAfter > 0
+    sendPasswordResetButton.textContent = hasActivePending('sendPasswordResetVerification')
+      ? '正在发送…' : resetRetryAfter ? `${resetRetryAfter}s 后重发` : '发送验证码'
+    passwordResetSubmit.disabled = busy
+    passwordResetSubmit.textContent = hasActivePending('resetPassword') ? '正在重置…' : '重置密码'
+    passwordResetBack.disabled = busy
     placeBadge()
     if (opening && !reducedMotion()) {
       panel.animate?.([
@@ -951,13 +1124,20 @@ export function installAssistantUI(options = {}) {
       ], { duration: 520, delay: 60 + index * 45, easing: EASE, fill: 'backwards' }))
     }
   }
-  const applyData = (data, preserveDrafts = false) => {
+  const applyData = (data, preserveDrafts = false, responseId = 0) => {
     const next = publicState(data)
+    if (responseId && responseId < latestBalanceId && next.loggedIn && next.username === state.username) {
+      Object.assign(next, { quota: state.quota, balanceMode: state.balanceMode, pendingSettlement: state.pendingSettlement })
+    } else if (responseId && next.loggedIn) latestBalanceId = responseId
     const drafts = { pendingGroup: preserveDrafts ? state.pendingGroup : '' }
     Object.assign(state, next, drafts, { staleQuota: false, error: '' })
     if (!state.loggedIn) {
       confirmation.dataset.open = 'false'
       state.view = 'main'
+      if (!state.configured) {
+        state.nativeSync = ''
+        nativeReloadRequested = false
+      }
     }
     if (state.loggedIn) {
       clearAuthSecrets()
@@ -969,6 +1149,9 @@ export function installAssistantUI(options = {}) {
     confirmField.input.value = ''
     verificationField.input.value = ''
     twoFactorField.input.value = ''
+    passwordResetCode.input.value = ''
+    passwordResetPassword.input.value = ''
+    passwordResetConfirm.input.value = ''
   }
   const failure = (entry, code) => {
     if (entry.action === 'status') {
@@ -986,14 +1169,38 @@ export function installAssistantUI(options = {}) {
       state.error = '无法连接助手登录服务，请稍后刷新。'
     } else if (entry.action === 'sendVerification') {
       state.error = '验证码发送失败，请检查邮箱或稍后重试。'
+    } else if (entry.action === 'sendPasswordResetVerification') {
+      state.error = '验证码发送失败，请检查邮箱或稍后重试。'
+    } else if (entry.action === 'resetPassword') {
+      state.error = '密码重置失败，请检查验证码和新密码后重试。'
     } else if (entry.action === 'select') {
       flagFailedGroup(state.pendingGroup)
       state.pendingGroup = ''
       state.error = code === 'GROUP_NO_TEXT_MODEL'
         ? '该模型分类暂无可用的对话模型，原设置未改动。'
         : '切换未完成，原设置未改动，请重试。'
+    } else if (['checkUpdate', 'installUpdate'].includes(entry.action)) {
+      const updateErrors = {
+        UPDATE_BLOCKED: '请先保存草稿并等待所有 Codex 任务结束，再确认更新；尚未安装或重启。',
+        UPDATE_CHECK_FAILED: '暂时无法确认 Codex 是否空闲，未安装或重启，请稍后重试。',
+        UPDATE_CHANGED: '更新版本已变化，请点击更新图标重新检查。',
+        UPDATE_INVALID: '更新信息或安装包校验失败，当前版本未改动。',
+        UPDATE_CONNECTION: '无法连接更新服务或下载中断，当前版本未改动，请稍后重试。',
+        UPDATE_UNAVAILABLE: '更新服务暂不可用，当前版本未改动。',
+      }
+      state.error = updateErrors[code] || '更新未完成，当前版本未改动，请稍后重试。'
     } else if (entry.action === 'reconfigure') {
-      state.error = '接管准备未完成，原配置未改动，请重试。'
+      state.error = code === 'RESTART_BLOCKED'
+        ? '请先保存草稿并等待运行中的任务完成，再确认重启；未重启或改动配置。'
+        : code === 'RESTART_CHECK_FAILED'
+          ? '暂时无法确认 Codex 是否空闲，未重启或改动配置，请稍后重试。'
+          : '重启准备未完成，请稍后重试。'
+    } else if (entry.action === 'restore') {
+      state.error = code === 'RESTORE_BLOCKED'
+        ? '请先保存草稿并等待运行中的任务完成，再确认退出；未改动账号和配置。'
+        : code === 'RESTORE_CHECK_FAILED'
+          ? '暂时无法确认 Codex 是否空闲，未退出登录或改动配置，请稍后重试。'
+          : '退出和恢复未完成，请稍后重试；请勿删除原配置备份。'
     } else if (entry.action === 'rechargeInfo') {
       state.error = '暂时无法读取充值方式，请稍后重试。'
     } else if (entry.action === 'rechargeAmount') {
@@ -1013,11 +1220,12 @@ export function installAssistantUI(options = {}) {
       AUTH_SESSION_LIMIT: '登录设备过多，请先退出其他设备。',
       AUTH_EXPIRED: '二次验证已过期，请重新输入账号和密码。',
     }
-    if (['login', 'register', 'authOptions', 'sendVerification'].includes(entry.action) && authErrors[code]) {
+    if (['login', 'register', 'authOptions', 'sendVerification',
+      'sendPasswordResetVerification', 'resetPassword'].includes(entry.action) && authErrors[code]) {
       state.error = authErrors[code]
       if (code === 'AUTH_EXPIRED') state.loginId = ''
     }
-    if (['login', 'register'].includes(entry.action)) clearAuthSecrets()
+    if (['login', 'register', 'resetPassword'].includes(entry.action)) clearAuthSecrets()
   }
   const settleTimeout = (id) => {
     const entry = pending.get(id)
@@ -1037,14 +1245,17 @@ export function installAssistantUI(options = {}) {
     render()
   }
   const request = (action, details = {}) => {
-    if (disposed || (action === 'status' ? hasActivePending('status') : hasForegroundPending())) return null
+    if (disposed || state.restarting || (action === 'status' ? hasActivePending('status') : hasForegroundPending())) return null
     const id = ++sequence
     if (action !== 'status') foregroundVersion += 1
     const command = { id, action }
+    if (details.allowInterrupt === true && ['restore', 'reconfigure', 'installUpdate'].includes(action)) command.allowInterrupt = true
+    if (action === 'installUpdate' && typeof details.updateId === 'string') command.updateId = details.updateId
     if (typeof details.group === 'string' && details.group) command.group = details.group
     const authFields = action === 'login' ? ['username', 'password', 'loginId', 'twoFactorCode']
       : action === 'register' ? ['username', 'password', 'email', 'verificationCode']
-        : action === 'sendVerification' ? ['email']
+        : action === 'resetPassword' ? ['email', 'verificationCode', 'password']
+          : ['sendVerification', 'sendPasswordResetVerification'].includes(action) ? ['email']
           : action === 'redeem' ? ['redeemCode']
             : ['rechargeAmount', 'rechargePay'].includes(action) ? ['paymentMethod'] : []
     for (const name of authFields) {
@@ -1093,6 +1304,75 @@ export function installAssistantUI(options = {}) {
       }
     }
     return id
+  }
+  const refreshBalance = () => {
+    if (disposed || document.hidden || !state.loggedIn || state.restarting || balanceRequest ||
+      hasForegroundPending() || hasActivePending('status')) return
+    const id = ++sequence
+    const entry = { id, foregroundVersion, timer: null }
+    const finish = (data) => {
+      if (balanceRequest !== entry) return
+      window.clearTimeout(entry.timer)
+      balanceRequest = null
+      if (disposed || !state.loggedIn || state.restarting || entry.foregroundVersion !== foregroundVersion ||
+        id < latestBalanceId) return
+      if (data && typeof data.quota === 'string') {
+        const next = publicState(data)
+        Object.assign(state, { quota: next.quota, balanceMode: next.balanceMode,
+          pendingSettlement: next.pendingSettlement, staleQuota: false })
+        latestBalanceId = id
+      } else state.staleQuota = Boolean(state.quota)
+      const delay = state.pendingSettlement ? options.settlementPollMs ?? 3000 : options.balancePollMs ?? 15000
+      nextBalanceAt = Date.now() + delay
+      render()
+    }
+    entry.finish = finish
+    entry.timer = window.setTimeout(() => finish(null), 30000)
+    balanceRequest = entry
+    try {
+      const result = window.yisamaAssistantCommand?.(JSON.stringify({ id, action: 'balance' }))
+      if (typeof window.yisamaAssistantCommand !== 'function') finish(null)
+      result?.catch?.(() => finish(null))
+    } catch {
+      finish(null)
+    }
+  }
+  const normalizeUpdate = (data) => ({
+    available: data.available === true && /^[a-f0-9]{64}$/.test(data.updateId),
+    updateId: cleanText(data.updateId, 64),
+    currentVersion: cleanText(data.currentVersion, 40),
+    latestVersion: cleanText(data.latestVersion, 40),
+    notes: cleanText(data.notes, 4000),
+    size: Number(data.size) || 0,
+  })
+  const checkDailyUpdate = () => {
+    if (disposed || document.hidden || state.restarting || dailyUpdateAttempted ||
+      typeof window.yisamaAssistantCommand !== 'function') return
+    dailyUpdateAttempted = true
+    const now = new Date()
+    const day = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
+    const key = 'yisama-infinite-assistant-update-check-day-v1'
+    if (safe(() => window.localStorage.getItem(key)) === day) return
+    // Claim before dispatch so reinjection and other windows do not repeat today's check.
+    safe(() => window.localStorage.setItem(key, day))
+    const entry = { id: ++sequence, timer: null }
+    entry.finish = (data) => {
+      if (dailyUpdateRequest !== entry) return
+      window.clearTimeout(entry.timer)
+      dailyUpdateRequest = null
+      if (disposed || state.restarting || !data || typeof data !== 'object') return
+      const update = normalizeUpdate(data)
+      if (!update.available || state.updateOpen) return
+      dailyUpdate = update
+      updateNoticeText.textContent = `版本 ${update.latestVersion} 已发布。`
+      updateNotice.hidden = false
+    }
+    dailyUpdateRequest = entry
+    entry.timer = window.setTimeout(() => entry.finish(null), 30000)
+    try {
+      window.yisamaAssistantCommand(JSON.stringify({ id: entry.id, action: 'checkUpdate' }))
+        ?.catch?.(() => entry.finish(null))
+    } catch { entry.finish(null) }
   }
   // Wallet and group pages take over the main view in place: same size, content slides sideways.
   const showView = (view) => {
@@ -1308,13 +1588,20 @@ export function installAssistantUI(options = {}) {
     state.message = ''
     clearAuthSecrets()
     render()
-    usernameField.input.focus()
+    const focusField = mode === 'reset' ? passwordResetEmail : usernameField
+    focusField.input.focus()
   }
   addListener(loginTab, 'click', () => setAuthMode('login'))
   addListener(registerTab, 'click', () => {
     if (state.registrationEnabled) setAuthMode('register')
   })
   addListener(backToLogin, 'click', () => setAuthMode('login'))
+  addListener(passwordResetBack, 'click', () => setAuthMode('login'))
+  addListener(forgotPasswordButton, 'click', () => {
+    if (hasForegroundPending()) return
+    if (usernameField.input.value.includes('@')) passwordResetEmail.input.value = usernameField.input.value.trim()
+    setAuthMode('reset')
+  })
   addListener(authForm, 'submit', (event) => {
     event.preventDefault()
     if (hasForegroundPending() || !state.authReady || !authForm.reportValidity()) return
@@ -1344,6 +1631,28 @@ export function installAssistantUI(options = {}) {
   addListener(sendVerificationButton, 'click', () => {
     if (hasForegroundPending() || Date.now() < state.verificationRetryAt || !emailField.input.reportValidity()) return
     request('sendVerification', { email: emailField.input.value.trim() })
+  })
+  addListener(sendPasswordResetButton, 'click', () => {
+    if (hasForegroundPending() || Date.now() < state.passwordResetRetryAt ||
+      !passwordResetEmail.input.reportValidity()) return
+    request('sendPasswordResetVerification', { email: passwordResetEmail.input.value.trim() })
+  })
+  addListener(passwordResetForm, 'submit', (event) => {
+    event.preventDefault()
+    if (hasForegroundPending() || !passwordResetForm.reportValidity()) return
+    if (passwordResetPassword.input.value !== passwordResetConfirm.input.value) {
+      state.error = '两次输入的密码不一致。'
+      render()
+      passwordResetConfirm.input.focus()
+      return
+    }
+    const details = {
+      email: passwordResetEmail.input.value.trim(),
+      verificationCode: passwordResetCode.input.value.trim(),
+      password: passwordResetPassword.input.value,
+    }
+    clearAuthSecrets()
+    request('resetPassword', details)
   })
   addListener(loggedOut, 'keydown', (event) => {
     if (event.key !== 'Escape') event.stopPropagation()
@@ -1386,7 +1695,46 @@ export function installAssistantUI(options = {}) {
   })
   addListener(takeoverButton, 'click', () => {
     if (state.nativeSync !== 'account-change' || !state.configured || hasForegroundPending()) return
-    request('reconfigure')
+    restartConfirmation.dataset.open = 'true'
+    takeoverConsent.input.checked = false
+    render()
+    cancelRestart.focus()
+  })
+  addListener(cancelRestart, 'click', () => {
+    restartConfirmation.dataset.open = 'false'
+    render()
+  })
+  addListener(confirmRestart, 'click', () => {
+    if (state.nativeSync === 'account-change' && state.configured) {
+      request('reconfigure', { allowInterrupt: takeoverConsent.input.checked })
+    }
+  })
+  addListener(updateButton, 'click', () => {
+    if (hasForegroundPending() || state.restarting || state.setupPending) return
+    state.updateOpen = true
+    updateNotice.hidden = true
+    state.update = null
+    updateConsent.input.checked = false
+    request('checkUpdate')
+  })
+  addListener(updateLater, 'click', () => { updateNotice.hidden = true })
+  addListener(updateView, 'click', () => {
+    if (hasForegroundPending() || state.restarting || state.setupPending) return
+    state.update = dailyUpdate
+    state.updateOpen = true
+    updateConsent.input.checked = false
+    updateNotice.hidden = true
+    setOpen(true)
+  })
+  addListener(cancelUpdate, 'click', () => {
+    state.updateOpen = false
+    render()
+    updateButton.focus()
+  })
+  addListener(confirmUpdate, 'click', () => {
+    if (state.update?.available) request('installUpdate', {
+      updateId: state.update.updateId, allowInterrupt: updateConsent.input.checked,
+    })
   })
   addListener(rechargeButton, 'click', () => {
     if (hasForegroundPending() && !hasActivePending('rechargeInfo')) return
@@ -1455,6 +1803,7 @@ export function installAssistantUI(options = {}) {
   })
   addListener(restoreButton, 'click', () => {
     confirmation.dataset.open = 'true'
+    restoreConsent.input.checked = false
     render()
     cancelRestore.focus()
   })
@@ -1462,7 +1811,7 @@ export function installAssistantUI(options = {}) {
     confirmation.dataset.open = 'false'
     render()
   })
-  addListener(confirmRestore, 'click', () => request('restore'))
+  addListener(confirmRestore, 'click', () => request('restore', { allowInterrupt: restoreConsent.input.checked }))
   addListener(document, 'pointerdown', (event) => {
     // A popover dismisses on outside clicks, except while a login draft would be lost.
     if (!state.open || !state.loggedIn || panel.contains(event.target) || badge.contains(event.target)) return
@@ -1476,7 +1825,10 @@ export function installAssistantUI(options = {}) {
     }
   })
   addListener(document, 'visibilitychange', () => {
-    if (!document.hidden) request('status')
+    if (!document.hidden) {
+      request('status')
+      checkDailyUpdate()
+    }
   })
   addListener(window, 'resize', scheduleBadgePlacement)
   if (window.visualViewport) addListener(window.visualViewport, 'resize', scheduleBadgePlacement)
@@ -1484,12 +1836,23 @@ export function installAssistantUI(options = {}) {
     if (!document.hidden) request('status')
   }, 60 * 1000)
   cleanups.push(() => window.clearInterval(pollTimer))
+  const balanceTimer = window.setInterval(() => {
+    if (Date.now() >= nextBalanceAt) refreshBalance()
+  }, 1000)
+  cleanups.push(() => window.clearInterval(balanceTimer))
   const authTimer = window.setInterval(() => {
-    if (state.open && !state.loggedIn && state.verificationRetryAt) render()
+    if (state.open && !state.loggedIn && (state.verificationRetryAt || state.passwordResetRetryAt)) render()
   }, 1000)
   cleanups.push(() => window.clearInterval(authTimer))
 
   const runtime = {
+    restartFailed() {
+      if (disposed) return
+      state.restarting = false
+      state.message = ''
+      state.error = 'Codex 重启未完成。请稍后重试，或关闭 Codex 后通过桌面“Codex - yisama”重新打开。'
+      render()
+    },
     consumeNativeReloadRequest() {
       const requested = nativeReloadRequested
       nativeReloadRequested = false
@@ -1505,6 +1868,14 @@ export function installAssistantUI(options = {}) {
     },
     receive(response) {
       if (disposed || !response || !Number.isFinite(response.id)) return false
+      if (dailyUpdateRequest?.id === response.id) {
+        dailyUpdateRequest.finish(response.ok === true ? response.data : null)
+        return true
+      }
+      if (balanceRequest?.id === response.id) {
+        balanceRequest.finish(response.ok === true ? response.data : null)
+        return true
+      }
       const entry = pending.get(response.id)
       if (!entry) return false
       pending.delete(response.id)
@@ -1517,7 +1888,12 @@ export function installAssistantUI(options = {}) {
       if (response.ok === true && response.data && typeof response.data === 'object') {
         const data = response.data
         state.error = ''
-        if (entry.action === 'authOptions') {
+        if (entry.action === 'checkUpdate') {
+          state.update = normalizeUpdate(data)
+        } else if (entry.action === 'installUpdate') {
+          state.restarting = data.restartRequired === true
+          state.message = '更新包已校验，正在重启 Codex。'
+        } else if (entry.action === 'authOptions') {
           state.authReady = true
           state.passwordLoginEnabled = data.auth?.passwordLoginEnabled === true
           state.registrationEnabled = data.auth?.registrationEnabled === true
@@ -1535,6 +1911,15 @@ export function installAssistantUI(options = {}) {
         } else if (entry.action === 'sendVerification' && data.verificationSent === true) {
           state.verificationRetryAt = Date.now() + 60 * 1000
           state.message = '验证码已发送，请查看邮箱。'
+        } else if (entry.action === 'sendPasswordResetVerification' && data.passwordResetVerificationSent === true) {
+          state.passwordResetRetryAt = Date.now() + 60 * 1000
+          state.message = '如果邮箱已注册，验证码将发送到邮箱。'
+        } else if (entry.action === 'resetPassword' && data.passwordReset === true) {
+          state.authMode = 'login'
+          usernameField.input.value = passwordResetEmail.input.value.trim()
+          clearAuthSecrets()
+          state.message = '密码已重置，请使用新密码登录。'
+          window.setTimeout(() => passwordField.input.focus(), 0)
         } else if (entry.action === 'rechargeInfo') {
           state.rechargeInfo = data
           state.view = 'wallet'
@@ -1544,7 +1929,7 @@ export function installAssistantUI(options = {}) {
           state.rechargePayment = null
         } else if (entry.action === 'redeem') {
           state.redeemCode = ''
-          applyData(data, false)
+          applyData(data, false, entry.id)
           state.message = '兑换成功，余额已更新。'
         } else if (entry.action === 'rechargeAmount') {
           state.rechargePaymentAmount = cleanText(String(data.paymentAmount ?? ''), 40)
@@ -1556,7 +1941,13 @@ export function installAssistantUI(options = {}) {
           }
           state.message = '订单已创建。请在 10 分钟内完成支付，超时请重新创建订单。'
         } else {
-          applyData(data, entry.action === 'status')
+          applyData(data, entry.action === 'status', entry.id)
+          if (['restore', 'reconfigure'].includes(entry.action) && data.restartRequired) {
+            state.restarting = true
+            state.nativeSync = ''
+            nativeReloadRequested = false
+            restartConfirmation.dataset.open = 'false'
+          }
           if (data.configured && ['select', 'login'].includes(entry.action)) state.nativeSync = 'pending'
           startSetup = entry.action === 'login' && !entry.setup && state.loggedIn && state.setupPending
           if (startSetup) state.message = '登录成功，正在准备配置。'
@@ -1568,6 +1959,10 @@ export function installAssistantUI(options = {}) {
         if (!state.loggedIn && !autoOpened) { autoOpened = true; state.open = true }
       }
       render()
+      if (response.ok === true && state.loggedIn) {
+        nextBalanceAt = Math.min(nextBalanceAt, Date.now() +
+          (state.pendingSettlement ? options.settlementPollMs ?? 3000 : options.balancePollMs ?? 15000))
+      }
       if (startSetup) request('login')
       if (entry.action === 'status' && response.ok === true && !state.loggedIn && !state.authReady) request('authOptions')
       if (queuedPay && response.ok === true && rechargeValue() && rechargeMethod()) {
@@ -1582,6 +1977,10 @@ export function installAssistantUI(options = {}) {
       if (disposed) return
       disposed = true
       for (const entry of pending.values()) window.clearTimeout(entry.timer)
+      if (balanceRequest) window.clearTimeout(balanceRequest.timer)
+      if (dailyUpdateRequest) window.clearTimeout(dailyUpdateRequest.timer)
+      dailyUpdateRequest = null
+      balanceRequest = null
       pending.clear()
       clearAuthSecrets()
       state.loginId = ''
@@ -1595,6 +1994,8 @@ export function installAssistantUI(options = {}) {
         group: state.group, groupLabel: state.groupLabel, groups: state.groups.map((group) => ({ ...group })),
         model: state.model, models: [...state.models], message: state.message, restartRequired: state.restartRequired,
         open: state.open, staleQuota: state.staleQuota, setupPending: state.setupPending, nativeSync: state.nativeSync,
+        restarting: state.restarting,
+        balanceMode: state.balanceMode, pendingSettlement: state.pendingSettlement,
       }
     },
   }
@@ -1602,20 +2003,23 @@ export function installAssistantUI(options = {}) {
   render()
   scheduleBadgePlacement()
   request('status')
+  checkDailyUpdate()
   return runtime
 }
 
 export function makeAssistantScript() {
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   return `(() => {
     const install = ${installAssistantUI.toString()};
+    const options = ${JSON.stringify({ version })};
     let topFrame = false;
     try { topFrame = window.top === window; } catch {}
     if (!topFrame || window.location.href !== 'app://-/index.html') return null;
     if (!document.body) {
-      document.addEventListener('DOMContentLoaded', () => install(), { once: true });
+      document.addEventListener('DOMContentLoaded', () => install(options), { once: true });
       return null;
     }
-    return install();
+    return install(options);
   })()`
 }
 

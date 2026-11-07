@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { handleRequest, validateRequest } from './desktop-bridge.mjs'
 import { makeAssistantScript, REMOVE_ASSISTANT_SCRIPT } from './codex-panel.mjs'
-import { safeError, publicErrorCode, desktopNativeConfiguration, desktopNativeSynced } from './yisama.mjs'
+import { UserError, safeError, publicErrorCode, desktopNativeConfiguration, desktopNativeSynced } from './yisama.mjs'
 
 export const CODEX_PAGE = 'app://-/index.html'
 const BINDING = 'yisamaAssistantCommand'
@@ -173,6 +173,32 @@ export function adaptNativeFastSource(source) {
     patched = patched.slice(0, match.index) + replacement + patched.slice(match.index + match[0].length)
   }
   return patched + '\nwindow.__yisamaNativeFastSourceReady=true;window.__yisamaNativeReasoningSourceReady=true;\n'
+}
+
+// A late helper attachment may miss the initial assets. Only a fresh desktop
+// launch, before any user interaction, may automatically load them once.
+export function installNativeStartup(startedAt, options = {}) {
+  if (window !== window.top || (location.href !== 'app://-/index.html' && options.allowTestLocation !== true) ||
+    window.__yisamaNativeStartup) return
+  const started = Date.parse(startedAt)
+  const deadline = started + 30000
+  let eligible = Number.isFinite(started) && Date.now() >= started && Date.now() < deadline &&
+    window.performance?.getEntriesByType('navigation')[0]?.type === 'navigate'
+  const events = ['pointerdown', 'keydown', 'input']
+  let timer
+  const cancel = () => {
+    eligible = false
+    window.clearTimeout(timer)
+    for (const event of events) window.removeEventListener(event, cancel, true)
+  }
+  window.__yisamaNativeStartup = {
+    pending: () => eligible && Date.now() < deadline,
+    cancel,
+  }
+  if (eligible) {
+    for (const event of events) window.addEventListener(event, cancel, true)
+    timer = window.setTimeout(cancel, deadline - Date.now())
+  }
 }
 
 // Serialized into the renderer. The existing native setter still owns UI and persistence.
@@ -378,14 +404,24 @@ export async function restartAssistant(args, spawnChild = spawn) {
   child.unref()
 }
 
-export async function restartCodex(spawnChild = spawn) {
+export async function restartCodex(spawnChild = spawn, { installer } = {}) {
   const launcher = fileURLToPath(new URL('./launch-codex.ps1', import.meta.url))
+  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', launcher, '-Restart']
+  if (installer) {
+    if (!path.isAbsolute(installer.path) || !/^[a-f0-9]{64}$/.test(installer.sha256)) {
+      throw new ConnectionError('Invalid prepared update installer.')
+    }
+    args.push('-UpdateInstaller', installer.path, '-UpdateSha256', installer.sha256)
+  }
   const child = spawnChild(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', launcher, '-Restart'], {
-      detached: true, stdio: 'ignore', windowsHide: true,
+    args, {
+      // Windows PowerShell can exit silently without running -File when detached.
+      detached: false, stdio: 'ignore', windowsHide: true,
     })
   await once(child, 'spawn')
-  child.unref()
+  // Unreferencing here can end the helper before PowerShell executes -File.
+  const [code] = await once(child, 'close')
+  if (code !== 0) throw new ConnectionError('Codex could not restart. Open Codex - yisama again.')
 }
 
 export function validateEndpoint(value) {
@@ -439,12 +475,13 @@ export function createRequestQueue(handler = handleRequest) {
   let queue = Promise.resolve()
   let pending = 0
   let quiesced = false
+  const updateChecks = new Set()
   const deferred = []
   const run = (payload) => {
     const request = parseRequest(payload)
     if (!request) return Promise.resolve(null)
     pending++
-    const result = queue.then(async () => {
+    const result = (request.action === 'checkUpdate' ? Promise.resolve() : queue).then(async () => {
       try {
         return { id: request.id, ok: true, data: await handler(request) }
       } catch (error) {
@@ -452,7 +489,11 @@ export function createRequestQueue(handler = handleRequest) {
           ...(publicErrorCode(error) ? { code: publicErrorCode(error) } : {}) }
       }
     })
-    queue = result.then(() => { pending-- }, () => { pending-- })
+    const settled = result.then(() => { pending-- }, () => { pending-- })
+    if (request.action === 'checkUpdate') {
+      updateChecks.add(settled)
+      settled.then(() => updateChecks.delete(settled))
+    } else queue = settled
     return result
   }
   const request = (payload) => {
@@ -460,7 +501,7 @@ export function createRequestQueue(handler = handleRequest) {
     return new Promise((resolve) => deferred.push(() => resolve(run(payload))))
   }
   request.isIdle = () => pending === 0 && deferred.length === 0
-  request.drain = () => queue
+  request.drain = () => Promise.all([queue, ...updateChecks])
   request.quiesce = () => { quiesced = true }
   request.resume = () => {
     quiesced = false
@@ -487,6 +528,60 @@ export async function readUpdateMarker(updateFile, readFile = fs.readFile) {
 
 export function shouldReload(previousGeneration, marker) {
   return Boolean(marker && marker.generation !== previousGeneration)
+}
+
+// Serialized into the renderer; inspect activity without refreshing authentication.
+export async function codexRestartBlocker() {
+  if (window.top !== window || location.href !== 'app://-/index.html' ||
+    !window.__yisamaInfiniteAssistant || !window.electronBridge?.sendMessageFromView) return 'unavailable'
+  const hasDraft = () => {
+    const state = window.__yisamaInfiniteAssistant.snapshot?.()
+    return [...document.querySelectorAll(
+      '[contenteditable=true],textarea,input:not([type]),input[type=text],input[type=password],input[type=email]',
+    )].some((node) => {
+      if (node.disabled || node.readOnly || node.closest?.('[hidden],[aria-hidden="true"]') ||
+        (node.getClientRects && node.getClientRects().length === 0)) return false
+      if (state?.loggedIn && node.closest?.('#yisama-infinite-assistant-ui [data-testid="logged-out"]')) return false
+      return node.isContentEditable ? node.textContent.trim() : node.value?.trim()
+    })
+  }
+  if (hasDraft()) return 'draft'
+  if (window.__yisamaInfiniteAssistant.snapshot?.().setupPending ||
+    window.__yisamaNativeFast?.isBusy()) return 'busy'
+  const rpc = (method, params) => new Promise((resolve, reject) => {
+    const id = `yisama-restart-${crypto.randomUUID()}`
+    const finish = (callback, value) => {
+      clearTimeout(timer)
+      window.removeEventListener('message', receive)
+      callback(value)
+    }
+    const receive = (event) => {
+      const data = event.data
+      if (data?.type !== 'mcp-response' || data.hostId !== 'local' || data.message?.id !== id) return
+      if (data.message.error) finish(reject, new Error('Restart activity check failed.'))
+      else finish(resolve, data.message.result)
+    }
+    const timer = setTimeout(() => finish(reject, new Error('Restart activity check timed out.')), 8000)
+    window.addEventListener('message', receive)
+    Promise.resolve().then(() => window.electronBridge.sendMessageFromView({
+      type: 'mcp-request', hostId: 'local', request: { id, method, params }, priority: 'critical',
+    })).catch(() => finish(reject, new Error('Restart activity check failed.')))
+  })
+  try {
+    let cursor = null
+    do {
+      const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
+      if (!Array.isArray(loaded?.data)) return 'unavailable'
+      for (const threadId of loaded.data) {
+        const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
+        if (thread?.status?.type !== 'idle') return 'busy'
+      }
+      cursor = loaded.nextCursor
+    } while (cursor)
+    return hasDraft() ? 'draft' : null
+  } catch {
+    return 'unavailable'
+  }
 }
 
 export class CdpConnection {
@@ -657,9 +752,6 @@ export class AssistantTarget {
   async reply({ payload, executionContextId }) {
     const response = await this.request(payload)
     if (!response || this.disposed || !this.allowed || executionContextId !== this.topContext()) return
-    if (response.ok && parseRequest(payload)?.action === 'restore') {
-      this.restoreSync = { version: `restore-${crypto.randomUUID()}`, models: null }
-    }
     await this.connection.call('Runtime.evaluate', {
       expression: `if (window === window.top && location.href === ${JSON.stringify(CODEX_PAGE)}) {
         window.__yisamaNativeFast?.receive(${JSON.stringify(response)});
@@ -667,6 +759,26 @@ export class AssistantTarget {
       }`,
       contextId: executionContextId,
       returnByValue: true,
+    })
+  }
+
+  async restartBlocker() {
+    if (this.disposed || !this.allowed || !this.topContext()) return 'unavailable'
+    const contextId = this.topContext()
+    const result = await this.connection.call('Runtime.evaluate', {
+      expression: `(${codexRestartBlocker.toString()})()`,
+      contextId, returnByValue: true, awaitPromise: true,
+    }, { timeoutMs: 45000 })
+    if (this.disposed || !this.allowed || contextId !== this.topContext() || result.exceptionDetails) return 'unavailable'
+    const blocker = result.result?.value
+    return blocker === null || ['draft', 'busy'].includes(blocker) ? blocker : 'unavailable'
+  }
+
+  async restartFailed() {
+    if (this.disposed || !this.allowed || !this.topContext()) return
+    await this.connection.call('Runtime.evaluate', {
+      expression: 'window.__yisamaInfiniteAssistant?.restartFailed?.()',
+      contextId: this.topContext(), returnByValue: true,
     })
   }
 
@@ -693,7 +805,7 @@ export class AssistantTarget {
       }
       if (synced.reloadNativeFast !== true) return synced
       this.nativeFastReloadAttempted = true
-      this.report(`${new Date().toISOString()} Native model controls: user-requested page reload.`)
+      this.report(`${new Date().toISOString()} Native model controls: ${synced.startupReload ? 'startup' : 'user-requested'} page reload.`)
       // The renderer's memory cache can return modules adapted by an earlier assistant
       // build even with ignoreCache, so bypass it for this one reload.
       await this.connection.call('Network.enable')
@@ -720,7 +832,8 @@ export class AssistantTarget {
         { urlPattern: NATIVE_RUNTIME_ASSET, requestStage: 'Response' },
         { urlPattern: NATIVE_HOST_ASSET, requestStage: 'Response' }],
     })
-    const source = `${makeAssistantScript()}\n;(${installNativeFast.toString()})();`
+    const source = `(${installNativeStartup.toString()})(${JSON.stringify(process.env.YISAMA_CODEX_STARTED_AT)});\n` +
+      `${makeAssistantScript()}\n;(${installNativeFast.toString()})();`
     const restored = await this.connection.call('Page.addScriptToEvaluateOnNewDocument', { source })
     this.scriptId = restored.identifier
     const result = await this.connection.call('Runtime.evaluate', {
@@ -754,17 +867,46 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
     try { process.kill(pid, 0); return true } catch { return false }
   }, onReady = () => {}, report = console.error, pollMs = 250, updateFile = UPDATE_FILE,
   readUpdate = readUpdateMarker, reloadCheck = shouldReload, restartDelayMs = 1500,
+  restart = handler === handleRequest ? restartCodex : null,
   readEndpoint = async (file) => JSON.parse(await fs.readFile(file, 'utf8')),
   connectionFactory = (url, onEvent) => new CdpConnection(url, onEvent),
   nativeConfiguration = handler === handleRequest ? desktopNativeConfiguration : async () => null,
   onNativeSynced = nativeConfiguration === desktopNativeConfiguration ? desktopNativeSynced : async () => {} } = {}) {
   const clients = new Map()
-  // Taking over Codex only applies after a restart, so the assistant restarts Codex itself
-  // shortly after the panel has shown the takeover reply.
+  // Finish account changes by restarting only after the panel has received its reply.
   let restartCodexAt = 0
+  let preparedInstaller
+  let allowInterrupt = false
+  const checkRestart = async (action, consent = false) => {
+    const restoring = action === 'restore'
+    const blockers = await Promise.all([...clients.values()].map((client) => client.restartBlocker()))
+    const unavailable = !blockers.length || blockers.includes('unavailable')
+    if (unavailable || (!consent && blockers.some(Boolean))) {
+      const unchanged = restoring ? '未退出登录或改动配置' : '未重启'
+      const error = new UserError(unavailable
+        ? `暂时无法确认 Codex 是否空闲，${unchanged}，请稍后重试。`
+        : `请先保存草稿并等待运行中的任务完成，再确认${restoring ? '退出' : '重启'}；${unchanged}。`)
+      error.publicCode = `${restoring ? 'RESTORE' : action === 'installUpdate' ? 'UPDATE' : 'RESTART'}_${unavailable ? 'CHECK_FAILED' : 'BLOCKED'}`
+      throw error
+    }
+  }
   const request = createRequestQueue(async (command) => {
+    if (restartCodexAt && !['status', 'authOptions'].includes(command.action)) {
+      throw new UserError('Codex 正在重启，请稍候。')
+    }
+    if (['restore', 'reconfigure', 'installUpdate'].includes(command.action)) {
+      await checkRestart(command.action, command.allowInterrupt === true)
+    }
     const data = await handler(command)
-    if (command.action === 'reconfigure') restartCodexAt = Date.now() + restartDelayMs
+    if (command.action === 'installUpdate') {
+      await checkRestart(command.action, command.allowInterrupt === true)
+      preparedInstaller = data.updateInstaller
+      delete data.updateInstaller
+    }
+    if (command.action === 'reconfigure' || (['restore', 'installUpdate'].includes(command.action) && data.restartRequired)) {
+      allowInterrupt = command.allowInterrupt === true
+      restartCodexAt = Date.now() + restartDelayMs
+    }
     return data
   })
   let generation = validateUpdateMarker(await readUpdate(updateFile))?.generation || null
@@ -774,7 +916,21 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
     while (!signal?.aborted && isRunning(processId)) {
       let reloading = false
       if (restartCodexAt && Date.now() >= restartCodexAt && request.isIdle() &&
-        [...clients.values()].every((client) => client.isIdle())) return { restartCodex: true }
+        [...clients.values()].every((client) => client.isIdle())) {
+        if (!restart) return { restartCodex: true, ...(preparedInstaller ? { installer: preparedInstaller } : {}) }
+        try {
+          await checkRestart(preparedInstaller ? 'installUpdate' : 'reconfigure', allowInterrupt)
+          // Keep the renderer and error channel alive until the launcher actually succeeds.
+          await restart(undefined, { installer: preparedInstaller })
+          return { restarted: true }
+        } catch (error) {
+          report(connectionMessage(error))
+          restartCodexAt = 0
+          preparedInstaller = undefined
+          allowInterrupt = false
+          for (const client of clients.values()) await client.restartFailed()
+        }
+      }
       try {
         const endpoint = validateEndpoint(await readEndpoint(endpointFile))
         if (endpoint.processId !== processId) break
@@ -799,23 +955,22 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
           }
         }
         if (!targets.length) throw new ConnectionError('No Codex workspace is ready for the assistant.')
-        if (request.isIdle() && [...clients.values()].every((client) => client.isIdle())) {
-          const settings = await nativeConfiguration() || [...clients.values()].find((client) => client.restoreSync)?.restoreSync
-          if (!settings) for (const client of clients.values()) await client.syncModels(null)
-          if (settings) {
-            request.quiesce()
-            try {
-              await request.drain()
+        if (!restartCodexAt && request.isIdle() && [...clients.values()].every((client) => client.isIdle())) {
+          request.quiesce()
+          try {
+            await request.drain()
+            const settings = await nativeConfiguration()
+            if (!settings) for (const client of clients.values()) await client.syncModels(null)
+            if (settings) {
               let allSynced = true
               for (const client of clients.values()) {
                 const synced = await client.syncModels(settings)
-                if (synced?.status === 'synced') client.restoreSync = null
-                else allSynced = false
+                if (synced?.status !== 'synced') allSynced = false
               }
               if (allSynced) await onNativeSynced(settings.version)
-            } finally {
-              request.resume()
             }
+          } finally {
+            request.resume()
           }
         }
         lastFailure = ''
@@ -860,6 +1015,7 @@ export async function syncNativeModels(settings, options = {}) {
   if (reloadRequested) runtime.nativeStatus?.('reload-required')
   const fast = window.__yisamaNativeFast
   if (!settings) {
+    window.__yisamaNativeStartup?.cancel()
     fast?.authorize(null)
     return { status: 'unavailable' }
   }
@@ -891,15 +1047,19 @@ export async function syncNativeModels(settings, options = {}) {
     }).catch(() => finish(reject, new Error('Native request failed.')))
   })
   const finish = async () => {
+    const startup = window.__yisamaNativeStartup
     if (window.__yisamaNativeAdapterUnsupported === true) {
+      startup?.cancel()
       runtime.nativeStatus?.('unsupported')
       return { status: 'synced' }
     }
     if (!fast?.needsReload?.()) {
+      startup?.cancel()
       runtime.nativeStatus?.('synced')
       return { status: 'synced' }
     }
-    if (!reloadRequested) {
+    const startupReload = startup?.pending() === true
+    if (!reloadRequested && !startupReload) {
       if (runtime.snapshot?.().nativeSync !== 'reload-blocked') runtime.nativeStatus?.('reload-required')
       return { status: 'pending', nativeControlsMissing: true }
     }
@@ -916,17 +1076,22 @@ export async function syncNativeModels(settings, options = {}) {
         return node.isContentEditable ? node.textContent.trim() : node.value?.trim()
       })
     }
-    if (hasUnsentChanges()) return blocked()
-    let cursor = null
-    do {
-      const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
-      for (const threadId of loaded.data) {
-        const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
-        if (thread.status?.type !== 'idle') return blocked()
-      }
-      cursor = loaded.nextCursor
-    } while (cursor)
-    return hasUnsentChanges() ? blocked() : { status: 'pending', reloadNativeFast: true }
+    try {
+      if (hasUnsentChanges() || (startupReload && runtime.snapshot?.().open)) return blocked()
+      let cursor = null
+      do {
+        const loaded = await rpc('thread/loaded/list', { cursor, limit: 100 })
+        for (const threadId of loaded.data) {
+          const { thread } = await rpc('thread/read', { threadId, includeTurns: false })
+          if (thread.status?.type !== 'idle') return blocked()
+        }
+        cursor = loaded.nextCursor
+      } while (cursor)
+      if (hasUnsentChanges() || (!reloadRequested && !startup.pending())) return blocked()
+      return { status: 'pending', reloadNativeFast: true, startupReload: startupReload && !reloadRequested }
+    } finally {
+      startup?.cancel()
+    }
   }
   let stage = 'authentication'
   try {
@@ -1121,7 +1286,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (result?.reload && !stop.signal.aborted) {
         await restartAssistant(args)
       }
-      if (result?.restartCodex && !stop.signal.aborted) await restartCodex()
+      if (result?.restartCodex && !stop.signal.aborted) await restartCodex(undefined, { installer: result.installer })
     }
   } catch (error) {
     console.error(connectionMessage(error))

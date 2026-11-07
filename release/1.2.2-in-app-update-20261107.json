@@ -1,0 +1,25 @@
+{
+  "version": "1.2.2",
+  "releaseDate": "2026-11-07",
+  "installer": {
+    "file": "Yisama-Setup-1.2.2.exe",
+    "sha256": "f275517819f99a581b2e04f2444f7c37aff61bdb0215a2261d7bacf49b9d06d4",
+    "bytes": 27550367,
+    "signed": false
+  },
+  "build": {
+    "buildId": "e8bbe33b9c094c079f1a5e6775ea5e5a221ca72b23508f354953c0abf9effd9b",
+    "entries": {
+      "codex-assistant.mjs": "73e98b269a1b60f9c95e63c53fa6d5681d92ae30c97da20267aacbd8efa4395c",
+      "yisama.mjs": "9c1f235147581e56ab3921d5e8825634326be31dabf3521cbafea2bc1b1e7083",
+      "launch-codex.ps1": "8aa3597fcbfd2fdbe857e5eab26e091ef93dd0de192dd39bf83bef9f69650d9c"
+    },
+    "backendByteIdenticalToApprovedInstallation": true
+  },
+  "updateSource": "https://api-cn.yisama.asia/assistant/updates/windows-x64/latest.json",
+  "checks": {
+    "backendAndBuildPassed": 131,
+    "browserPassed": 12,
+    "packagedInstallerPassed": 4
+  }
+}

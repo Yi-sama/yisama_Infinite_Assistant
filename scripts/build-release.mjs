@@ -50,6 +50,7 @@ async function buildEntry(sourceRoot, outputRoot, source, name) {
     define: {
       ...(name === 'codex-assistant.mjs' ? { __YISAMA_CLI_ENTRY__: 'false' } : {}),
       __YISAMA_LICENSE_REQUIRED__: String(requireLicense),
+      ...(process.env.YISAMA_UPDATE_URL ? { __YISAMA_UPDATE_URL__: JSON.stringify(process.env.YISAMA_UPDATE_URL) } : {}),
     },
     logLevel: 'silent',
   })
