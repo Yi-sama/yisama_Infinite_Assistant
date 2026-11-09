@@ -1,6 +1,6 @@
 ---
 name: yisama-setup
-description: Set up and manage yisama 无限助手 for Codex. Use when the user asks to log in, switch groups or models, adjust reasoning levels including Ultra, view remaining quota, enable Fast, recharge, restore, or remove the yisama integration.
+description: Set up and manage yisama 无限助手 for Codex. Use when the user asks to log in, switch groups or models, discover available image models, adjust reasoning levels including Ultra, view remaining quota, enable Fast, recharge, restore, or remove the yisama integration.
 ---
 
 # yisama 无限助手
@@ -41,6 +41,7 @@ npm ci --prefix "PLUGIN_ROOT" --ignore-scripts --no-audit --no-fund
 5. 自动写入 Codex 配置，并保留原配置备份。
 6. 自动开启 Fast 并向站点确认开关和分组权限。
 7. 显示账户剩余额度，提供官方钱包的自定义充值入口。
+8. 自动配置系统 `$imagegen`，生图使用无限助手的独立配置，默认 `gpt-image-2`，不跟随聊天服务商切换。用户不需要额外填写密钥或安装 Python。
 
 用户有有效登录状态时直接复用；到期后自动续期。登录失败不会被当成成功，也不会改写 Codex 配置。不要将状态文件或认证文件读入聊天。
 
@@ -68,6 +69,24 @@ node "PLUGIN_ROOT/scripts/yisama.mjs" restore
 当前已验证的 Codex 将 Ultra 转换为 `max` 强度及全会话上下文设置；由 Codex 自行处理，不手动篡改请求。这里只验证了客户端向本地测试服务的真实请求，不能据此保证每条真实中转线路都支持。提醒用户 Ultra 可能增加耗时和额度消耗。查看本地配置不等于真实线路已经生效。
 
 `restore` 只撤回助手管理的配置，保留用户后续改动，清除本机助手登录状态；不删除服务端凭证。设置或恢复完成后提醒用户重启 Codex 或新建会话。
+
+## 生图
+
+Windows 安装器和 `Codex - yisama` 启动入口会自动配置系统 `$imagegen`，不是新增另一个同名技能；同时在当前 Codex home 的全局规则中追加可撤销的生图路由，保留个人内容，并兼容已有 `AGENTS.override.md`。全局规则在新会话中加载，用户不需要点名技能。插件方式安装时，首次登录配置也会接入。生图仍需用户在侧栏登录，未登录时不得回退到官方服务。
+
+正常生图使用系统 `$imagegen`，按照其说明调用安装包自带的运行入口。用户可直接指定“用某模型生图”，将名称原样传为 `--model`。只有用户要求保存默认值时才执行：
+
+```text
+node "PLUGIN_ROOT/scripts/yisama.mjs" image model --name <生图模型>
+```
+
+用户询问“有哪些生图模型”“你能用什么模型画图”“默认用哪个”等问题时，默认指当前登录的无限助手账号，先执行 `image models` 再回答。简短列出返回的模型及已确认可用的默认模型，说明可以指定模型；默认模型不在清单时告知并请用户选择，不擅自替换。除非用户明确问官方目录或厂商对比，不查官网补清单，不按名字编造模型定位、价格或停用时间。查询失败就用简短易懂的话说明登录、开通或稍后重试，不让用户自行判断官方型号是否有权限，也不堆叠分组、凭据或 API 术语。
+
+查询只列出账号可见模型与站点 `image-generation` 能力目录的交集，不提交生图请求，不产生生图费用。列出的生成线路不保证支持编辑或所有可选参数，只有用户问及或实际操作需要时才解释这些边界。
+
+图片凭据按登录用户和设备独立准备，仅使用账号有权限的 `images` 分组，不复制聊天凭据，不使用管理员凭据，不跨组重试。登录配置和升级后首次图片操作会自动完成准备；没有图片权限时明确说明，不影响普通聊天。真正生图按调用用户的账号计费。切换聊天分组、模型、思考等级或 Fast 不会改变图片凭据和生图默认模型。
+
+退出登录会清除生图凭据，保留技能的助手入口并提示重新登录。卸载时恢复原系统技能、只移除助手添加的全局规则；维护者可用 `image install` / `image uninstall` 配置或恢复入口，助手拥有的内容有后续修改时停止并保留文件。不得为了检查安装自动提交付费生图请求。
 
 登录时要明确告诉用户：这是与官方中转站账号互通的登录，不是另外注册一套账号。
 

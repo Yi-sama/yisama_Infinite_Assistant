@@ -120,6 +120,7 @@ async function fixture(t, { groups = { auto: { desc: 'All' }, premium: { ratio: 
     }
     if (url.pathname === '/api/token/' && req.method === 'POST') {
       if (state.createKeyFailure) return reply({ success: false }, 503)
+      if (body.name.length > 50) return reply({ success: false, message: 'Token name is too long' })
       state.keys.push({ ...body, id: state.keys.length + 1, status: 1,
         user_id: state.account.id,
         fast_mode_available: !state.fastUnavailableGroups.includes(body.group) })
@@ -392,6 +393,37 @@ test('desktop login defaults to the first available group when All is unavailabl
   const closed = await bridge.close()
   assert.equal(closed.code, 0)
   assert.equal(closed.stderr, '')
+})
+
+test('desktop login prepares a separate image credential without changing the chat group or Fast', async (t) => {
+  const { files, state, env } = await fixture(t, { groups: { auto: {}, premium: {}, images: {} } })
+  const bridge = bridgeClient(env)
+  t.after(() => { if (bridge.child.exitCode === null) bridge.child.kill() })
+  const login = await bridge.request({ id: 1, action: 'login' })
+  assert.equal(login.ok, true)
+  assert.equal(login.data.group, 'auto')
+  const imageFile = path.join(env.PLUGIN_DATA, 'imagegen.json')
+  const image = JSON.parse(await fs.readFile(imageFile, 'utf8'))
+  const chatState = JSON.parse(await fs.readFile(files.state, 'utf8'))
+  const chatKey = state.keys.find((key) => key.id === chatState.keyId)
+  const imageKey = state.keys.find((key) => key.id === image.keyId)
+  assert.equal(image.version, 2)
+  assert.equal(image.userId, state.account.id)
+  assert.notEqual(imageKey.id, chatKey.id)
+  assert.ok(imageKey.name.length <= 50, 'image device names must fit the production API limit')
+  assert.equal(imageKey.group, 'images')
+  assert.equal(imageKey.fast_mode, false)
+  assert.equal(imageKey.cross_group_retry, false)
+  assert.equal(chatKey.group, 'auto')
+  assert.equal(chatKey.fast_mode, true)
+  const before = await fs.readFile(imageFile, 'utf8')
+  await bridge.request({ id: 2, action: 'select', group: 'premium' })
+  assert.equal(await fs.readFile(imageFile, 'utf8'), before)
+  assert.equal(state.calls.some((call) => call.path.startsWith('/v1/images/')), false)
+  const result = await bridge.request({ id: 3, action: 'restore' })
+  assert.equal(result.ok, true)
+  await assert.rejects(fs.access(imageFile))
+  assert.equal((await bridge.close()).stderr, '')
 })
 
 test('two installations keep independent credentials, Fast settings and groups across logins', async (t) => {

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { parse, stringify } from 'smol-toml'
 
 export const DEFAULT_ORIGIN = 'https://api.yisama.asia'
@@ -85,6 +86,232 @@ export async function writeTransaction(entries, write = replaceFile) {
   }
 }
 
+export function imagegenPaths(files) {
+  return {
+    config: path.join(files.pluginData, 'imagegen.json'),
+    snapshot: path.join(files.pluginData, 'imagegen-skill.json'),
+    instructions: path.join(files.pluginData, 'imagegen-instructions.json'),
+    skill: path.join(path.dirname(files.codexConfig), 'skills', '.system', 'imagegen', 'SKILL.md'),
+  }
+}
+
+function imagegenSkill(files) {
+  const quote = (value) => `'${value.replaceAll("'", "''")}'`
+  const node = quote(process.execPath)
+  const entry = quote(fileURLToPath(new URL('./yisama.mjs', import.meta.url)))
+  const data = quote(files.pluginData)
+  const home = quote(path.dirname(files.codexConfig))
+  return `---
+name: imagegen
+description: Generate or edit images and query the signed-in user's available image models through yisama Infinite Assistant. Use for image requests, image model selection, defaults, and questions like 有哪些生图模型.
+---
+
+# Image Generation
+
+<!-- yisama-managed-imagegen:v1 -->
+
+This system imagegen skill is managed by the installed yisama Infinite Assistant.
+Use its bundled runtime below, not the built-in image tool or another image skill.
+It uses the assistant's dedicated image configuration, not Codex's active chat provider.
+Never read or print authentication files, keys, sessions, or response URLs in chat.
+If not signed in, ask the user to sign in through the assistant sidebar.
+Never silently switch providers or models, or fall back to the official image tool.
+
+## Run
+
+Use these absolute paths in PowerShell; Python and additional packages are not needed:
+
+\`\`\`powershell
+$env:PLUGIN_DATA = ${data}
+$env:CODEX_HOME = ${home}
+& ${node} ${entry} image generate --prompt "..." --out "output/imagegen/result.png"
+& ${node} ${entry} image edit --image "input.png" --prompt "..." --out "output/imagegen/edited.png"
+& ${node} ${entry} image models
+\`\`\`
+
+The requested model is passed exactly as \`--model <id>\`; otherwise use the saved
+image default (\`gpt-image-2\` initially; this is not an availability guarantee).
+Never derive it from the dialogue model.
+Changing the default requires an explicit user request:
+\`image model --name <id>\`.
+
+## Model Discovery
+
+Questions like "有哪些生图模型？", "你能用什么模型画图？", or "默认用哪个？"
+mean this signed-in Infinite Assistant account, unless the user explicitly asks
+for an official provider catalogue or comparison. Run \`image models\` before
+answering, even when the user does not name this skill. Do not answer from this
+file's initial default, web searches, an official model catalogue, or memory.
+
+On success, briefly list the returned IDs and the default only if the command
+confirms it is available. Say that the user can specify a model. Do not invent
+quality, speed, price, editing support, or retirement dates from model names.
+If the saved default is unavailable, say so and ask the user to choose from the
+returned models; do not silently select a replacement.
+On failure, give the short actionable reason in the user's language, such as
+signing in, requesting image access, or trying the query later. Do not replace
+a failed query with a catalogue from another source.
+
+Keep implementation details out of ordinary replies: credentials, groups,
+API protocols, capability metadata, and "official models may not work on your
+relay" caveats are not a model-selection answer. Explain them only when asked
+or needed to resolve the reported problem. A successful answer can be as short as:
+"你当前可用的生图模型：<返回的模型>。默认使用 <已确认可用的默认模型>，也可以指定模型。"
+
+The command intersects the account's authorized models with the station's
+\`image-generation\` capability metadata for the Images API. It does not generate
+images or incur image-generation charges. Listed models are generation routes,
+not a promise that all of them support editing or every optional parameter.
+
+The assistant prepares a separate image credential for the signed-in account and
+this device in the \`images\` group. It never reuses the chat credential, an
+administrator credential, or another user's quota. Actual generation is charged
+to the calling account according to station billing.
+
+## Workflow
+
+1. Understand the subject, intended use, composition, style, lighting, exact text,
+   and invariants. Preserve the user's requirements in the prompt.
+2. For input images, inspect them first. Use \`edit\` with repeated \`--image\` flags
+   for references or edits, and explain each image's role in the prompt.
+   A reference image is not necessarily an edit target. Use \`--mask\` if supplied.
+3. Use \`generate\` for new images and \`edit\` for image inputs. For distinct assets,
+   run separate commands; \`--n\` requests variants of one prompt.
+4. Pass only requested controls: \`--size WIDTHxHEIGHT|auto\`,
+   \`--quality low|medium|high|auto\`, \`--background transparent|opaque|auto\`,
+   \`--output-format png|jpeg|webp\`, \`--output-compression 0..100\`,
+   \`--input-fidelity high|low\` (edits only), \`--prompt-file <UTF-8-file>\`.
+   \`--dry-run\` does not send requests and does not prove a model works.
+5. Save finals under \`output/imagegen/\` or the user's chosen destination.
+   Never overwrite without permission (\`--force\`). Do not alter this skill for
+   an ordinary image request. Normal generation may incur station usage.
+6. Inspect every result. Verify content, exact text, actual size, alpha, and edit
+   invariants. Do not claim requested dimensions were delivered unless checked.
+   A model name alone does not prove a provider's underlying model identity.
+7. Show the saved image inline with its absolute path and report the selected model.
+
+Generation uses \`/v1/images/generations\`; editing additionally requires a
+compatible \`/v1/images/edits\` endpoint. Do not silently translate protocols.
+For \`gpt-image-2\`, do not request transparent backgrounds or input fidelity.
+Do not generate images solely to test installation without explicit approval.
+`
+}
+
+const IMAGE_RULE_START = '<!-- yisama-image-routing:begin -->'
+const IMAGE_RULE_END = '<!-- yisama-image-routing:end -->'
+
+function imagegenInstructions(files) {
+  const skill = imagegenPaths(files).skill
+  return `${IMAGE_RULE_START}
+## Image Requests
+
+For image generation, editing, or questions about available image models, use
+the system $imagegen skill at "${skill}", including when the user does not name
+the skill. Unless the user explicitly asks for an official provider catalogue,
+image-model questions mean the signed-in Infinite Assistant account. Run its
+"image models" command before answering and report only the returned model IDs
+and a confirmed available default. Never substitute web searches, an official
+catalogue, the dialogue model list, or remembered IDs, including after a failed
+query. Do not infer model strengths or prices from names. Keep ordinary replies
+brief and user-facing; on failure, state the actionable reason without internal
+group, credential, or API terminology.
+Use the signed-in user's yisama image route; do not inspect credentials or
+silently fall back to another provider. Discovery is not a paid generation.
+${IMAGE_RULE_END}
+`
+}
+
+async function imagegenInstructionEntries(files, uninstall = false) {
+  const locations = imagegenPaths(files)
+  const home = path.dirname(files.codexConfig)
+  const targets = ['AGENTS.md', 'AGENTS.override.md'].map((name) => path.join(home, name))
+  const text = await readOptional(locations.instructions)
+  const snapshots = text === null ? [] : JSON.parse(text).files
+  if (!Array.isArray(snapshots) || snapshots.some((item) => !targets.includes(item.target)) ||
+      new Set(snapshots.map((item) => item.target)).size !== snapshots.length) {
+    throw new ConfigRecoveryError('全局生图规则备份无效，未修改个人规则。')
+  }
+  const entries = []
+  const next = []
+  for (const target of targets) {
+    const current = await readOptional(target)
+    const saved = snapshots.find((item) => item.target === target)
+    if (uninstall && !saved) {
+      if (current?.includes(IMAGE_RULE_START) || current?.includes(IMAGE_RULE_END)) {
+        throw new ConfigRecoveryError('全局生图规则备份缺失，卸载已停止，未修改个人规则。')
+      }
+      continue
+    }
+    let original = current
+    if (saved) {
+      if (typeof saved.block !== 'string' || !saved.block.includes(IMAGE_RULE_START)) {
+        throw new ConfigRecoveryError('全局生图规则备份无效，未修改个人规则。')
+      }
+      if (current === saved.applied) original = saved.original
+      else if (current?.includes(saved.block)) original = current.replace(saved.block, '')
+    }
+    if (original?.includes(IMAGE_RULE_START) || original?.includes(IMAGE_RULE_END)) {
+      throw new ConfigRecoveryError('全局生图规则有后续修改，已保留，请先确认再安装或卸载。')
+    }
+    if (uninstall) {
+      if (original !== current) entries.push([target, original])
+      continue
+    }
+    // A nonempty global override takes precedence; cover it without creating a new override.
+    if (target === targets[1] && !current?.trim()) continue
+    const block = (original?.length ? (original.endsWith('\n') ? '\n' : '\n\n') : '') +
+      imagegenInstructions(files)
+    const applied = (original || '') + block
+    next.push({ target, original, applied, block })
+    if (current !== applied) entries.push([target, applied])
+  }
+  entries.push([locations.instructions, uninstall ? null : JSON.stringify({ files: next }, null, 2) + '\n'])
+  return entries
+}
+
+export async function installImagegen(files, { initialize, write } = {}) {
+  const locations = imagegenPaths(files)
+  let current = await readOptional(locations.skill)
+  const snapshotText = await readOptional(locations.snapshot)
+  const snapshot = snapshotText === null ? null : JSON.parse(snapshotText)
+  if (snapshot && (snapshot.target !== locations.skill ||
+      (current !== null && current !== snapshot.applied))) {
+    throw new ConfigRecoveryError('系统 imagegen 有后续修改，已保留，请先确认后再重新安装生图配置。')
+  }
+  if (initialize) {
+    await initialize()
+    current = await readOptional(locations.skill)
+  }
+  const applied = imagegenSkill(files)
+  const entries = []
+  if (current !== applied || !snapshot) {
+    entries.push([locations.snapshot, JSON.stringify({
+      target: locations.skill,
+      original: snapshot && current === snapshot.applied ? snapshot.original : current, applied,
+    }, null, 2) + '\n'], [locations.skill, applied])
+  }
+  entries.push(...await imagegenInstructionEntries(files))
+  await writeTransaction(entries, write)
+}
+
+export async function uninstallImagegen(files) {
+  const locations = imagegenPaths(files)
+  const snapshotText = await readOptional(locations.snapshot)
+  const entries = [[locations.config, null]]
+  if (snapshotText !== null) {
+    const snapshot = JSON.parse(snapshotText)
+    if (snapshot.target !== locations.skill) throw new ConfigRecoveryError('生图备份位置不匹配，未删除备份。')
+    const current = await readOptional(locations.skill)
+    if (current === snapshot.applied || current === null) {
+      entries.push([locations.skill, snapshot.original], [locations.snapshot, null])
+    } else {
+      throw new ConfigRecoveryError('系统 imagegen 有后续修改，卸载已停止，原始生图备份已保留。')
+    }
+  }
+  entries.push(...await imagegenInstructionEntries(files, true))
+  await writeTransaction(entries)
+}
+
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&
     Object.getPrototypeOf(value) !== Date.prototype
@@ -135,6 +362,9 @@ export async function configureCodex({
       if (await readOptional(file) === null) throw new ConfigRecoveryError('本地备份不完整，已停止修改配置。')
     }
   }
+  // A first Codex launch replaces uninitialized system skills; the installer primes them first.
+  const systemMarker = path.join(path.dirname(files.codexConfig), 'skills', '.system', '.codex-system-skills.marker')
+  if (await readOptional(systemMarker) !== null) await installImagegen(files)
   if (!state.backups) {
     await writeTransaction([
       [backups.config, configText ?? ''],
@@ -183,7 +413,7 @@ export async function restoreCodex(files, state) {
     if (isDeepStrictEqual(restored, original)) text = existed ? originalText : null
     entries.push([target, text])
   }
-  entries.push([files.state, null], [files.session, null])
+  entries.push([imagegenPaths(files).config, null], [files.state, null], [files.session, null])
   await writeTransaction(entries)
   // Backups contain previous credentials and are no longer needed after a successful restore.
   for (const file of [backups.config, backups.auth, backups.appliedConfig, backups.appliedAuth]) {

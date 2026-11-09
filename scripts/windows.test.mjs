@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -79,7 +80,8 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
   t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
 
   const realHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
-  const protectedFiles = ['config.toml', 'auth.json'].map((name) => path.join(realHome, name))
+  const protectedFiles = ['config.toml', 'auth.json', 'AGENTS.md', 'AGENTS.override.md', 'skills/.system/imagegen/SKILL.md']
+    .map((name) => path.join(realHome, name))
   const before = await Promise.all(protectedFiles.map(digest))
   const registrationBefore = await uninstallRegistration()
 
@@ -123,12 +125,16 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
   const packagedFiles = await fs.readdir(path.join(extracted, 'scripts'))
   assert.deepEqual(packagedFiles.sort(), ['codex-assistant.mjs', 'launch-codex.ps1', 'yisama.mjs'])
   const releasePackage = JSON.parse(await fs.readFile(path.join(extracted, 'package.json'), 'utf8'))
+  const sourcePackage = JSON.parse(await fs.readFile(path.join(repository, 'package.json'), 'utf8'))
+  assert.equal(releasePackage.version, sourcePackage.version)
   assert.deepEqual(releasePackage.dependencies, { playwright: '1.64.1' })
   const manifest = JSON.parse(await fs.readFile(path.join(extracted, 'release-manifest.json'), 'utf8'))
+  assert.equal(manifest.version, releasePackage.version)
   assert.equal(manifest.sourceIncluded, false)
   assert.equal(manifest.sourceMapsIncluded, false)
   assert.equal(manifest.testFilesIncluded, false)
   assert.equal(manifest.deviceScopedCredentials, true)
+  assert.equal(manifest.managedSystemImagegen, true)
   if (process.env.YISAMA_TEST_EXPECTED_BUILD_ID) {
     assert.equal(manifest.buildId, process.env.YISAMA_TEST_EXPECTED_BUILD_ID)
   }
@@ -162,6 +168,102 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
     path.join(extracted, 'scripts', 'launch-codex.ps1'), '-ValidateOnly'], { cwd: extracted })
   assert.match(launcher.stdout, /Launcher validation passed\. Shortcut target:/)
   assert.equal(launcher.stderr, '')
+
+  await t.test('the packaged image path installs the system skill and generates through its dedicated station', async () => {
+    const home = path.join(root, 'image-codex')
+    const data = path.join(root, 'image-data')
+    const env = { ...process.env, CODEX_HOME: home, PLUGIN_DATA: data }
+    const script = path.join(extracted, 'scripts', 'yisama.mjs')
+    await exec(node, [script, 'image', 'install'], { cwd: extracted, env })
+    const skillPath = path.join(home, 'skills', '.system', 'imagegen', 'SKILL.md')
+    const skill = await fs.readFile(skillPath, 'utf8')
+    assert.match(skill, /yisama-managed-imagegen/)
+    assert.ok(skill.includes(script))
+    assert.ok(skill.includes(node))
+    const globalRules = await fs.readFile(path.join(home, 'AGENTS.md'), 'utf8')
+    assert.match(globalRules, /yisama-image-routing:begin/)
+    assert.ok(globalRules.includes(skillPath))
+    const snapshot = JSON.parse(await fs.readFile(path.join(data, 'imagegen-skill.json'), 'utf8'))
+    assert.match(snapshot.original, /name: "?imagegen"?/,
+      'initialization must back up the official skill, even for a new user')
+    await assert.rejects(fs.access(path.join(data, 'imagegen.json')),
+      'installation must not log in or copy this machine owner credentials')
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jrS0AAAAASUVORK5CYII=', 'base64')
+    const calls = []
+    const deviceId = '00000000-0000-4000-8000-000000000001'
+    const imageKey = {
+      id: 1, user_id: 7, name: `yisama:images:${deviceId}`, group: 'images', status: 1,
+      fast_mode: false, fast_mode_available: false, expired_time: -1, remain_quota: 0,
+      unlimited_quota: true, model_limits_enabled: false, model_limits: '', allow_ips: '',
+      auto_groups: [], cross_group_retry: false,
+    }
+    const station = http.createServer(async (request, response) => {
+      const chunks = []
+      for await (const chunk of request) chunks.push(chunk)
+      calls.push({ url: request.url, method: request.method, key: request.headers.authorization,
+        body: chunks.length ? JSON.parse(Buffer.concat(chunks)) : null })
+      response.setHeader('Content-Type', 'application/json')
+      const reply = (data) => response.end(JSON.stringify(data))
+      if (request.url === '/api/user/self') {
+        return reply({ success: true, data: { id: 7, username: 'packaged-test' } })
+      }
+      if (request.url === '/api/user/self/groups') return reply({ success: true, data: { images: {} } })
+      if (request.url.startsWith('/api/token/search?')) {
+        return reply({ success: true, data: { items: [imageKey] } })
+      }
+      if (request.url === '/api/token/1') return reply({ success: true, data: imageKey })
+      if (request.url === '/api/token/1/key') {
+        return reply({ success: true, data: { key: 'sk-package-image-only' } })
+      }
+      if (request.url === '/v1/models') {
+        return reply({ data: ['gpt-image-2', 'nano-banana-2', 'chat-only'].map((id) => ({ id })) })
+      }
+      if (request.url === '/api/pricing') {
+        return reply({
+          supported_endpoint: { 'image-generation': { path: '/v1/images/generations', method: 'POST' } },
+          data: ['gpt-image-2', 'nano-banana-2'].map((model_name) => ({
+            model_name, supported_endpoint_types: ['image-generation'], enable_groups: ['images'],
+          })),
+        })
+      }
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+    })
+    await new Promise((resolve) => station.listen(0, '127.0.0.1', resolve))
+    try {
+      const baseUrl = `http://127.0.0.1:${station.address().port}/v1`
+      env.YISAMA_PORTAL_URL = new URL(baseUrl).origin
+      await fs.writeFile(path.join(data, 'device-id'), deviceId, 'utf8')
+      await fs.writeFile(path.join(data, 'session.json'),
+        JSON.stringify({ origin: env.YISAMA_PORTAL_URL, token: 'packaged-dashboard-test-only' }), 'utf8')
+      // An unrelated chat provider must not redirect the packaged image request.
+      await fs.writeFile(path.join(home, 'config.toml'), 'model_provider = "other"\n', 'utf8')
+      await fs.writeFile(path.join(home, 'auth.json'), '{"OPENAI_API_KEY":"sk-other-chat"}', 'utf8')
+      const out = path.join(root, 'packaged-image.png')
+      const result = await exec(node, [script, 'image', 'generate', '--model', 'nano-banana-2',
+        '--prompt', 'red cube', '--out', out], { cwd: extracted, env })
+      assert.deepEqual(await fs.readFile(out), png)
+      assert.equal(JSON.parse(result.stdout).model, 'nano-banana-2')
+      assert.deepEqual(calls.filter((call) => call.url.startsWith('/v1/images/'))
+        .map((call) => [call.url, call.key, call.body.model]), [
+        ['/v1/images/generations', 'Bearer sk-package-image-only', 'nano-banana-2'],
+      ])
+      assert.doesNotMatch(result.stdout + result.stderr, /sk-package|sk-other|127\.0\.0\.1/)
+      const beforeQuery = calls.length
+      const listing = await exec(node, [script, 'image', 'models'], { cwd: extracted, env })
+      assert.deepEqual(listing.stdout.trim().split(/\r?\n/), [
+        '你当前可用的生图模型：', 'gpt-image-2', 'nano-banana-2', '默认生图模型：gpt-image-2',
+      ])
+      assert.ok(calls.slice(beforeQuery).every((call) => call.method === 'GET'))
+      assert.equal(calls.filter((call) => call.url.startsWith('/v1/images/')).length, 1)
+      await exec(node, [script, 'image', 'uninstall'], { cwd: extracted, env })
+      assert.equal(await fs.readFile(skillPath, 'utf8'), snapshot.original)
+      await assert.rejects(fs.access(path.join(data, 'imagegen.json')))
+      await assert.rejects(fs.access(path.join(home, 'AGENTS.md')))
+    } finally {
+      await new Promise((resolve) => { station.closeAllConnections(); station.close(resolve) })
+    }
+  })
 
   await t.test('packaged download source resolves to a fixed version without a latest manifest', async () => {
     const pinned = manifest.windowsBootstrap.codexRelease

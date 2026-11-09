@@ -35,6 +35,7 @@ test('release builder emits only bundled runtime entries', async (t) => {
   assert.equal(manifest.sourceMapsIncluded, false)
   assert.equal(manifest.testFilesIncluded, false)
   assert.equal(manifest.deviceScopedCredentials, true)
+  assert.equal(manifest.managedSystemImagegen, true)
 
   const assistant = await fs.readFile(path.join(output, 'scripts', 'codex-assistant.mjs'), 'utf8')
   const yisama = await fs.readFile(path.join(output, 'scripts', 'yisama.mjs'), 'utf8')
@@ -42,6 +43,18 @@ test('release builder emits only bundled runtime entries', async (t) => {
   assert.doesNotMatch(yisama, /sourceMappingURL|from\s+["']\.\/(?:codex|desktop|yisama)/)
   // The bundled assistant must not read stdin as the desktop bridge would, or it never exits.
   await fs.symlink(path.join(repository, 'node_modules'), path.join(output, 'node_modules'), 'junction')
+  const imageHome = path.join(output, 'test-codex')
+  const imageData = path.join(output, 'test-data')
+  const imageEnv = { ...process.env, CODEX_HOME: imageHome, PLUGIN_DATA: imageData }
+  const bundledEntry = path.join(output, 'scripts', 'yisama.mjs')
+  await exec(process.execPath, [bundledEntry, 'image', 'install'], { env: imageEnv })
+  const skill = await fs.readFile(path.join(imageHome, 'skills', '.system', 'imagegen', 'SKILL.md'), 'utf8')
+  assert.ok(skill.includes(bundledEntry), 'the installed skill must use the distributed entry, not the source checkout')
+  const imagePreview = await exec(process.execPath,
+    [bundledEntry, 'image', 'generate', '--prompt', 'cube', '--dry-run'], { env: imageEnv })
+  assert.equal(JSON.parse(imagePreview.stdout).payload.model, 'gpt-image-2')
+  await exec(process.execPath, [bundledEntry, 'image', 'uninstall'], { env: imageEnv })
+  await assert.rejects(fs.access(path.join(imageHome, 'skills', '.system', 'imagegen', 'SKILL.md')))
   const child = spawn(process.execPath, [path.join(output, 'scripts', 'codex-assistant.mjs'), '--help'], { stdio: ['pipe', 'pipe', 'pipe'] })
   t.after(() => child.kill())
   let help = ''

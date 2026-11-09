@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 $appRoot = Split-Path -Parent $PSScriptRoot
 $runtime = Join-Path $appRoot 'runtime\node.exe'
 $assistantScript = Join-Path $PSScriptRoot 'codex-assistant.mjs'
+$yisamaScript = Join-Path $PSScriptRoot 'yisama.mjs'
 $bootstrap = Join-Path $appRoot 'runtime\codex-bootstrap.exe'
 $script:codexDesktop = $null
 $dataRoot = Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant'
@@ -290,7 +291,7 @@ function Write-EndpointFile {
 
 try {
     if ($ValidateOnly) {
-        foreach ($required in @($runtime, $assistantScript, $bootstrap)) {
+        foreach ($required in @($runtime, $assistantScript, $bootstrap, $yisamaScript)) {
             if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required packaged file is missing: $required" }
         }
         Write-Output "Launcher validation passed. Shortcut target: $PSHOME\powershell.exe -File $PSCommandPath"
@@ -328,6 +329,10 @@ try {
         }
         $script:codexDesktop = Read-SelectedCodex
     }
+
+    # Prepare the system skill before Codex discovers skills; also migrate existing logins.
+    & $runtime $yisamaScript image install | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw '生图配置未完成，原始 imagegen 备份已保留。' }
 
     $wallpaper = Get-WallpaperLauncher
     if ($script:codexDesktop.source -eq 'portable' -and -not [string]::Equals(

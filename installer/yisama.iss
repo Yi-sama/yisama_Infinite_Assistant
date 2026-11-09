@@ -592,9 +592,17 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
 begin
   if (CurStep = ssPostInstall) and not IsTestInstall then
+  begin
+    if not Exec(ExpandConstant('{app}\runtime\node.exe'),
+      Quote(ExpandConstant('{app}\scripts\yisama.mjs')) + ' image install',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      RaiseException('生图配置未完成，原始 imagegen 备份已保留，请联系管理员。');
     RemoveOwnedLegacyRunEntry;
+  end;
 end;
 
 { Restore the user's original Codex configuration before any file is removed. }
@@ -640,6 +648,14 @@ begin
       SuppressibleMsgBox('恢复原 Codex 配置未完成，卸载已取消，助手文件和备份均已保留。', mbError, MB_OK, IDOK);
       Exit;
     end;
+  end;
+  Node := ExpandConstant('{app}\runtime\node.exe');
+  Script := ExpandConstant('{app}\scripts\yisama.mjs');
+  if not Exec(Node, Quote(Script) + ' image uninstall', ExpandConstant('{app}'),
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  begin
+    SuppressibleMsgBox('恢复系统 imagegen 未完成，卸载已取消，生图备份已保留。', mbError, MB_OK, IDOK);
+    Exit;
   end;
   Result := True;
 end;

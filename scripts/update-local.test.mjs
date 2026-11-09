@@ -79,6 +79,15 @@ test('rejects an incompatible package before changing the target', async (t) => 
   await assert.rejects(fs.access(path.join(target, 'update.json')))
 })
 
+test('an existing development install receives the newly required image module', async (t) => {
+  const target = await makeInstallation(t)
+  const imageModule = path.join(target, 'scripts', 'imagegen.mjs')
+  await fs.rm(imageModule)
+  const result = await updateLocal({ target })
+  assert.ok(result.changedFiles.includes('scripts/imagegen.mjs'))
+  assert.equal(await content(imageModule), await content(path.join(repository, 'scripts', 'imagegen.mjs')))
+})
+
 test('rejects the source repository as an update target', async () => {
   await assert.rejects(updateLocal({ target: repository }), /cannot be the source repository/)
 })

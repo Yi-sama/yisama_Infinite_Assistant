@@ -98,6 +98,7 @@ async function main({ sourceRoot, outputRoot }) {
     sourceMapsIncluded: false,
     testFilesIncluded: false,
     deviceScopedCredentials: true,
+    managedSystemImagegen: true,
     licenseRequired: process.env.YISAMA_REQUIRE_LICENSE === '1',
     entries: Object.fromEntries(await Promise.all(
       BUNDLED_ENTRIES.map(async ([, name]) => [name, await digest(path.join(outputRoot, 'scripts', name))]),

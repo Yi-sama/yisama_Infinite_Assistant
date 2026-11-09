@@ -1,0 +1,8 @@
+{
+  "format": 1,
+  "version": "1.2.3",
+  "url": "./Yisama-Setup-1.2.3.exe",
+  "sha256": "73d0b209a813c1be0f29fbc1796c5bf1e4794bdb4e1aa225d3a7cca5e72795d7",
+  "size": 27537458,
+  "notes": "自动配置系统 imagegen 和全局生图规则；实时查询当前账号可用的生图模型和默认模型，支持指定模型；生图使用用户自己的站点账号。"
+}

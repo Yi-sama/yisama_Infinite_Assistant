@@ -9,15 +9,16 @@ import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { parse } from 'smol-toml'
 import { chromium, request as browserRequest } from 'playwright'
+import { ImagegenError, runImagegen } from './imagegen.mjs'
 import {
   DEFAULT_ORIGIN, PROVIDER_ID, providerConfig, patchCodexConfig,
   readOptional, replaceFile, writeTransaction, configureCodex, restoreCodex, ConfigRecoveryError,
-  makeModelCatalog,
+  makeModelCatalog, imagegenPaths,
 } from './codex-config.mjs'
 
 export { DEFAULT_ORIGIN, PROVIDER_ID, patchCodexConfig }
 export const KEY_PREFIX = 'yisama-infinite-assistant'
-const ASSISTANT_VERSION = '0.1.0'
+const ASSISTANT_VERSION = '1.2.3'
 const ASSISTANT_LICENSE_PUBLIC_KEY =
   'MCowBQYDK2VwAyEAwdYPN4l6iJ9vQDCV6FZEFPDrsAJBenNhJIeDGeMxf10='
 const ASSISTANT_LICENSE_RENEW_BEFORE = 24 * 60 * 60
@@ -174,7 +175,7 @@ async function desktopAuthContext(cookies = []) {
   return browserRequest.newContext({
     storageState: { cookies, origins: [] },
     extraHTTPHeaders: { Origin: originFromEnvironment(), Accept: 'application/json' },
-    userAgent: 'yisama-infinite-assistant/0.1.0',
+    userAgent: `yisama-infinite-assistant/${ASSISTANT_VERSION}`,
     timeout: 30000,
     ignoreHTTPSErrors: false,
   })
@@ -586,7 +587,7 @@ async function chooseGroupInteractively(groups, requested) {
   return chooseGroup(options[index].value, groups)
 }
 
-async function keyName() {
+async function keyName(purpose = 'codex') {
   const file = path.join(paths().pluginData, 'device-id')
   let installationId = await readOptional(file)
   if (installationId === null) {
@@ -601,7 +602,7 @@ async function keyName() {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(installationId)) {
     throw new UserError('本机设备标识无效，未更改凭证，请联系管理员。')
   }
-  return `yisama:codex:${installationId}`
+  return `yisama:${purpose === 'codex-images' ? 'images' : purpose}:${installationId}`
 }
 
 async function findAssistantKey(token, group, name) {
@@ -612,9 +613,9 @@ async function findAssistantKey(token, group, name) {
 }
 
 export async function ensureAssistantKey(token, group, {
-  requireFast = true, fastEnabled = true, keyId = null, existingKey = null,
+  requireFast = true, fastEnabled = true, keyId = null, existingKey = null, purpose = 'codex',
 } = {}) {
-  const name = await keyName()
+  const name = await keyName(purpose)
   const desiredFast = fastEnabled === true
   let key
   if (Number.isInteger(keyId)) {
@@ -672,7 +673,13 @@ export async function ensureAssistantKey(token, group, {
   if (key?.name !== name || key?.status !== 1 || key?.group !== group ||
     finalFastEnabled !== (desiredFast && finalFastAvailable) ||
     (requireFast && !finalFastAvailable)) {
-    throw new UserError('当前分组暂不能启用 Fast，请选择支持的分组。')
+    throw new UserError(purpose === 'codex-images'
+      ? '生图服务准备未完成，请在无限助手侧栏重新登录。'
+      : '当前分组暂不能启用 Fast，请选择支持的分组。')
+  }
+  if (purpose === 'codex-images' && (group !== 'images' || key.cross_group_retry !== false ||
+      (Array.isArray(key.auto_groups) ? key.auto_groups.length !== 0 : Boolean(key.auto_groups)))) {
+    throw new ImagegenError('生图账号配置校验未通过，请在无限助手侧栏重新登录。')
   }
   let rawKey = keyId === id ? existingKey : null
   if (!rawKey) {
@@ -684,6 +691,45 @@ export async function ensureAssistantKey(token, group, {
     id, name, group, key: rawKey.startsWith('sk-') ? rawKey : `sk-${rawKey}`,
     fastAvailable: finalFastAvailable, fastEnabled: finalFastEnabled,
   }
+}
+
+export async function prepareImagegen({ session, groupInfo, required = true } = {}) {
+  const files = paths()
+  const file = imagegenPaths(files).config
+  if (!session) {
+    try { session = await authenticatedSession({ interactive: false }) } catch (error) {
+      if (error instanceof UserError && error.message === '请先登录 yisama 无限助手。') {
+        throw new ImagegenError('请先在无限助手侧栏登录，再查询图片模型或生图。')
+      }
+      throw error
+    }
+  }
+  if (!Number.isInteger(session.user?.id)) throw new ImagegenError('无法确认当前生图账号，请在侧栏重新登录。')
+  const groups = groupInfo ?? await fetchGroupInfo(session.token)
+  if (!groups.some((group) => group.value === 'images')) {
+    await replaceFile(file, null)
+    if (!required) return false
+    throw new ImagegenError('你的账号尚未开通生图，请联系站点管理员开通。')
+  }
+  const previous = await readJson(file, {})
+  const baseUrl = providerConfig(session.origin).base_url
+  const name = await keyName('codex-images')
+  const sameAccount = previous.userId === session.user.id && previous.baseUrl === baseUrl
+  const canReuse = sameAccount && previous.version === 2 && previous.keyName === name &&
+    previous.group === 'images' && typeof previous.apiKey === 'string'
+  const key = await ensureAssistantKey(session.token, 'images', {
+    purpose: 'codex-images', requireFast: false, fastEnabled: false,
+    keyId: canReuse ? previous.keyId : null, existingKey: canReuse ? previous.apiKey : null,
+  })
+  const state = await readJson(files.state, {})
+  const keepModel = sameAccount || (previous.version === 1 &&
+    state.userId === session.user.id && previous.baseUrl === baseUrl)
+  await writeJson(file, {
+    version: 2, userId: session.user.id, keyId: key.id, keyName: key.name,
+    group: 'images', baseUrl, apiKey: key.key,
+    model: keepModel && typeof previous.model === 'string' ? previous.model : 'gpt-image-2',
+  })
+  return true
 }
 
 async function fetchModelListing(apiKey) {
@@ -1169,6 +1215,7 @@ export async function desktopNativeSynced(version) {
 
 async function configureDesktop({
   requestedGroup, requestedModel, preserveGroup = false, forceRestart = false, migrateDevice = false,
+  prepareImages = false,
 } = {}) {
   const files = paths()
   const previous = await readJson(files.state, {})
@@ -1232,13 +1279,23 @@ async function configureDesktop({
         fastAvailable: internalKey.fastAvailable, configuredAt: new Date().toISOString(), restartRequired: true,
       },
     })
+    let imageNotice = ''
+    if (prepareImages) {
+      try {
+        await prepareImagegen({ session, required: false,
+          groupInfo: await cachedDesktopValue(`groups:${session.origin}:${session.token}`, CATALOG_TTL,
+            () => fetchGroupInfo(session.token)) })
+      } catch (error) {
+        imageNotice = ` 生图配置尚未完成：${safeError(error)}`
+      }
+    }
     return publicState({
       loggedIn: true, configured: true,
       username: session.user?.display_name || session.user?.username,
       ...walletDisplayState(session.user, status.data),
       group: selected.value, groupLabel: selected.label,
       groups: groupInfo, model, models,
-      message: internalKey.fastEnabled ? '分组已保存。' : '分组已保存，使用普通模式。',
+      message: (internalKey.fastEnabled ? '分组已保存。' : '分组已保存，使用普通模式。') + imageNotice,
       restartRequired: forceRestart || changed || desktopRestartRequired(previous),
     })
   } catch (error) {
@@ -1259,7 +1316,7 @@ async function configureDesktop({
 }
 
 export async function desktopLogin({ username, password, loginId, twoFactorCode } = {}) {
-  if (username === undefined && loginId === undefined) return configureDesktop()
+  if (username === undefined && loginId === undefined) return configureDesktop({ prepareImages: true })
   const origin = originFromEnvironment()
   const challenge = loginId ? desktopChallenge : null
   if (loginId && (!challenge || challenge.id !== loginId || challenge.origin !== origin ||
@@ -1332,7 +1389,7 @@ export async function desktopRestore() {
   const state = await readJson(files.state, {})
   if (!state?.backups) {
     if (state?.configured) throw new UserError('本地备份不完整，未退出账号或改动当前配置。')
-    await writeTransaction([[files.state, null], [files.session, null]])
+    await writeTransaction([[imagegenPaths(files).config, null], [files.state, null], [files.session, null]])
     return publicState({ message: '已退出 yisama 账号，没有需要恢复的配置。' })
   }
   await restoreCodex(files, state)
@@ -1407,6 +1464,7 @@ async function restore() {
   const files = paths()
   const state = await readJson(files.state)
   if (!state?.backups) {
+    await replaceFile(imagegenPaths(files).config, null)
     console.log('没有需要恢复的 yisama 配置。')
     return
   }
@@ -1559,7 +1617,7 @@ function flagValue(args, name) {
 }
 
 export function safeError(error) {
-  if (error instanceof UserError || error instanceof ConfigRecoveryError) return error.message
+  if (error instanceof UserError || error instanceof ConfigRecoveryError || error instanceof ImagegenError) return error.message
   return '操作未完成，请检查网络或联系管理员；未输出账号敏感信息。'
 }
 
@@ -1569,6 +1627,7 @@ export function publicErrorCode(error) {
 
 export async function run(argv = process.argv.slice(2)) {
   const [command = 'setup', ...args] = argv
+  if (command === 'image') return runImagegen(paths(), args, { prepare: prepareImagegen })
   const group = flagValue(args, '--group')
   if (command === 'setup') return setup(group, flagValue(args, '--reasoning'))
   if (command === 'status') return showStatus()

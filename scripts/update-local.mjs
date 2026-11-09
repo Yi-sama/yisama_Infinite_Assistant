@@ -12,12 +12,14 @@ export const UPDATE_FILES = Object.freeze([
   'scripts/codex-panel.mjs',
   'scripts/codex-config.mjs',
   'scripts/desktop-bridge.mjs',
+  'scripts/imagegen.mjs',
   'scripts/yisama.mjs',
   'scripts/launch-codex.ps1',
   'scripts/update-local.mjs',
 ])
 
-const REQUIRED_TARGET_FILES = UPDATE_FILES.filter((file) => file !== 'scripts/update-local.mjs')
+const REQUIRED_TARGET_FILES = UPDATE_FILES.filter((file) =>
+  !['scripts/update-local.mjs', 'scripts/imagegen.mjs'].includes(file))
 
 function inside(root, relative) {
   const candidate = path.resolve(root, relative)
