@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import path from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
@@ -12,13 +14,60 @@ function fail(message) {
   throw new ImagegenError(message)
 }
 
-export async function initializeCodexSkills(files, binary) {
+async function executableDigest(file) {
+  const digest = createHash('sha256')
+  for await (const bytes of createReadStream(file)) digest.update(bytes)
+  return digest.digest('hex')
+}
+
+async function prepareImagegenRuntime(files, binary) {
+  const directory = path.join(files.pluginData, 'imagegen-runtime')
+  const cached = path.join(directory, 'codex.exe')
+  try {
+    const expected = await executableDigest(binary)
+    try {
+      if (await executableDigest(cached) === expected) return cached
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    await fs.mkdir(directory, { recursive: true })
+    const temporary = path.join(directory, `${randomUUID()}.tmp`)
+    try {
+      await fs.copyFile(binary, temporary)
+      if (await executableDigest(temporary) !== expected) {
+        fail('Codex 文件在准备期间发生变化，请完成更新后重试；未切换生图服务。')
+      }
+      await fs.rename(temporary, cached)
+    } finally {
+      await fs.rm(temporary, { force: true })
+    }
+    return cached
+  } catch (error) {
+    if (error instanceof ImagegenError) throw error
+    throw new ImagegenError('无法准备 Codex 生图初始化程序，请检查本机磁盘空间和文件读写权限；未切换生图服务。',
+      { cause: error })
+  }
+}
+
+function initializationError(error) {
+  const code = ['EPERM', 'EACCES', 'ENOENT'].includes(error?.code) ? `（${error.code}）` : ''
+  return new ImagegenError(`Codex 系统技能初始化失败${code}，未切换生图服务。`, { cause: error })
+}
+
+export async function initializeCodexSkills(files, binary, { relocate = false, spawnChild = spawn } = {}) {
   await fs.mkdir(path.dirname(files.codexConfig), { recursive: true })
-  const child = spawn(binary, ['--no-daemon', '--disable', 'plugins',
-    '-c', 'chatgpt_base_url="http://127.0.0.1:1"', 'app-server', '--stdio'], {
-    env: { ...process.env, CODEX_HOME: path.dirname(files.codexConfig), PLUGIN_DATA: files.pluginData },
-    windowsHide: true,
-  })
+  // MSIX cores can deny direct execution from an unrelated Node process.
+  if (relocate) binary = await prepareImagegenRuntime(files, binary)
+  const env = { ...process.env, CODEX_HOME: path.dirname(files.codexConfig), PLUGIN_DATA: files.pluginData }
+  delete env.CODEX_WINDOWS_REGISTERED_CORE
+  delete env.CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY
+  let child
+  try {
+    child = spawnChild(binary, ['--no-daemon', '--disable', 'plugins',
+      '-c', 'chatgpt_base_url="http://127.0.0.1:1"', 'app-server', '--stdio'], { env, windowsHide: true })
+  } catch (error) {
+    throw initializationError(error)
+  }
   const exited = new Promise((resolve) => {
     child.once('exit', resolve)
     child.once('error', resolve)
@@ -36,7 +85,7 @@ export async function initializeCodexSkills(files, binary) {
       if (error) reject(error)
       else resolve(result)
     }
-    const failed = () => done(new ImagegenError('Codex 系统技能初始化失败，未切换生图服务。'))
+    const failed = (error) => done(initializationError(error))
     const timer = setTimeout(failed, 15000)
     const receive = (line) => {
       let response
@@ -79,7 +128,9 @@ async function installForDesktop(files) {
       if (error.code === 'ENOENT') continue
       throw error
     }
-    return installImagegen(files, { initialize: () => initializeCodexSkills(files, binary) })
+    return installImagegen(files, {
+      initialize: () => initializeCodexSkills(files, binary, { relocate: selected.source === 'msix' }),
+    })
   }
   fail('未找到 Codex 核心，无法初始化系统生图技能。')
 }

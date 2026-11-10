@@ -18,7 +18,7 @@ import {
 
 export { DEFAULT_ORIGIN, PROVIDER_ID, patchCodexConfig }
 export const KEY_PREFIX = 'yisama-infinite-assistant'
-const ASSISTANT_VERSION = '1.2.3'
+const ASSISTANT_VERSION = '1.2.4'
 const ASSISTANT_LICENSE_PUBLIC_KEY =
   'MCowBQYDK2VwAyEAwdYPN4l6iJ9vQDCV6FZEFPDrsAJBenNhJIeDGeMxf10='
 const ASSISTANT_LICENSE_RENEW_BEFORE = 24 * 60 * 60

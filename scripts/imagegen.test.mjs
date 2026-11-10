@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
+import { PassThrough, Writable } from 'node:stream'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -146,6 +148,99 @@ async function fixture(t) {
 }
 
 const generations = (f) => f.calls.filter((call) => call.path.startsWith('/v1/images/'))
+
+function skillInitializerChild(requests) {
+  const child = new EventEmitter()
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.stdin = new Writable({
+    write(bytes, _encoding, done) {
+      const request = JSON.parse(bytes.toString('utf8'))
+      requests.push(request.method)
+      if (request.id) child.stdout.write(JSON.stringify({ id: request.id, result: {} }) + '\n')
+      done()
+    },
+    final(done) {
+      done()
+      queueMicrotask(() => child.emit('exit', 0))
+    },
+  })
+  child.kill = () => child.emit('exit', null, 'SIGTERM')
+  return child
+}
+
+test('MSIX skill initialization launches a verified user copy instead of the protected core', async (t) => {
+  const f = await fixture(t)
+  const binary = path.join(f.root, 'WindowsApps', 'Codex', 'resources', 'codex.exe')
+  await replaceFile(binary, 'packaged-core-v1\n')
+  await replaceFile(f.locations.skill, 'original native imagegen\n')
+  const requests = []
+  const launched = []
+  const originalCore = process.env.CODEX_WINDOWS_REGISTERED_CORE
+  const originalSandbox = process.env.CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY
+  process.env.CODEX_WINDOWS_REGISTERED_CORE = '1'
+  process.env.CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY = 'packaged-test'
+  t.after(() => {
+    for (const [key, value] of [['CODEX_WINDOWS_REGISTERED_CORE', originalCore],
+      ['CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY', originalSandbox]]) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+  const initialize = () => initializeCodexSkills(f.files, binary, {
+    relocate: true,
+    spawnChild: (executable, args, options) => {
+      assert.notEqual(executable, binary, 'WindowsApps must not be executed directly')
+      assert.equal(options.env.CODEX_WINDOWS_REGISTERED_CORE, undefined)
+      assert.equal(options.env.CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY, undefined)
+      assert.equal(options.env.CODEX_HOME, path.dirname(f.files.codexConfig))
+      assert.equal(options.windowsHide, true)
+      assert.deepEqual(args.slice(-2), ['app-server', '--stdio'])
+      launched.push(executable)
+      return skillInitializerChild(requests)
+    },
+  })
+  await installImagegen(f.files, { initialize })
+  const cached = launched[0]
+  assert.equal(path.relative(f.files.pluginData, cached), path.join('imagegen-runtime', 'codex.exe'))
+  assert.equal(await readOptional(cached), 'packaged-core-v1\n')
+  assert.equal(JSON.parse(await readOptional(f.locations.snapshot)).original, 'original native imagegen\n')
+  assert.match(await readOptional(f.locations.skill), /yisama-managed-imagegen/)
+  const modified = (await fs.stat(cached)).mtimeMs
+  await installImagegen(f.files, { initialize })
+  assert.equal((await fs.stat(cached)).mtimeMs, modified, 'a matching core copy must be reused')
+  await replaceFile(cached, 'damaged cached executable\n')
+  await installImagegen(f.files, { initialize })
+  assert.equal(await readOptional(cached), 'packaged-core-v1\n')
+  await replaceFile(binary, 'packaged-core-v2\n')
+  await installImagegen(f.files, { initialize })
+  assert.equal(await readOptional(cached), 'packaged-core-v2\n')
+  assert.deepEqual(requests, Array.from({ length: 4 },
+    () => ['initialize', 'initialized', 'skills/list']).flat())
+  assert.equal(process.env.CODEX_WINDOWS_REGISTERED_CORE, '1', 'the parent environment must stay unchanged')
+  assert.equal(await readOptional(f.files.codexAuth), null)
+  assert.equal(await readOptional(f.files.codexConfig), null)
+  assert.equal(f.calls.length, 0)
+})
+
+test('blocked core launches report EPERM and preserve the original skill and backups', async (t) => {
+  const f = await fixture(t)
+  await replaceFile(f.locations.skill, 'original native imagegen\n')
+  const blocked = Object.assign(new Error('private diagnostic detail'), { code: 'EPERM' })
+  await assert.rejects(installImagegen(f.files, {
+    initialize: () => initializeCodexSkills(f.files, 'protected-codex.exe', {
+      spawnChild: () => { throw blocked },
+    }),
+  }), (error) => {
+    assert.match(safeError(error), /EPERM/)
+    assert.doesNotMatch(safeError(error), /private diagnostic|检查网络/)
+    return true
+  })
+  assert.equal(await readOptional(f.locations.skill), 'original native imagegen\n')
+  assert.equal(await readOptional(f.locations.snapshot), null)
+  assert.equal(await readOptional(f.locations.instructions), null)
+  assert.equal(f.calls.length, 0)
+})
 
 test('installation configures the existing system skill without logging in or changing chat settings', async (t) => {
   const f = await fixture(t)
@@ -556,6 +651,27 @@ test('model discovery uses only GETs and reports unavailable metadata separately
     return true
   })
   assert.equal(generations(f).length, 0)
+})
+
+test('a relocated real Codex core initializes system skills and retains the original backup', {
+  skip: !process.env.YISAMA_CODEX_BIN && 'Set YISAMA_CODEX_BIN for real relocated-core initialization.',
+  timeout: 45000,
+}, async (t) => {
+  const f = await fixture(t)
+  const initialize = () => initializeCodexSkills(f.files, process.env.YISAMA_CODEX_BIN, { relocate: true })
+  await installImagegen(f.files, { initialize })
+  const directory = path.join(f.files.pluginData, 'imagegen-runtime')
+  const cached = path.join(directory, 'codex.exe')
+  assert.equal((await fs.stat(cached)).size, (await fs.stat(process.env.YISAMA_CODEX_BIN)).size)
+  assert.deepEqual(await fs.readdir(directory), ['codex.exe'])
+  const snapshot = await readOptional(f.locations.snapshot)
+  assert.match(JSON.parse(snapshot).original, /name: "?imagegen"?/)
+  await installImagegen(f.files, { initialize })
+  assert.equal(await readOptional(f.locations.snapshot), snapshot)
+  assert.match(await readOptional(f.locations.skill), /yisama-managed-imagegen/)
+  assert.equal(await readOptional(f.files.codexConfig), null)
+  assert.equal(await readOptional(f.files.codexAuth), null)
+  assert.equal(f.calls.length, 0)
 })
 
 test('a real new Codex conversation receives image routing from its active global override', {
