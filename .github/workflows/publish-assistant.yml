@@ -1,0 +1,63 @@
+name: Publish Assistant
+
+on:
+  push:
+    branches: [release/v0.1.0]
+    paths:
+      - release/latest-*.json
+      - release/Yisama-Setup-*.exe
+      - release/Yisama-Setup-*.sha256
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assistant-production-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/release/v0.1.0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check Out Release
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Test Publisher
+        run: python3 -B -m unittest discover -s scripts -p publish_release_test.py -v
+
+      - name: Validate Committed Artifacts
+        run: python3 -B scripts/publish_release.py check .
+
+      - name: Publish Verified Release to Chengdu
+        shell: bash
+        env:
+          RELEASE_SSH_HOST: ${{ vars.ASSISTANT_RELEASE_HOST }}
+          RELEASE_SSH_KEY: ${{ secrets.ASSISTANT_RELEASE_SSH_KEY }}
+          RELEASE_KNOWN_HOSTS: ${{ secrets.ASSISTANT_RELEASE_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_SSH_HOST"
+          test -n "$RELEASE_SSH_KEY"
+          test -n "$RELEASE_KNOWN_HOSTS"
+          umask 077
+          directory="$(mktemp -d "$RUNNER_TEMP/assistant-release.XXXXXX")"
+          trap 'rm -f "$directory/key" "$directory/known_hosts"; rmdir "$directory"' EXIT
+          printf '%s\n' "$RELEASE_SSH_KEY" > "$directory/key"
+          printf '%s\n' "$RELEASE_KNOWN_HOSTS" > "$directory/known_hosts"
+          python3 -B scripts/publish_release.py bundle . |
+            ssh -T -i "$directory/key" \
+              -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$directory/known_hosts" \
+              -o ConnectTimeout=30 -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=3 \
+              "assistant-release@$RELEASE_SSH_HOST" publish-assistant-release
+
+      - name: Verify Public Update Source
+        run: >-
+          python3 -B scripts/publish_release.py verify .
+          https://api-cn.yisama.asia/assistant/updates/windows-x64/latest.json

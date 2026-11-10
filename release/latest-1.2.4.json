@@ -4,5 +4,5 @@
   "url": "./Yisama-Setup-1.2.4.exe",
   "sha256": "15c83ed56a41896ba76b89a0e532b1fc38f58db04b870dc65fa54d2a1de20765",
   "size": 27533503,
-  "notes": "调整商店版 Codex 的生图初始化方式，避免直接启动受保护目录中的程序；保留本站账号生图与模型选择。"
+  "notes": "修复 Microsoft Store 版 Codex 生图初始化时的 spawn EPERM；保留本站账号生图与模型选择。"
 }
