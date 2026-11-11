@@ -148,13 +148,13 @@ export async function synchronizeThreadProviders({
       let header
       try { header = await readHeader(file) } catch { skipped++; continue }
       const id = header.value.payload.id
-      if (seen.has(id)) throw new Error('Duplicate local thread identity.')
-      seen.add(id)
       const row = rows.get(id)
       if (row && (typeof row.rollout_path !== 'string' || pathKey(row.rollout_path) !== pathKey(file))) {
-        skipped++
+        // The index selects the live rollout; history copies can retain the same ID.
         continue
       }
+      if (seen.has(id)) throw new Error('Duplicate local thread identity.')
+      seen.add(id)
       const provider = header.value.payload.model_provider
       const original = Object.hasOwn(backup.entries, id) ? backup.entries[id] : null
       if (!migrate && !original) continue

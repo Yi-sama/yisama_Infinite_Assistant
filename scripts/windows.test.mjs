@@ -182,6 +182,9 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
     const original = JSON.stringify({ type: 'session_meta', payload: { id, model_provider: 'custom' } }) +
       '\n{"type":"response_item","payload":{"content":"keep custom verbatim"}}\n'
     await fs.writeFile(file, original, 'utf8')
+    const copy = path.join(home, 'archived_sessions', path.basename(file))
+    await fs.mkdir(path.dirname(copy), { recursive: true })
+    await fs.copyFile(file, copy)
     const databaseFile = path.join(home, 'state_5.sqlite')
     const database = new DatabaseSync(databaseFile)
     database.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, model_provider TEXT)')
@@ -192,6 +195,8 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
     const checked = await exec(node, ['--disable-warning=ExperimentalWarning', script, 'startup', 'local'], { env })
     assert.equal(checked.stderr, '')
     assert.equal(JSON.parse(checked.stdout).threads.changed, 1)
+    assert.equal(JSON.parse(checked.stdout).threads.skipped, 0)
+    assert.equal(await fs.readFile(copy, 'utf8'), original)
     const migrated = await fs.readFile(file, 'utf8')
     assert.equal(JSON.parse(migrated.split('\n')[0]).payload.model_provider, 'yisama')
     assert.equal(migrated.slice(migrated.indexOf('\n')), original.slice(original.indexOf('\n')))
@@ -202,6 +207,7 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
     await fs.appendFile(file, appended, 'utf8')
     await exec(node, ['--disable-warning=ExperimentalWarning', script, 'startup', 'restore'], { env })
     assert.equal(await fs.readFile(file, 'utf8'), original + appended)
+    assert.equal(await fs.readFile(copy, 'utf8'), original)
     const restored = new DatabaseSync(databaseFile)
     assert.equal(restored.prepare('SELECT model_provider FROM threads WHERE id = ?').get(id).model_provider, 'custom')
     restored.close()

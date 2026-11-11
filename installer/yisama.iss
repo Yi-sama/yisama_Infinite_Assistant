@@ -614,7 +614,7 @@ begin
     if not Exec(ExpandConstant('{app}\runtime\node.exe'),
       '--disable-warning=ExperimentalWarning ' + Quote(ExpandConstant('{app}\scripts\yisama.mjs')) + ' startup local',
       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-      RaiseException('本地对话检查未完成，迁移备份已保留。请关闭其他 Codex 进程后重试。');
+      RaiseException('本地对话检查未完成，已有迁移备份已保留。请勿删除对话文件，请联系管理员检查对话索引、文件访问权限或进程占用情况。');
     RemoveOwnedLegacyRunEntry;
   end;
 end;

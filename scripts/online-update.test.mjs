@@ -70,6 +70,22 @@ test('checking never downloads or executes; explicit confirmation prepares a ver
   await assert.rejects(updater.prepare(checked.updateId), { publicCode: 'UPDATE_CHANGED' })
 })
 
+test('1.2.5 detects 1.2.6 while an installed 1.2.6 does not update itself', async (t) => {
+  const { updater, state, directory } = await fixture(t)
+  await fs.writeFile(path.join(directory, 'package.json'), '{"version":"1.2.5"}', 'utf8')
+  state.release.version = '1.2.6'
+  state.release.url = './Yisama-Setup-1.2.6.exe'
+  const checked = await updater.check()
+  assert.equal(checked.currentVersion, '1.2.5')
+  assert.equal(checked.latestVersion, '1.2.6')
+  assert.equal(checked.available, true)
+  const prepared = await updater.prepare(checked.updateId)
+  assert.deepEqual(await fs.readFile(prepared.updateInstaller.path), installer)
+  await fs.writeFile(path.join(directory, 'package.json'), '{"version":"1.2.6"}', 'utf8')
+  assert.equal((await updater.check()).available, false)
+  assert.equal(state.downloads, 1)
+})
+
 test('failed checksum, changed release and unavailable service never prepare an installer', async (t) => {
   const { updater, state } = await fixture(t)
   let checked = await updater.check()

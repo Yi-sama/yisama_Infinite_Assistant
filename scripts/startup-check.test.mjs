@@ -68,6 +68,72 @@ test('startup migrates active and archived providers without changing IDs, title
   assert.deepEqual(ids.map((id) => backup.entries[id].provider), ['custom', 'openai'])
 })
 
+test('indexed conversations migrate and restore while duplicate history copies remain unchanged', async (t) => {
+  const f = await fixture(t)
+  const copies = []
+  for (const [index, original] of f.rollouts.entries()) {
+    const file = path.join(f.codexHome, index ? 'sessions' : 'archived_sessions',
+      path.basename(original.file))
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.copyFile(original.file, file)
+    copies.push({ file, bytes: original.bytes })
+  }
+  assert.deepEqual((await checkLocalStartup(f.files)).threads, {
+    status: 'complete', changed: 2, skipped: 0,
+  })
+  assert.ok(f.rows().every((row) => row.model_provider === 'yisama'))
+  for (const { file, bytes } of copies) assert.equal(await fs.readFile(file, 'utf8'), bytes)
+  assert.deepEqual((await checkLocalStartup(f.files, { restore: true })).threads, {
+    status: 'complete', changed: 2, skipped: 0,
+  })
+  assert.deepEqual(f.rows().map((row) => row.model_provider), ['custom', 'openai'])
+  for (const { file, bytes } of [...f.rollouts, ...copies]) {
+    assert.equal(await fs.readFile(file, 'utf8'), bytes)
+  }
+})
+
+test('a duplicate copy cannot replace a missing indexed conversation', async (t) => {
+  const f = await fixture(t)
+  const original = f.rollouts[0]
+  const copy = path.join(f.codexHome, 'archived_sessions', path.basename(original.file))
+  await fs.copyFile(original.file, copy)
+  await fs.rm(original.file)
+  const result = await checkLocalStartup(f.files)
+  assert.equal(result.threads.status, 'partial')
+  assert.equal(result.threads.changed, 1)
+  assert.ok(result.threads.skipped > 0)
+  assert.equal(f.rows()[0].model_provider, 'custom')
+  assert.equal(await fs.readFile(copy, 'utf8'), original.bytes)
+  assert.equal((await checkLocalStartup(f.files, { restore: true })).threads.changed, 1)
+  assert.equal(await fs.readFile(copy, 'utf8'), original.bytes)
+})
+
+test('restoring cannot use a duplicate copy in place of an unavailable indexed conversation', async (t) => {
+  const f = await fixture(t)
+  await checkLocalStartup(f.files)
+  const original = f.rollouts[0]
+  const copy = path.join(f.codexHome, 'archived_sessions', path.basename(original.file))
+  await fs.copyFile(original.file, copy)
+  const bytes = await fs.readFile(copy, 'utf8')
+  await fs.rm(original.file)
+  await assert.rejects(checkLocalStartup(f.files, { restore: true }), /could not be restored/)
+  assert.equal(f.rows()[0].model_provider, 'yisama')
+  assert.equal(await fs.readFile(copy, 'utf8'), bytes)
+})
+
+test('duplicate identities without an index remain ambiguous and are not modified', async (t) => {
+  const f = await fixture(t)
+  await fs.rm(f.databaseFile)
+  const original = f.rollouts[0]
+  const copy = path.join(f.codexHome, 'archived_sessions', path.basename(original.file))
+  await fs.copyFile(original.file, copy)
+  await assert.rejects(checkLocalStartup(f.files), /Duplicate local thread identity/)
+  for (const { file, bytes } of [...f.rollouts, { file: copy, bytes: original.bytes }]) {
+    assert.equal(await fs.readFile(file, 'utf8'), bytes)
+  }
+  await assert.rejects(fs.access(path.join(f.pluginData, 'backups')))
+})
+
 test('restoring providers preserves newer messages and follows a conversation moved into the archive', async (t) => {
   const f = await fixture(t)
   await checkLocalStartup(f.files)
