@@ -372,3 +372,19 @@ test('an HTTP answer never switches route, and state-changing calls are not repe
   assert.equal(posts.length, 1)
   assert.deepEqual(routesFor('https://other.example'), ['https://other.example'])
 })
+
+test('model requests can use a longer deadline without replaying a failed paid request', async () => {
+  let calls = 0
+  await assert.rejects(requestApi('/responses', {
+    origin: PRIMARY, method: 'POST', token: 'sk-local-test', apiPrefix: '/v1',
+    timeoutMs: 30, body: { model: 'gpt-test' },
+    fetchImpl: async (url, options) => {
+      calls++
+      assert.equal(new URL(url).pathname, '/v1/responses')
+      assert.equal(options.headers.Authorization, 'Bearer sk-local-test')
+      await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }))
+      throw new Error('request expired')
+    },
+  }))
+  assert.equal(calls, 1)
+})

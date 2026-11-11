@@ -71,6 +71,7 @@ async function readBounded(response, limit) {
 export function createUpdater({
   manifestUrl = UPDATE_URL, fetchImpl = globalThis.fetch, installRoot = root,
   cacheRoot = process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'yisama-infinite-assistant-cache', 'updates'),
+  manifestTimeoutMs = 15000,
 } = {}) {
   let checked = null
   const request = async (url, timeout) => {
@@ -88,7 +89,7 @@ export function createUpdater({
   }
   const loadRelease = async () => {
     trustedUrl(manifestUrl, manifestUrl)
-    const response = await request(manifestUrl, 15000)
+    const response = await request(manifestUrl, manifestTimeoutMs)
     try {
       return validateRelease(JSON.parse((await readBounded(response, 16384)).toString('utf8')), manifestUrl)
     } catch (error) {

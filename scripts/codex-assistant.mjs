@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { handleRequest, validateRequest } from './desktop-bridge.mjs'
 import { makeAssistantScript, REMOVE_ASSISTANT_SCRIPT } from './codex-panel.mjs'
-import { UserError, safeError, publicErrorCode, desktopNativeConfiguration, desktopNativeSynced } from './yisama.mjs'
+import { UserError, safeError, publicErrorCode, desktopNativeConfiguration, desktopNativeSynced, requestApi } from './yisama.mjs'
 
 export const CODEX_PAGE = 'app://-/index.html'
 const BINDING = 'yisamaAssistantCommand'
@@ -22,12 +22,14 @@ const NATIVE_RUNTIME_ASSET = 'app://-/assets/renderer-app-server-managers-*.js'
 const NATIVE_RUNTIME_ASSET_URL = /^app:\/\/-\/assets\/renderer-app-server-managers-[0-9a-f]+\.js$/
 const NATIVE_HOST_ASSET = 'app://-/assets/app-shared-*.js'
 const NATIVE_HOST_ASSET_URL = /^app:\/\/-\/assets\/app-shared-[0-9a-f]+\.js$/
+const NATIVE_CHUNK_ASSET = 'app://-/assets/async/*.js'
+const NATIVE_CHUNK_ASSET_URL = /^app:\/\/-\/assets\/async\/\d+\.[0-9a-f]+\.js$/
 
 // Codex ships its full translations but only uses them once a remote experiment
 // (unreachable from mainland China) allows it. Allow them locally; the user's
 // language setting still decides which one is shown. Unknown builds load unchanged.
 export function adaptNativeI18nSource(source) {
-  const gate = /(\.get\(`enable_i18n`,)!1\)/g
+  const gate = /(\.get\((?:`enable_i18n`|"enable_i18n"),)!1\)/g
   const matches = [...source.matchAll(gate)]
   const patched = matches.length === 1 ? source.replace(gate, '$1!0)||!0') : source
   return patched + '\nwindow.__yisamaNativeI18nSourceReady=true;\n'
@@ -41,7 +43,7 @@ const NATIVE_FEATURE_GATES = ['410065390', '410262010', '1506311413']
 export function adaptNativeGateSource(source) {
   let patched = source
   for (const gate of NATIVE_FEATURE_GATES) {
-    const call = new RegExp(String.raw`([\w$]+)\(\`${gate}\`\)`, 'g')
+    const call = new RegExp(String.raw`([\w$]+|\(0,[\w$]+\.[\w$]+\))\(["\x60]${gate}["\x60]\)`, 'g')
     if ([...patched.matchAll(call)].length === 1) patched = patched.replace(call, '$1(!0)')
   }
   return patched + '\nwindow.__yisamaNativeGatesSourceReady=true;\n'
@@ -53,7 +55,11 @@ export function adaptNativeGateSource(source) {
 export function adaptNativeRuntimeSource(source) {
   const pending = /(\.values\.permissionRefresh\?\?)null/g
   const matches = [...source.matchAll(pending)]
-  const patched = matches.length === 1 ? source.replace(pending, '$1!1') : source
+  let patched = matches.length === 1 ? source.replace(pending, '$1!1') : source
+  const chunkPlacement = /read:([\w$]+)=>null!=([\w$]+)&&\2\.get\("sidebarCustomSectionsEnabled"===\1\?[\w$.]+:[\w$.]+\)/g
+  if ([...patched.matchAll(chunkPlacement)].length === 1) {
+    patched = patched.replace(chunkPlacement, (match) => match.replace('=>', '=>(') + ')??!1')
+  }
   return patched + '\nwindow.__yisamaNativeRuntimeSourceReady=true;\n'
 }
 
@@ -98,6 +104,12 @@ export function installHostFallback(host) {
 
 // The host services object is the module value read with ?.performanceTelemetry; wrap it where it is stored.
 export function adaptNativeHostSource(source) {
+  const chunkSetter = /setAppServices:function\(([\w$]+)\)\{([\w$]+)=\1\}/g
+  if ([...source.matchAll(chunkSetter)].length === 1) {
+    return source.replace(chunkSetter, (_match, argument, name) =>
+      `setAppServices:function(${argument}){${name}=(${installHostFallback.toString()})(${argument})}`) +
+      '\nwindow.__yisamaNativeHostSourceReady=true;\n'
+  }
   const names = new Set([...source.matchAll(/([\w$]+)\?\.performanceTelemetry/g)].map((match) => match[1]))
   let patched = source
   if (names.size === 1) {
@@ -121,7 +133,7 @@ function uniqueMatch(source, pattern, label) {
 }
 
 function enclosingFunction(source, index) {
-  return source.slice(source.lastIndexOf('function ', index), index)
+  return source.slice(source.lastIndexOf('function', index), index)
 }
 
 function lastCapture(text, pattern, label) {
@@ -130,10 +142,13 @@ function lastCapture(text, pattern, label) {
   return match
 }
 
-export function adaptNativeFastSource(source) {
+function nativeFastEdits(source) {
   const n = String.raw`[\w$]+`
   const access = uniqueMatch(source, new RegExp(
-    String.raw`let (${n})=(${n}),(${n});return (${n}\[\d+\])!==(${n})\|\|(${n}\[\d+\])!==\1\?\(\3=\{serviceTierAccess:\1,isLoading:\5\}`), 'access')
+    String.raw`let (${n})=(${n})(?:,(${n}))?;return (${n}\[\d+\])!==(${n})\|\|(${n}\[\d+\])!==\1\?\((${n})=\{serviceTierAccess:\1,isLoading:\5\}`), 'access')
+  if (access[3] && access[3] !== access[7]) {
+    throw new ConnectionError('This Codex build does not support the native Fast adapter (access).')
+  }
   const [, accessMethod, accessHost] = lastCapture(enclosingFunction(source, access.index),
     new RegExp(String.raw`\{authMethod:(${n}),hostId:(${n})\}`), 'access auth')
 
@@ -143,36 +158,66 @@ export function adaptNativeFastSource(source) {
   const [, setterHost] = uniqueMatch(setterScope, new RegExp(String.raw`\{hostId:(${n}),conversationId:${n}\}`), 'setter host')
   const [, setterMethod] = uniqueMatch(setterScope, new RegExp(String.raw`\{authMethod:(${n}),hostId:${n}\}`), 'setter auth')
 
+  return [
+    [access, `let ${access[1]}=window.__yisamaNativeFast?.access(${accessHost},${accessMethod})??${access[2]}` +
+      access[0].slice(`let ${access[1]}=${access[2]}`.length)],
+    [setter, `serviceTierAccess:${setter[1]},serviceTierSettings:${setter[2]},` +
+      `setServiceTier:window.__yisamaNativeFast?.wrap(${setterHost},${setterMethod},${setter[3]})??${setter[3]}}`],
+  ]
+}
+
+function nativeReasoningEdit(source) {
+  const n = String.raw`[\w$]+`
   const select = uniqueMatch(source, new RegExp(
-    String.raw`select:(?<head>\(\{data:${n}(?:,isTeamCatalog:(?<team>${n})=!1)?\}\)=>)(?<spread>\(\{\.\.\.)?(?<transform>${n})\((?<options>\{additionalAvailableModels:new Set\(${n}\),apiKeyDaybreakSupported:[^{}]*?useHiddenModels:[\w$.]+\})\)(?<tail>,isTeamCatalog:\k<team>\}\))?`), 'models')
+    String.raw`select:(?<head>\(\{data:${n}(?:,isTeamCatalog:(?<team>${n})=!1)?\}\)=>)(?<spread>\(\{\.\.\.)?(?<transform>${n}|\(0,${n}\.${n}\))\((?<options>\{additionalAvailableModels:new Set\(${n}\),apiKeyDaybreakSupported:[^{}]*?useHiddenModels:[\w$.]+\})\)(?<tail>,isTeamCatalog:\k<team>\}\))?`), 'models')
   const { head, team, spread, transform, options, tail } = select.groups
   if (Boolean(team) !== Boolean(spread) || Boolean(team) !== Boolean(tail)) {
     throw new ConnectionError('This Codex build does not support the native Fast adapter (models).')
   }
   const query = lastCapture(source.slice(Math.max(0, select.index - 4000), select.index),
     /\(\{additionalAvailableModels:[^{}]*?\}/, 'models query')[0]
-  const field = (name) => new RegExp(String.raw`[{,]${name}:(${n})[,}]`).exec(query)?.[1]
+  const field = (name) => new RegExp(String.raw`[{,]${name}:(${n})(?:=![01])?[,}]`).exec(query)?.[1]
   const [selectHost, selectMethod, selectUltra] = [field('hostId'), field('authMethod'), field('includeUltraReasoningEffort')]
   if (!selectHost || !selectMethod || !selectUltra) {
     throw new ConnectionError('This Codex build does not support the native Fast adapter (models query).')
   }
 
-  const edits = [
-    [access, `let ${access[1]}=window.__yisamaNativeFast?.access(${accessHost},${accessMethod})??${access[2]}` +
-      access[0].slice(`let ${access[1]}=${access[2]}`.length)],
-    [setter, `serviceTierAccess:${setter[1]},serviceTierSettings:${setter[2]},` +
-      `setServiceTier:window.__yisamaNativeFast?.wrap(${setterHost},${setterMethod},${setter[3]})??${setter[3]}}`],
-    // Capture query arguments before 26.1027's isTeamCatalog parameter shadows hostId.
-    [select, `select:((yisamaHost,yisamaMethod,yisamaUltra)=>${head}{` +
+  // Capture query arguments before the isTeamCatalog parameter shadows hostId.
+  return [select, `select:((yisamaHost,yisamaMethod,yisamaUltra)=>${head}{` +
       `const yisamaOptions=${options};return ${spread || ''}${transform}(` +
       `window.__yisamaNativeFast?.modelOptions(yisamaHost,yisamaMethod,yisamaOptions,yisamaUltra)??yisamaOptions)` +
-      `${tail || ''}})(${selectHost},${selectMethod},${selectUltra})`],
-  ].sort((a, b) => b[0].index - a[0].index)
+      `${tail || ''}})(${selectHost},${selectMethod},${selectUltra})`]
+}
+
+function applyNativeEdits(source, edits) {
   let patched = source
-  for (const [match, replacement] of edits) {
+  for (const [match, replacement] of edits.sort((a, b) => b[0].index - a[0].index)) {
     patched = patched.slice(0, match.index) + replacement + patched.slice(match.index + match[0].length)
   }
-  return patched + '\nwindow.__yisamaNativeFastSourceReady=true;window.__yisamaNativeReasoningSourceReady=true;\n'
+  return patched
+}
+
+export function adaptNativeFastSource(source) {
+  return applyNativeEdits(source, [...nativeFastEdits(source), nativeReasoningEdit(source)]) +
+    '\nwindow.__yisamaNativeFastSourceReady=true;window.__yisamaNativeReasoningSourceReady=true;\n'
+}
+
+// Rspack splits these hooks into independent ESM chunks. Ignore unrelated chunks.
+export function adaptNativeChunkSource(source) {
+  let patched = source
+  if (source.includes('setAppServices:function(')) patched = adaptNativeHostSource(patched)
+  if (source.includes('"enable_i18n"')) patched = adaptNativeI18nSource(patched)
+  if (NATIVE_FEATURE_GATES.some((gate) => source.includes(`"${gate}"`))) patched = adaptNativeGateSource(patched)
+  if (source.includes('.values.permissionRefresh??null')) patched = adaptNativeRuntimeSource(patched)
+  if (source.includes('hasManagedNewThreadSettings:') && source.includes('setServiceTier:')) {
+    patched = applyNativeEdits(patched, nativeFastEdits(patched)) +
+      '\nwindow.__yisamaNativeFastSourceReady=true;\n'
+  }
+  if (source.includes('select:({data:') && source.includes('additionalAvailableModels:new Set(')) {
+    patched = applyNativeEdits(patched, [nativeReasoningEdit(patched)]) +
+      '\nwindow.__yisamaNativeReasoningSourceReady=true;\n'
+  }
+  return patched
 }
 
 // A late helper attachment may miss the initial assets. Only a fresh desktop
@@ -406,7 +451,8 @@ export async function restartAssistant(args, spawnChild = spawn) {
 
 export async function restartCodex(spawnChild = spawn, { installer } = {}) {
   const launcher = fileURLToPath(new URL('./launch-codex.ps1', import.meta.url))
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', launcher, '-Restart']
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+    '-File', launcher, '-Supervise', '-Restart']
   if (installer) {
     if (!path.isAbsolute(installer.path) || !/^[a-f0-9]{64}$/.test(installer.sha256)) {
       throw new ConnectionError('Invalid prepared update installer.')
@@ -415,11 +461,11 @@ export async function restartCodex(spawnChild = spawn, { installer } = {}) {
   }
   const child = spawnChild(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     args, {
-      // Windows PowerShell can exit silently without running -File when detached.
+      // PowerShell hands off outside Node's kill-on-exit job before closing Codex.
       detached: false, stdio: 'ignore', windowsHide: true,
     })
   await once(child, 'spawn')
-  // Unreferencing here can end the helper before PowerShell executes -File.
+  // Keep startup failures observable instead of assuming that spawn means success.
   const [code] = await once(child, 'close')
   if (code !== 0) throw new ConnectionError('Codex could not restart. Open Codex - yisama again.')
 }
@@ -477,13 +523,13 @@ export function createRequestQueue(handler = handleRequest) {
   let quiesced = false
   const updateChecks = new Set()
   const deferred = []
-  const run = (payload) => {
+  const run = (payload, client) => {
     const request = parseRequest(payload)
     if (!request) return Promise.resolve(null)
     pending++
     const result = (request.action === 'checkUpdate' ? Promise.resolve() : queue).then(async () => {
       try {
-        return { id: request.id, ok: true, data: await handler(request) }
+        return { id: request.id, ok: true, data: await handler(request, client) }
       } catch (error) {
         return { id: request.id, ok: false, error: safeError(error),
           ...(publicErrorCode(error) ? { code: publicErrorCode(error) } : {}) }
@@ -496,9 +542,9 @@ export function createRequestQueue(handler = handleRequest) {
     } else queue = settled
     return result
   }
-  const request = (payload) => {
-    if (!quiesced) return run(payload)
-    return new Promise((resolve) => deferred.push(() => resolve(run(payload))))
+  const request = (payload, client) => {
+    if (!quiesced) return run(payload, client)
+    return new Promise((resolve) => deferred.push(() => resolve(run(payload, client))))
   }
   request.isIdle = () => pending === 0 && deferred.length === 0
   request.drain = () => Promise.all([queue, ...updateChecks])
@@ -659,6 +705,7 @@ export class AssistantTarget {
     this.allowed = false
     this.disposed = false
     this.nativeFastReloadAttempted = false
+    this.nativeAdapterFailed = false
     this.replies = new Set()
     this.connection = connectionFactory(target.webSocketDebuggerUrl, (event) => this.onEvent(event))
   }
@@ -702,13 +749,18 @@ export class AssistantTarget {
       const adapt = fast ? adaptNativeGateSource
         : NATIVE_I18N_ASSET_URL.test(params.request.url) ? adaptNativeI18nSource
           : NATIVE_RUNTIME_ASSET_URL.test(params.request.url) ? adaptNativeRuntimeSource
-            : NATIVE_HOST_ASSET_URL.test(params.request.url) ? adaptNativeHostSource : null
+            : NATIVE_HOST_ASSET_URL.test(params.request.url) ? adaptNativeHostSource
+              : NATIVE_CHUNK_ASSET_URL.test(params.request.url) ? adaptNativeChunkSource : null
       if (!adapt || params.responseStatusCode !== 200) {
         throw new ConnectionError('The native Fast module could not be adapted.')
       }
       const response = await this.connection.call('Fetch.getResponseBody', { requestId: params.requestId })
       const source = response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body
       let patched = adapt(source)
+      if (patched === source) {
+        await this.connection.call('Fetch.continueRequest', { requestId: params.requestId })
+        return
+      }
       let fastError = null
       // An incompatible Fast adapter must not also drop the feature gates.
       if (fast) try { patched = adaptNativeFastSource(patched) } catch (error) { fastError = error }
@@ -718,8 +770,14 @@ export class AssistantTarget {
           !['content-length', 'content-encoding'].includes(header.name.toLowerCase())),
         body: Buffer.from(patched).toString('base64'),
       })
-      if (fastError) this.report(connectionMessage(fastError))
+      if (fastError) {
+        this.nativeAdapterFailed = true
+        this.report(connectionMessage(fastError))
+      }
     } catch (error) {
+      if (error instanceof ConnectionError && /does not support the native Fast adapter/.test(error.message)) {
+        this.nativeAdapterFailed = true
+      }
       await this.connection.call('Fetch.continueRequest', { requestId: params.requestId })
       throw error
     }
@@ -750,7 +808,7 @@ export class AssistantTarget {
   }
 
   async reply({ payload, executionContextId }) {
-    const response = await this.request(payload)
+    const response = await this.request(payload, this)
     if (!response || this.disposed || !this.allowed || executionContextId !== this.topContext()) return
     await this.connection.call('Runtime.evaluate', {
       expression: `if (window === window.top && location.href === ${JSON.stringify(CODEX_PAGE)}) {
@@ -780,6 +838,46 @@ export class AssistantTarget {
       expression: 'window.__yisamaInfiniteAssistant?.restartFailed?.()',
       contextId: this.topContext(), returnByValue: true,
     })
+  }
+
+  async checkNative(settings) {
+    if (this.disposed || !this.allowed || !this.topContext()) throw new UserError('Codex 页面未就绪，请稍后自检。')
+    const contextId = this.topContext()
+    const result = await this.connection.call('Runtime.evaluate', {
+      expression: `(${inspectNativeControls.toString()})(${JSON.stringify(settings)})`,
+      contextId, returnByValue: true, awaitPromise: true,
+    }, { timeoutMs: 30000 })
+    if (this.disposed || contextId !== this.topContext() || result.exceptionDetails || !result.result?.value) {
+      throw new UserError('无法读取 Codex 控件状态，未进行修复。')
+    }
+    const check = result.result.value
+    if (this.nativeAdapterFailed && check.status === 'repairable') {
+      return { status: 'unsupported', canRepair: false }
+    }
+    return check
+  }
+
+  async prepareNativeRepair(settings) {
+    const check = await this.checkNative(settings)
+    if (!check.canRepair) return check
+    const contextId = this.topContext()
+    const result = await this.connection.call('Runtime.evaluate', {
+      expression: `(() => {
+        const runtime = window.__yisamaInfiniteAssistant;
+        if (!runtime?.startNativeRepair) return false;
+        delete window.__yisamaNativeModelSync;
+        delete window.__yisamaNativeAdapterUnsupported;
+        runtime.startNativeRepair();
+        return true;
+      })()`,
+      contextId, returnByValue: true,
+    })
+    if (this.disposed || contextId !== this.topContext() || result.exceptionDetails || result.result?.value !== true) {
+      throw new UserError('未能开始本地修复，请稍后重试。')
+    }
+    // One new reload is allowed only by a fresh, confirmed manual repair.
+    this.nativeFastReloadAttempted = false
+    return { ...check, status: 'repairing', canRepair: false }
   }
 
   async syncModels(settings) {
@@ -830,7 +928,8 @@ export class AssistantTarget {
       patterns: [{ urlPattern: NATIVE_FAST_ASSET, requestStage: 'Response' },
         { urlPattern: NATIVE_I18N_ASSET, requestStage: 'Response' },
         { urlPattern: NATIVE_RUNTIME_ASSET, requestStage: 'Response' },
-        { urlPattern: NATIVE_HOST_ASSET, requestStage: 'Response' }],
+        { urlPattern: NATIVE_HOST_ASSET, requestStage: 'Response' },
+        { urlPattern: NATIVE_CHUNK_ASSET, requestStage: 'Response' }],
     })
     const source = `(${installNativeStartup.toString()})(${JSON.stringify(process.env.YISAMA_CODEX_STARTED_AT)});\n` +
       `${makeAssistantScript()}\n;(${installNativeFast.toString()})();`
@@ -871,12 +970,21 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
   readEndpoint = async (file) => JSON.parse(await fs.readFile(file, 'utf8')),
   connectionFactory = (url, onEvent) => new CdpConnection(url, onEvent),
   nativeConfiguration = handler === handleRequest ? desktopNativeConfiguration : async () => null,
+  diagnose = diagnoseNativeControls,
   onNativeSynced = nativeConfiguration === desktopNativeConfiguration ? desktopNativeSynced : async () => {} } = {}) {
   const clients = new Map()
   // Finish account changes by restarting only after the panel has received its reply.
   let restartCodexAt = 0
   let preparedInstaller
   let allowInterrupt = false
+  const checkRepairActivity = async () => {
+    const blockers = await Promise.all([...clients.values()].map((entry) => entry.restartBlocker()))
+    if (!blockers.length || blockers.some((blocker) => blocker !== null)) {
+      const error = new UserError('请先保存草稿并等待所有任务完成，再点击修复。未安排延后修复。')
+      error.publicCode = 'CODEX_REPAIR_BLOCKED'
+      throw error
+    }
+  }
   const checkRestart = async (action, consent = false) => {
     const restoring = action === 'restore'
     const blockers = await Promise.all([...clients.values()].map((client) => client.restartBlocker()))
@@ -890,9 +998,37 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
       throw error
     }
   }
-  const request = createRequestQueue(async (command) => {
+  const request = createRequestQueue(async (command, client) => {
     if (restartCodexAt && !['status', 'authOptions'].includes(command.action)) {
       throw new UserError('Codex 正在重启，请稍候。')
+    }
+    if (['codexCheck', 'codexRepair'].includes(command.action)) {
+      if (!client || clients.get(client.target.id) !== client) throw new UserError('请从当前 Codex 面板发起自检。')
+      const repairing = command.action === 'codexRepair'
+      if (repairing) await checkRepairActivity()
+      const settings = await nativeConfiguration()
+      const check = await client.checkNative(settings)
+      let data = check
+      if (!repairing || check.canRepair) {
+        const diagnosis = await diagnose(settings, check, { action: command.action })
+        data = { ...check, summary: diagnosis.summary,
+          canRepair: check.canRepair === true && diagnosis.repair === true, billing: 'account' }
+        if (repairing && data.canRepair) {
+          const current = await nativeConfiguration()
+          if (current?.version !== settings?.version || current?.apiKey !== settings?.apiKey ||
+            current?.model !== settings?.model ||
+            clients.get(client.target.id) !== client) {
+            const error = new UserError('自检期间配置已变化，未执行修复，请重新手动自检。')
+            error.publicCode = 'CODEX_DIAGNOSTIC_CONFIGURATION'
+            throw error
+          }
+          await checkRepairActivity()
+          data = { ...data, ...await client.prepareNativeRepair(current) }
+        }
+      }
+      const updateControl = process.env.YISAMA_CODEX_UPDATE_CONTROL
+      return { ...data, updates: ['launch-disabled', 'activation-unverified'].includes(updateControl)
+        ? updateControl : 'unknown' }
     }
     if (['restore', 'reconfigure', 'installUpdate'].includes(command.action)) {
       await checkRestart(command.action, command.allowInterrupt === true)
@@ -1002,6 +1138,110 @@ export async function runAssistant({ endpointFile, processId, signal, handler = 
   } finally {
     for (const client of clients.values()) await client.dispose()
   }
+}
+
+export async function diagnoseNativeControls(settings, check, { action = 'codexCheck', send = requestApi } = {}) {
+  if (!settings || settings.provider !== 'yisama' || typeof settings.apiKey !== 'string' ||
+    !settings.apiKey || typeof settings.model !== 'string' || !settings.model ||
+    !Array.isArray(settings.models) || !settings.models.includes(settings.model)) {
+    const error = new UserError('请先登录并应用可用的对话模型，再进行 Codex 自检。')
+    error.publicCode = 'CODEX_DIAGNOSTIC_CONFIGURATION'
+    throw error
+  }
+  // Only explicit diagnostic clicks reach this paid request. Never send source,
+  // configuration, logs, conversations or credentials as model input.
+  const evidence = {
+    operation: action === 'codexRepair' ? 'repair' : 'check',
+    status: ['ready', 'repairable', 'unsupported', 'configuration', 'account-change', 'unavailable',
+      'connection', 'not-offered'].includes(check?.status) ? check.status : 'unavailable',
+    canResync: check.status === 'repairable' && check.canRepair === true,
+    fast: check.fast === true, ultra: check.ultra === true,
+  }
+  try {
+    const payload = await send('/responses', {
+      method: 'POST', token: settings.apiKey, apiPrefix: '/v1', timeoutMs: 60000,
+      body: {
+        model: settings.model, store: false, stream: false, max_output_tokens: 2048,
+        ...(settings.modelSettings?.[settings.model]?.reasoningEfforts?.includes('low')
+          ? { reasoning: { effort: 'low' } } : {}),
+        instructions: '你是无限助手的 Codex 本机诊断助手。只分析给定的结构化状态，用简短中文解释原因和下一步。' +
+          'repair 仅表示是否建议重新同步本地控件，只有 status=repairable 且 canResync=true 时才可为 true。' +
+          'ready 表示本地已就绪，不代表实际线路测试通过；unsupported 必须提示更新无限助手，不得声称可修复未知版本。' +
+          'configuration/account-change 应提示应用登录配置，connection/unavailable 应提示检查本机客户端，' +
+          'not-offered 应提示当前模型未提供该能力。不得声称已经修复、保证开启功能或要求用户提供凭证。' +
+          '你没有执行代码或修改文件的权限。',
+        input: JSON.stringify(evidence),
+        text: { format: {
+          type: 'json_schema', name: 'codex_diagnostic', strict: true,
+          schema: {
+            type: 'object', properties: { summary: { type: 'string' }, repair: { type: 'boolean' } },
+            required: ['summary', 'repair'], additionalProperties: false,
+          },
+        } },
+      },
+    })
+    if (payload?.status !== 'completed') throw new Error('Incomplete diagnostic response.')
+    const text = payload.output?.filter((item) => item.type === 'message')
+      .flatMap((item) => item.content || []).filter((item) => item.type === 'output_text')
+      .map((item) => item.text).join('')
+    const result = JSON.parse(text)
+    if (typeof result?.summary !== 'string' || !result.summary.trim() || typeof result.repair !== 'boolean') {
+      throw new Error('Invalid diagnostic response.')
+    }
+    return {
+      summary: result.summary.replaceAll(settings.apiKey, '[已隐藏]').trim().slice(0, 400),
+      repair: evidence.canResync && result.repair,
+    }
+  } catch (cause) {
+    const error = new UserError(cause.status === 402
+      ? '可用额度不足，未完成 Codex 自检。' : '模型自检未完成，请检查当前模型和网络后手动重试。')
+    error.publicCode = cause.status === 402 ? 'CODEX_DIAGNOSTIC_BALANCE' : 'CODEX_DIAGNOSTIC_FAILED'
+    throw error
+  }
+}
+
+// Read-only, no inference requests. Return states only, never native credentials.
+export async function inspectNativeControls(settings, options = {}) {
+  if (window.top !== window || (location.href !== 'app://-/index.html' && options.allowTestLocation !== true)) return null
+  if (!settings || settings.provider !== 'yisama') return { status: 'configuration', canRepair: false }
+  if (!window.__yisamaInfiniteAssistant || !window.__codexRoot?._internalRoot?.current ||
+    !window.electronBridge?.sendMessageFromView || !window.__yisamaNativeFast) {
+    return { status: 'unavailable', canRepair: false }
+  }
+  const auth = await new Promise((resolve) => {
+    const id = `yisama-check-${crypto.randomUUID()}`
+    const finish = (value) => {
+      clearTimeout(timer)
+      window.removeEventListener('message', receive)
+      resolve(value)
+    }
+    const receive = (event) => {
+      const data = event.data
+      if (data?.type !== 'mcp-response' || data.hostId !== 'local' || data.message?.id !== id) return
+      finish(data.message.error ? null : data.message.result)
+    }
+    const timer = setTimeout(() => finish(null), 8000)
+    window.addEventListener('message', receive)
+    Promise.resolve().then(() => window.electronBridge.sendMessageFromView({
+      type: 'mcp-request', hostId: 'local', request: { id, method: 'getAuthStatus',
+        params: { includeToken: true, refreshToken: false } }, priority: 'critical',
+    })).catch(() => finish(null))
+  })
+  if (!auth || auth.isLoading) return { status: 'connection', canRepair: false }
+  if (auth.authMethod !== 'apikey' || !settings.apiKey || auth.authToken !== settings.apiKey) {
+    return { status: 'account-change', canRepair: false }
+  }
+  const currentModel = settings.modelSettings?.[settings.model]
+  const fast = currentModel ? currentModel.fastAvailable === true : settings.fastAvailable === true
+  const ultra = currentModel ? currentModel.reasoningEfforts?.includes('ultra') === true
+    : Object.values(settings.modelSettings || {}).some((model) => model.reasoningEfforts?.includes('ultra'))
+  if (!fast && !ultra) return { status: 'not-offered', canRepair: false, fast, ultra }
+  const synced = window.__yisamaNativeModelSync
+  const loaded = (!fast || window.__yisamaNativeFastSourceReady === true) &&
+    (!ultra || window.__yisamaNativeReasoningSourceReady === true)
+  const ready = loaded && synced?.status === 'synced' && synced.version === settings.version &&
+    window.__yisamaNativeAdapterUnsupported !== true
+  return { status: ready ? 'ready' : 'repairable', canRepair: !ready, fast, ultra }
 }
 
 // Serialized into the renderer. Re-authentication with the current key refreshes

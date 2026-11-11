@@ -20,6 +20,7 @@ import {
   desktopStatus,
   desktopBalance,
   desktopFastMode,
+  UserError,
   safeError,
   publicErrorCode,
 } from './yisama.mjs'
@@ -28,7 +29,7 @@ const MAX_LINE_LENGTH = 16 * 1024
 const ACTIONS = new Set(['status', 'balance', 'login', 'authOptions', 'register', 'sendVerification',
   'sendPasswordResetVerification', 'resetPassword',
   'select', 'reconfigure', 'rechargeInfo', 'rechargeAmount', 'rechargePay', 'recharge', 'redeem',
-  'restore', 'fast', 'checkUpdate', 'installUpdate'])
+  'restore', 'fast', 'checkUpdate', 'installUpdate', 'codexCheck', 'codexRepair'])
 
 function requestId(value) {
   return Number.isFinite(value) ? value : null
@@ -49,6 +50,10 @@ export function validateRequest(value) {
         : value.action === 'redeem' ? ['redeemCode']
         : ['rechargeAmount', 'rechargePay'].includes(value.action) ? ['paymentMethod'] : []
   const request = { id: value.id, action: value.action }
+  if (value.action === 'codexRepair') {
+    if (value.confirmed !== true) throw new Error('invalid bridge request')
+    request.confirmed = true
+  }
   if (value.allowInterrupt !== undefined) {
     if (!['restore', 'reconfigure', 'installUpdate'].includes(value.action) || typeof value.allowInterrupt !== 'boolean') {
       throw new Error('invalid bridge request')
@@ -105,6 +110,9 @@ export function validateRequest(value) {
 
 export async function handleRequest(request) {
   const { action, group, model, ...details } = validateRequest(request)
+  if (action === 'codexCheck' || action === 'codexRepair') {
+    throw new UserError('请在 Codex 内的无限助手面板中进行自检。')
+  }
   if (action === 'checkUpdate') return checkForUpdates()
   if (action === 'installUpdate') return prepareUpdate(details.updateId)
   if (action === 'status') return desktopStatus()

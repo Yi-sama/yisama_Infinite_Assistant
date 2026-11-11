@@ -52,6 +52,9 @@ export function installAssistantUI(options = {}) {
     verificationRetryAt: 0,
     passwordResetRetryAt: 0,
     nativeSync: '',
+    nativeCheckOpen: false,
+    nativeCheck: null,
+    nativeRepairAt: 0,
     view: 'main',
     rechargeInfo: null,
     rechargeAmount: '',
@@ -78,6 +81,15 @@ export function installAssistantUI(options = {}) {
   let suppressClick = false
 
   const safe = (fn, fallback) => { try { return fn() } catch { return fallback } }
+  const nativeCheckKey = 'yisama-codex-self-check-v1'
+  const repairReceipt = safe(() => JSON.parse(window.sessionStorage.getItem(nativeCheckKey)), null)
+  if (repairReceipt?.startedAt > Date.now() - 90000 && repairReceipt.startedAt <= Date.now()) {
+    state.nativeRepairAt = repairReceipt.startedAt
+    state.nativeCheckOpen = true
+    state.nativeCheck = { status: 'repairing', canRepair: false, updates: repairReceipt.updates,
+      fast: repairReceipt.fast === true, ultra: repairReceipt.ultra === true }
+    state.open = true
+  } else safe(() => window.sessionStorage.removeItem(nativeCheckKey))
   let gateDismissed = safe(() => window.localStorage.getItem(gateKey) === '1', false)
   const addListener = (node, event, listener, options) => {
     node.addEventListener(event, listener, options)
@@ -159,6 +171,11 @@ export function installAssistantUI(options = {}) {
   style.textContent = `
     ${R}{--y-bg:#07070b;--y-bg2:#0d0d13;--y-bg3:#15151e;--y-line:rgba(255,255,255,.08);--y-line2:rgba(255,255,255,.14);--y-fg:#f3efe8;--y-fg2:rgba(243,239,232,.66);--y-fg3:rgba(243,239,232,.42);--y-mag:#e060c0;--y-vio:#8060e0;--y-cyan:#20c0e0;--y-grad:linear-gradient(100deg,#e060c0 0%,#8060e0 48%,#20c0e0 100%);--y-amber:#f2b45c;--y-red:#ff8a7a;--y-ease:cubic-bezier(.16,1,.3,1);--y-sans:"Inter Tight","Noto Sans SC","PingFang SC","Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;--y-mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;position:fixed;inset:0;z-index:2147483000;pointer-events:none;color:var(--y-fg);font:13px/1.45 var(--y-sans);-webkit-font-smoothing:antialiased;color-scheme:dark}
     ${R} *{box-sizing:border-box}
+    ${R} .y-native-check{border-top:1px solid var(--y-line2);padding:12px 0;display:grid;gap:10px}
+    ${R} .y-native-check p{margin:0;overflow-wrap:anywhere}
+    ${R} .y-native-check small{color:var(--y-fg2);line-height:1.6;overflow-wrap:anywhere}
+    ${R} .y-native-check__actions{display:flex;gap:8px;flex-wrap:wrap}
+    ${R} .y-native-check-cost{display:block;color:var(--y-fg2);font-size:11px;line-height:1.6;overflow-wrap:anywhere}
     ${R} [hidden]{display:none!important}
     ${R} button,${R} input{font:inherit;color:inherit}
     ${R} button{margin:0;border:0;background:none;cursor:pointer}
@@ -543,7 +560,41 @@ export function installAssistantUI(options = {}) {
   }, version)
   const accountFooter = el('div', { className: 'y-account-footer' })
   accountFooter.append(restoreButton, versionLabel)
-  actions.append(rechargeButton, helpButton, accountFooter)
+  const nativeCheckButton = el('button', {
+    type: 'button', className: 'y-button y-button--quiet y-button--wide',
+    'data-testid': 'codex-check', title: '检查 Fast 和 Ultra',
+  }, 'Codex 自检')
+  const nativeCheckPanel = el('section', {
+    className: 'y-native-check', hidden: '', 'data-testid': 'codex-check-panel', 'aria-label': 'Codex 自检',
+  })
+  const nativeCheckResult = el('p', { role: 'status', 'data-testid': 'codex-check-result' })
+  const nativeCheckCost = el('small', { className: 'y-native-check-cost', 'data-testid': 'codex-check-cost' },
+    '此处会消耗一定额度，用于尝试启用 Ultra、Fast 等功能。')
+  const nativeUpdateNote = el('small', { 'data-testid': 'codex-update-policy' })
+  const nativeCheckActions = el('div', { className: 'y-native-check__actions' })
+  const nativeRepairButton = el('button', {
+    type: 'button', className: 'y-button y-button--accent', 'data-testid': 'codex-repair',
+  }, '修复 Fast / Ultra')
+  const nativeCheckClose = el('button', {
+    type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'codex-check-close',
+  }, '收起')
+  nativeCheckActions.append(nativeRepairButton, nativeCheckClose)
+  const nativeRepairConfirmation = el('section', {
+    hidden: '', 'data-testid': 'codex-repair-confirmation',
+  })
+  const nativeRepairConfirmText = el('p', {},
+    '将尝试修复 Fast、Ultra，必要时刷新 Codex 页面。请先保存草稿并等待所有任务完成；不会强制结束任务。')
+  const nativeRepairConfirmActions = el('div', { className: 'y-native-check__actions' })
+  const nativeRepairCancel = el('button', {
+    type: 'button', className: 'y-button y-button--quiet', 'data-testid': 'codex-repair-cancel',
+  }, '取消')
+  const nativeRepairConfirm = el('button', {
+    type: 'button', className: 'y-button y-button--accent', 'data-testid': 'codex-repair-confirm',
+  }, '确认修复')
+  nativeRepairConfirmActions.append(nativeRepairCancel, nativeRepairConfirm)
+  nativeRepairConfirmation.append(nativeRepairConfirmText, nativeRepairConfirmActions)
+  nativeCheckPanel.append(nativeCheckResult, nativeUpdateNote, nativeCheckActions, nativeRepairConfirmation)
+  actions.append(rechargeButton, nativeCheckButton, nativeCheckCost, nativeCheckPanel, helpButton, accountFooter)
   const confirmation = el('section', { className: 'y-confirm', hidden: '', 'data-testid': 'restore-confirmation' })
   const confirmationText = el('p', {}, '将退出 yisama 登录、停用助手线路，并恢复使用助手之前的配置。确认后会自动关闭并重新打开 Codex，请先保存草稿并等待任务完成。')
   const restoreConsent = restartConsent('restore-allow-interrupt')
@@ -698,6 +749,35 @@ export function installAssistantUI(options = {}) {
     restartRequired: data?.restartRequired === true,
     setupPending: data?.setupPending === true,
   })
+  const nativeCheckMessages = {
+    ready: 'Fast / Ultra 本地控件检查通过，实际线路效果以对话为准。',
+    repairable: '检测到模型同步或控件加载异常。',
+    repairing: '正在进行本地修复，请稍候。必要时会刷新页面。',
+    unsupported: '当前 Codex 控件接口与内置适配规则不兼容，未能修复。请更新无限助手；不会用 GPT 自动改代码。',
+    configuration: '未检测到助手管理的有效配置，请先登录并应用模型。',
+    'account-change': 'Codex 当前登录与助手配置不一致，请使用面板中的重启确认入口应用登录。',
+    unavailable: '暂时无法读取 Codex 本地控件状态，未进行修复，请稍后重新自检。',
+    connection: '无法连接本机 Codex 服务，未进行修复。请检查客户端是否正常运行。',
+    'not-offered': '当前线路未提供 Fast 或 Ultra，本地修复不会强行开启未提供的能力。',
+    blocked: '还有草稿或运行中的任务，未进行修复。完成后请重新点击，不会延后自动执行。',
+    error: '本地修复未完成，请重新自检；如仍不兼容，请更新无限助手。',
+    'ai-error': '模型自检未完成，请检查当前模型和网络后手动重试。',
+    'quota-low': '可用额度不足，未完成 Codex 自检。',
+  }
+  const normalizeNativeCheck = (data) => ({
+    status: Object.hasOwn(nativeCheckMessages, data?.status) ? data.status : 'unavailable',
+    canRepair: data?.status === 'repairable' && data.canRepair === true,
+    summary: cleanText(data?.summary, 400),
+    fast: data?.fast === true,
+    ultra: data?.ultra === true,
+    updates: ['launch-disabled', 'activation-unverified'].includes(data?.updates) ? data.updates : 'unknown',
+  })
+  const finishNativeRepair = (status) => {
+    if (!state.nativeRepairAt) return
+    state.nativeRepairAt = 0
+    state.nativeCheck = { ...state.nativeCheck, status, canRepair: false, summary: '' }
+    safe(() => window.sessionStorage.removeItem(nativeCheckKey))
+  }
   const quotaLabel = () => state.quota || '—'
   // One place per kind of information: the status line carries the steady state,
   // the notice carries errors and fresh messages, and is hidden when it would repeat the status line.
@@ -706,7 +786,7 @@ export function installAssistantUI(options = {}) {
     if (state.nativeSync === 'pending' || state.nativeSync === 'syncing') return '正在同步 Codex 模型'
     if (state.nativeSync === 'account-change') return '登录已更新，需重启 Codex 生效'
     if (state.nativeSync === 'error') return '配置已保存，Codex 模型尚未同步。'
-    if (state.nativeSync === 'unsupported') return '当前 Codex 版本暂不支持 Ultra、Fast，其余功能正常'
+    if (state.nativeSync === 'unsupported') return 'Fast / Ultra 适配异常，可进行 Codex 自检'
     if (state.nativeSync === 'reload-required') return '原生模型控件待加载'
     if (state.nativeSync === 'reload-blocked') return '还有草稿或运行中的任务，尚未刷新'
     if (state.setupPending || hasActivePending('login')) return '登录成功，正在准备配置'
@@ -726,6 +806,7 @@ export function installAssistantUI(options = {}) {
   const statusPillText = { normal: 'LIVE', busy: 'SYNC', warning: 'WAIT', off: 'IDLE' }
   const noticeText = () => {
     if (state.error) return state.error
+    if (state.nativeSync === 'unsupported') return '请点击下方“Codex 自检”检查 Fast / Ultra。其他助手功能仍可使用。'
     if (state.nativeSync === 'account-change') {
       if (restartConfirmation.dataset.open === 'true') return ''
       return '确认后将自动关闭并重新打开 Codex，应用当前登录和模型配置。请先保存草稿并等待任务完成。'
@@ -950,7 +1031,7 @@ export function installAssistantUI(options = {}) {
   }
   const render = () => {
     const quota = quotaLabel()
-    const busy = hasForegroundPending() || state.restarting
+    const busy = hasForegroundPending() || state.restarting || Boolean(state.nativeRepairAt)
     updateButton.disabled = busy || state.setupPending
     updateConfirmation.hidden = !state.updateOpen
     updateHeading.textContent = hasActivePending('checkUpdate') ? '正在检查更新'
@@ -1025,6 +1106,29 @@ export function installAssistantUI(options = {}) {
     fields.hidden = !state.loggedIn
     actions.hidden = !state.loggedIn && !state.configured
     rechargeButton.hidden = !state.loggedIn
+    nativeCheckButton.hidden = !state.configured
+    nativeCheckCost.hidden = !state.configured
+    nativeCheckButton.disabled = busy || Boolean(state.nativeRepairAt)
+    nativeCheckButton.textContent = hasActivePending('codexCheck') ? '正在自检…' : 'Codex 自检'
+    nativeCheckPanel.hidden = !state.nativeCheckOpen || !state.configured
+    const diagnosing = hasActivePending('codexCheck') || hasActivePending('codexRepair')
+    nativeCheckResult.textContent = diagnosing ? '正在分析 Codex 与 Fast / Ultra 状态…'
+      : nativeCheckMessages[state.nativeCheck?.status] || ''
+    if (!diagnosing && state.nativeCheck?.summary) nativeCheckResult.textContent += ` 模型分析：${state.nativeCheck.summary}`
+    if (state.nativeCheck?.status === 'ready' && state.nativeCheck.fast !== state.nativeCheck.ultra) {
+      nativeCheckResult.textContent += ` 当前线路${state.nativeCheck.fast ? '提供 Fast，未列出 Ultra' : '提供 Ultra，未列出 Fast'}。`
+    }
+    const updatePolicy = state.nativeCheck?.updates
+    nativeUpdateNote.textContent = updatePolicy === 'launch-disabled'
+      ? '通过 yisama 启动时已设置禁用 Codex 内置自动更新；Microsoft Store 等外部更新不受此开关控制。'
+      : updatePolicy === 'activation-unverified'
+        ? '当前使用 Windows 应用激活启动，无法确认内置更新开关生效；Microsoft Store 更新未关闭。'
+        : '尚未确认 Codex 内置自动更新已停用；新版启动设置需下次通过 yisama 启动生效。'
+    nativeCheckClose.disabled = Boolean(state.nativeRepairAt)
+    nativeRepairButton.hidden = !state.nativeCheck?.canRepair || !nativeRepairConfirmation.hidden
+    nativeRepairButton.disabled = busy || Boolean(state.nativeRepairAt)
+    nativeRepairConfirm.disabled = busy || Boolean(state.nativeRepairAt)
+    nativeRepairCancel.disabled = busy || Boolean(state.nativeRepairAt)
     helpButton.hidden = !state.loggedIn
     loggedOut.hidden = state.loggedIn
     mainView.hidden = walletOpen || qqOpen
@@ -1137,6 +1241,10 @@ export function installAssistantUI(options = {}) {
       if (!state.configured) {
         state.nativeSync = ''
         nativeReloadRequested = false
+        finishNativeRepair('configuration')
+        state.nativeCheckOpen = false
+        state.nativeCheck = null
+        nativeRepairConfirmation.hidden = true
       }
     }
     if (state.loggedIn) {
@@ -1154,9 +1262,16 @@ export function installAssistantUI(options = {}) {
     passwordResetConfirm.input.value = ''
   }
   const failure = (entry, code) => {
-    if (entry.action === 'status') {
+    if (entry.action === 'codexCheck' || entry.action === 'codexRepair') {
+      const status = code === 'CODEX_REPAIR_BLOCKED' ? 'blocked'
+        : code === 'CODEX_DIAGNOSTIC_CONFIGURATION' ? 'configuration'
+          : code === 'CODEX_DIAGNOSTIC_BALANCE' ? 'quota-low' : 'ai-error'
+      finishNativeRepair(status)
+      state.nativeCheck = { ...state.nativeCheck, status, canRepair: false, summary: '' }
+    } else if (entry.action === 'status') {
       state.staleQuota = Boolean(state.quota)
       state.error = '无法刷新账户状态'
+      if (!state.loggedIn && !state.authReady) request('authOptions')
     } else if (entry.setup) {
       state.setupPending = false
       state.error = '账户已登录，准备配置未完成，请重试准备。'
@@ -1245,10 +1360,12 @@ export function installAssistantUI(options = {}) {
     render()
   }
   const request = (action, details = {}) => {
-    if (disposed || state.restarting || (action === 'status' ? hasActivePending('status') : hasForegroundPending())) return null
+    if (disposed || state.restarting || (action === 'status' ? hasActivePending('status')
+      : hasForegroundPending() || Boolean(state.nativeRepairAt))) return null
     const id = ++sequence
     if (action !== 'status') foregroundVersion += 1
     const command = { id, action }
+    if (action === 'codexRepair' && details.confirmed === true) command.confirmed = true
     if (details.allowInterrupt === true && ['restore', 'reconfigure', 'installUpdate'].includes(action)) command.allowInterrupt = true
     if (action === 'installUpdate' && typeof details.updateId === 'string') command.updateId = details.updateId
     if (typeof details.group === 'string' && details.group) command.group = details.group
@@ -1580,6 +1697,30 @@ export function installAssistantUI(options = {}) {
     state.nativeSync = 'pending'
     render()
   })
+  addListener(nativeCheckButton, 'click', () => {
+    if (nativeCheckButton.disabled || nativeCheckButton.hidden) return
+    state.nativeCheckOpen = true
+    nativeRepairConfirmation.hidden = true
+    request('codexCheck')
+  })
+  addListener(nativeCheckClose, 'click', () => {
+    state.nativeCheckOpen = false
+    nativeRepairConfirmation.hidden = true
+    render()
+  })
+  addListener(nativeRepairButton, 'click', () => {
+    nativeRepairConfirmation.hidden = false
+    render()
+  })
+  addListener(nativeRepairCancel, 'click', () => {
+    nativeRepairConfirmation.hidden = true
+    render()
+  })
+  addListener(nativeRepairConfirm, 'click', () => {
+    if (nativeRepairConfirm.disabled || !state.nativeCheck?.canRepair) return
+    nativeRepairConfirmation.hidden = true
+    request('codexRepair', { confirmed: true })
+  })
   const setAuthMode = (mode) => {
     if (hasForegroundPending()) return
     state.authMode = mode
@@ -1841,11 +1982,28 @@ export function installAssistantUI(options = {}) {
   }, 1000)
   cleanups.push(() => window.clearInterval(balanceTimer))
   const authTimer = window.setInterval(() => {
+    if (state.nativeRepairAt && Date.now() - state.nativeRepairAt > 90000) {
+      finishNativeRepair('unavailable')
+      render()
+    }
     if (state.open && !state.loggedIn && (state.verificationRetryAt || state.passwordResetRetryAt)) render()
   }, 1000)
   cleanups.push(() => window.clearInterval(authTimer))
 
   const runtime = {
+    startNativeRepair() {
+      if (disposed) return
+      state.nativeRepairAt = Date.now()
+      state.nativeCheckOpen = true
+      state.nativeCheck = { ...state.nativeCheck, status: 'repairing', canRepair: false }
+      state.nativeSync = 'pending'
+      nativeReloadRequested = true
+      safe(() => window.sessionStorage.setItem(nativeCheckKey, JSON.stringify({
+        startedAt: state.nativeRepairAt, updates: state.nativeCheck.updates,
+        fast: state.nativeCheck.fast, ultra: state.nativeCheck.ultra,
+      })))
+      render()
+    },
     restartFailed() {
       if (disposed) return
       state.restarting = false
@@ -1863,6 +2021,9 @@ export function installAssistantUI(options = {}) {
         'reload-required', 'reload-blocked'].includes(status)) return
       if (state.nativeSync === status) return
       state.nativeSync = status
+      if (['synced', 'unsupported', 'error', 'account-change', 'reload-blocked'].includes(status)) {
+        finishNativeRepair(status === 'synced' ? 'ready' : status === 'reload-blocked' ? 'blocked' : status)
+      }
       if (status === 'synced') state.restartRequired = false
       render()
     },
@@ -1888,7 +2049,10 @@ export function installAssistantUI(options = {}) {
       if (response.ok === true && response.data && typeof response.data === 'object') {
         const data = response.data
         state.error = ''
-        if (entry.action === 'checkUpdate') {
+        if (entry.action === 'codexCheck' || entry.action === 'codexRepair') {
+          state.nativeCheck = normalizeNativeCheck(data)
+          if (data.status !== 'repairing') finishNativeRepair(state.nativeCheck.status)
+        } else if (entry.action === 'checkUpdate') {
           state.update = normalizeUpdate(data)
         } else if (entry.action === 'installUpdate') {
           state.restarting = data.restartRequired === true

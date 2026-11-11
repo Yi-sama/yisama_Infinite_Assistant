@@ -16,10 +16,14 @@ export const UPDATE_FILES = Object.freeze([
   'scripts/yisama.mjs',
   'scripts/launch-codex.ps1',
   'scripts/update-local.mjs',
+  'scripts/online-update.mjs',
+  'scripts/startup-check.mjs',
+  'scripts/thread-provider.mjs',
 ])
 
 const REQUIRED_TARGET_FILES = UPDATE_FILES.filter((file) =>
-  !['scripts/update-local.mjs', 'scripts/imagegen.mjs'].includes(file))
+  !['scripts/update-local.mjs', 'scripts/imagegen.mjs', 'scripts/online-update.mjs',
+    'scripts/startup-check.mjs', 'scripts/thread-provider.mjs'].includes(file))
 
 function inside(root, relative) {
   const candidate = path.resolve(root, relative)
@@ -89,6 +93,10 @@ async function validateTarget(target, sourceRoot) {
   }
 
   await assertSafePath(target, 'runtime/node.exe', 'file')
+  if (await lstatOptional(inside(target, 'runtime/codex-bootstrap.exe')) === null) {
+    throw new Error('This update requires the full Windows installer: the Codex bootstrap runtime is missing.')
+  }
+  await assertSafePath(target, 'runtime/codex-bootstrap.exe', 'file')
   for (const relative of REQUIRED_TARGET_FILES) await assertSafePath(target, relative, 'file')
   return sourcePackage
 }

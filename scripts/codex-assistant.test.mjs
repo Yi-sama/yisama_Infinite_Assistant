@@ -8,10 +8,14 @@ import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash, webcrypto } from 'node:crypto'
 import { runInNewContext } from 'node:vm'
+import { fileURLToPath } from 'node:url'
 import {
-  adaptNativeFastSource, adaptNativeI18nSource, adaptNativeGateSource, adaptNativeRuntimeSource, adaptNativeHostSource, installHostFallback, installNativeFast, installNativeStartup, syncNativeModels, codexRestartBlocker, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
+  adaptNativeFastSource, adaptNativeChunkSource, adaptNativeI18nSource, adaptNativeGateSource, adaptNativeRuntimeSource, adaptNativeHostSource, installHostFallback, installNativeFast, installNativeStartup, syncNativeModels, codexRestartBlocker, allowedTarget, AssistantTarget, CdpConnection, CODEX_PAGE, codexStartedAt, createRequestQueue, readUpdateMarker,
   restartAssistant, restartCodex, runAssistant, shouldReload, validateEndpoint, validateUpdateMarker,
 } from './codex-assistant.mjs'
+import { inspectNativeControls, diagnoseNativeControls } from './codex-assistant.mjs'
+import { validateRequest, handleRequest } from './desktop-bridge.mjs'
+import { requestApi } from './yisama.mjs'
 
 const generation = (letter) => letter.repeat(64)
 const marker = (letter) => ({ generation: generation(letter), updatedAt: '2026-10-29T02:30:00.000Z' })
@@ -22,6 +26,16 @@ const nativeSourceFor = ({ access = 'Jlo', setter = 'P', models = 'Vso', teamCat
 function _fo(e,t,n,r,i){let l=g(e),u=l.hostId,d={hostId:u,conversationId:e},b=h(u),S=b?.authMethod??null,C={authMethod:S,hostId:x};return {hasManagedNewThreadSettings:I,hostId:L,serviceTierAccess:R,serviceTierSettings:z,setServiceTier:${setter}}}
 var D2=Sc(J,({additionalAvailableModels:e,authMethod:t,enabledReasoningEfforts:n,hasConfiguredModelCatalog:r,hostId:i,includeUltraReasoningEffort:a,isCustomModelProvider:o},{get:d})=>({select:({data:n${teamCatalog ? ',isTeamCatalog:i=!1' : ''}})=>${teamCatalog ? '({...' : ''}${models}({additionalAvailableModels:new Set(e),apiKeyDaybreakSupported:_,authMethod:t,availableModels:b.availableModels,defaultModel:b.defaultModel,enabledReasoningEfforts:y,hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x,isCustomModelProvider:o,models:n,useHiddenModels:b.useHiddenModels})${teamCatalog ? ',isTeamCatalog:i})' : ''}}))`
 const nativeSource = nativeSourceFor()
+const chunkFastSource = nativeSource.split('\nvar D2')[0]
+  .replace('function Jlo(e){', 'var access=function(e){let p;')
+  .replace('let f=d,p;', 'let f=d;')
+  .replace('function _fo(e,t,n,r,i){', 'var setter=function(e,t,n,r,i){')
+const chunkModelSource = nativeSourceFor({ teamCatalog: true }).split('\nvar D2')[1]
+  .replace('includeUltraReasoningEffort:a,', 'includeUltraReasoningEffort:a=!0,')
+  .replace('...Vso(', '...(0,transform.a)(')
+  .replace('hasConfiguredModelCatalog:r,includeUltraReasoningEffort:x',
+    'hasConfiguredModelCatalog:hasCatalog(r),includeUltraReasoningEffort:x')
+  .replace('models:n,useHiddenModels:', 'models:null==specialty?n:n.filter(e=>e.modelSpecialty===specialty),useHiddenModels:')
 
 function startupFixture({ age = 1000, navigation = 'navigate', startedAt } = {}) {
   const clock = { now: Date.now() }
@@ -89,6 +103,177 @@ test('native controls adapt only the inspected hook sites and reject missing or 
     nativeSource.replace(',conversationId:e', ''), nativeSource.replace('hostId:i,', ''),
     nativeSource.replace('setServiceTier:P}', 'setServiceTier:P()}'), nativeSource.replace('select:', 'pick:')]) {
     assert.throws(() => adaptNativeFastSource(source), /does not support/)
+  }
+})
+
+test('Rspack chunks adapt anonymous Fast hooks and reasoning independently', () => {
+  const fast = adaptNativeChunkSource(chunkFastSource)
+  assert.match(fast, /__yisamaNativeFast\?\.access\(r,o\)\?\?d;/)
+  assert.match(fast, /__yisamaNativeFast\?\.wrap\(u,S,P\)\?\?P/)
+  assert.match(fast, /__yisamaNativeFastSourceReady=true/)
+  assert.doesNotMatch(fast, /__yisamaNativeReasoningSourceReady/)
+  assert.doesNotThrow(() => new Function(fast))
+
+  const models = adaptNativeChunkSource(`var D2${chunkModelSource}`)
+  assert.match(models, /\(0,transform.a\)\(window\.__yisamaNativeFast\?\.modelOptions/)
+  assert.match(models, /__yisamaNativeReasoningSourceReady=true/)
+  assert.doesNotMatch(models, /__yisamaNativeFastSourceReady/)
+  assert.doesNotThrow(() => new Function(models))
+  for (const unrelated of ['', 'export const __webpack_modules__={};',
+    'let value={serviceTierAccess:null};', 'let value={setServiceTier:noop};']) {
+    assert.equal(adaptNativeChunkSource(unrelated), unrelated)
+  }
+  assert.throws(() => adaptNativeChunkSource(chunkFastSource + chunkFastSource), /does not support/)
+  assert.throws(() => adaptNativeChunkSource(`var D2${chunkModelSource}`.replace('hostId:i,', '')), /does not support/)
+})
+
+test('Rspack model selectors retain team, specialty and account boundaries with a defaulted Ultra argument', () => {
+  const { controller, window } = fastFixture()
+  const model = { model: 'gpt-test', modelSpecialty: 'code',
+    supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }
+  controller.authorize({ provider: 'yisama', fastAvailable: true,
+    modelSettings: { 'gpt-test': { reasoningEfforts: ['high', 'ultra'] } } })
+  for (const [hostId, authMethod, includeUltraReasoningEffort] of [
+    ['local', 'apikey', undefined], ['local', 'apikey', false],
+    ['remote', 'apikey', true], ['local', 'chatgpt', true],
+  ]) {
+    const options = { additionalAvailableModels: [], authMethod, hostId,
+      includeUltraReasoningEffort, hasConfiguredModelCatalog: true, isCustomModelProvider: true }
+    const query = runInNewContext(`${adaptNativeChunkSource(`var D2${chunkModelSource}`)}\nD2(options,{})`, {
+      window, options, Sc: (_key, build) => build, J: null,
+      transform: { a: (value) => value }, hasCatalog: (value) => value, specialty: 'code',
+      _: false, b: { availableModels: [], defaultModel: model.model, useHiddenModels: false },
+      y: new Set(['high']), x: false,
+    })
+    const owned = hostId === 'local' && authMethod === 'apikey'
+    const selected = query.select({ data: [model, { ...model, modelSpecialty: 'other' }], isTeamCatalog: true })
+    assert.equal(selected.isTeamCatalog, true)
+    assert.equal(selected.models.length, 1)
+    assert.equal(selected.includeUltraReasoningEffort, owned && includeUltraReasoningEffort !== false)
+    assert.equal(selected.models[0].supportedReasoningEfforts.some((entry) => entry.reasoningEffort === 'ultra'), owned)
+  }
+  controller.dispose()
+})
+
+test('Rspack host, translation, feature and sidebar hooks retain their native settings', () => {
+  const window = {}
+  const host = { statsigEvaluations: { readExecutionAssignments: async () => null } }
+  const hostSource = 'var services;var exports={setAppServices:function(e){services=e}}'
+  const adaptedHost = adaptNativeChunkSource(hostSource)
+  const actual = runInNewContext(`${adaptedHost};exports.setAppServices(host);services`, {
+    window, host, Date, setTimeout, clearTimeout,
+  })
+  assert.equal(actual.statsigEvaluations.__yisamaFallback, true)
+  assert.equal(host.statsigEvaluations.__yisamaFallback, true)
+  const featureSource = 'let a=(0,h.Zj)("410065390"),b=(0,i.Zj)("410262010"),c=(0,j.Zj)("1506311413");'
+  const adaptedFeatures = adaptNativeChunkSource(featureSource)
+  for (const name of ['h', 'i', 'j']) assert.ok(adaptedFeatures.includes(`(0,${name}.Zj)(!0)`))
+  assert.match(adaptNativeChunkSource('let a=gate?.get("enable_i18n",!1);'), /get\("enable_i18n",!0\)\|\|!0/)
+  const runtimeSource = 'let value=host.values.permissionRefresh??null;' +
+    'var settings={read:t=>null!=store&&store.get("sidebarCustomSectionsEnabled"===t?keys.sections:keys.server)};'
+  const runtime = runInNewContext(adaptNativeChunkSource(runtimeSource) + ';({settings,value})', {
+    window, host: { values: {} }, store: { get: () => undefined }, keys: {},
+  })
+  assert.equal(runtime.value, false)
+  assert.equal(runtime.settings.read('sidebarCustomSectionsEnabled'), false)
+  assert.equal(runtime.settings.read('useAppServerCustomSections'), false)
+})
+
+test('inspected Codex ESM assets load hooks and preserve Fast and reasoning ownership', {
+  skip: !process.env.YISAMA_CODEX_ASSETS && 'Set YISAMA_CODEX_ASSETS to the inspected assets/async folder.',
+}, async (t) => {
+  const folder = path.resolve(process.env.YISAMA_CODEX_ASSETS)
+  const { window, controller, key } = fastFixture()
+  t.after(() => controller.dispose())
+  controller.authorize({ provider: 'yisama', apiKey: key, fastAvailable: true,
+    modelSettings: { 'gpt-test': { reasoningEfforts: ['high', 'ultra'] } } })
+  const counts = { access: 0, wrap: 0, modelOptions: 0 }
+  let modelModules = 0
+  let accessModules = 0
+  for (const name of await fs.readdir(folder)) {
+    if (!/^\d+\.[0-9a-f]+\.js$/.test(name)) continue
+    const source = await fs.readFile(path.join(folder, name), 'utf8')
+    const patched = adaptNativeChunkSource(source)
+    if (patched === source) continue
+    const modules = runInNewContext(patched.replaceAll('export const ', 'const ') +
+      '\n;__webpack_modules__', { window })
+    for (const name of Object.keys(counts)) {
+      counts[name] += patched.split(`window.__yisamaNativeFast?.${name}(`).length - 1
+    }
+    for (const factory of Object.values(modules)) {
+      const text = factory.toString()
+      if (!text.includes('window.__yisamaNativeFast?.modelOptions(') &&
+        !text.includes('window.__yisamaNativeFast?.access(')) continue
+      const model = { model: 'gpt-test', modelSpecialty: 'code',
+        supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }
+      const nativeAccess = { fast: false, ultrafast: false }
+      let method = 'apikey'
+      const dependencies = {
+        QosV: { c: (size) => Array(size).fill(Symbol.for('react.memo_cache_sentinel')) },
+        zTeN: { vU: (_scope, build) => build, Ul: () => 'local',
+          _U: () => ({ data: {}, isPending: false }) },
+        OeLR: { bo: () => true },
+        Xvtr: { a: (options) => options },
+        eWgO: { W6: () => nativeAccess },
+        EOo5: { tn: () => ({ authMethod: method, isLoading: false }) },
+        wCOm: { Y$: (config) => config, cc: () => true },
+        B81s: { I2: 'config' },
+        Q4dB: { o: () => ['models', 'list'] },
+        Q3tq: { pN: 'efforts' },
+        dPoV: { t: 'preferences' },
+        OMIV: { JW: 'gate' },
+        tl5a: { Dj: 'hosts' },
+        rvFo: { D: { FIVE_MINUTES: 300000 } },
+      }
+      const require = (id) => dependencies[id] || {}
+      require.d = (target, getters, values) => {
+        for (const [key, get] of Object.entries(getters)) Object.defineProperty(target, key, { get })
+        Object.assign(target, values)
+      }
+      const exports = {}
+      factory({}, exports, require)
+      if (text.includes('window.__yisamaNativeFast?.modelOptions(')) {
+        modelModules++
+        for (const [hostId, authMethod, includeUltraReasoningEffort] of [
+          ['local', 'apikey', undefined], ['local', 'apikey', false],
+          ['remote', 'apikey', true], ['local', 'chatgpt', true],
+        ]) {
+          const teamCatalog = { accountId: 'test-team', userId: 'test-user' }
+          const query = exports.SV({ additionalAvailableModels: [], authMethod, hostId,
+            enabledReasoningEfforts: ['high'], includeUltraReasoningEffort, specialty: 'code', teamCatalog }, {
+            get: (key) => ({
+              config: { data: { config: { model_provider: 'yisama' } } },
+              preferences: { availableModels: [], defaultModel: model.model, useHiddenModels: false },
+              gate: false, hosts: ['local', 'remote'], efforts: new Set(['high']),
+            })[key],
+          })
+          assert.equal(query.queryKey[2], hostId)
+          assert.equal(query.queryKey[4], teamCatalog)
+          assert.equal(query.enabled, true)
+          const selected = query.select({ data: [model, { ...model, modelSpecialty: 'other' }], isTeamCatalog: true })
+          const owned = hostId === 'local' && authMethod === 'apikey'
+          assert.equal(selected.isTeamCatalog, true)
+          assert.equal(selected.models.length, 1)
+          assert.equal(selected.includeUltraReasoningEffort, owned && includeUltraReasoningEffort !== false)
+          assert.equal(selected.models[0].supportedReasoningEfforts.some((entry) =>
+            entry.reasoningEffort === 'ultra'), owned)
+        }
+      } else {
+        accessModules++
+        assert.equal(exports.U({ hostId: 'local' }).serviceTierAccess.fast, true)
+        assert.equal(exports.U({ hostId: 'local' }).serviceTierAccess.ultrafast, false)
+        assert.equal(exports.U({ hostId: 'remote' }).serviceTierAccess, null)
+        method = 'chatgpt'
+        assert.equal(exports.U({ hostId: 'local' }).serviceTierAccess, nativeAccess)
+      }
+      assert.equal(model.supportedReasoningEfforts.length, 1, 'the native catalog must not be mutated')
+    }
+  }
+  assert.deepEqual(counts, { access: 1, wrap: 1, modelOptions: 2 })
+  assert.equal(modelModules, 2)
+  assert.equal(accessModules, 1)
+  for (const name of ['Fast', 'Reasoning', 'Host', 'Gates', 'Runtime', 'I18n']) {
+    assert.equal(window[`__yisamaNative${name}SourceReady`], true, `${name} hook must load`)
   }
 })
 
@@ -228,6 +413,7 @@ test('native controls preserve the 26.1027 team selector and capture host outsid
 
 function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = true, serverDelay = 0, lang } = {}) {
   const listeners = new Set()
+  const events = new EventEmitter()
   const calls = []
   const authCalls = []
   const key = 'sk-isolated-native-fast-test-only'
@@ -249,9 +435,12 @@ function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = t
     yisamaAssistantCommand(payload) {
       const request = JSON.parse(payload)
       calls.push(request)
-      const reply = () => window.__yisamaNativeFast.receive({
-        id: request.id, ok: !serverFailure, data: { enabled: request.enabled },
-      })
+      const reply = () => {
+        window.__yisamaNativeFast.receive({
+          id: request.id, ok: !serverFailure, data: { enabled: request.enabled },
+        })
+        queueMicrotask(() => events.emit('settled', request))
+      }
       if (serverDelay > 0) setTimeout(reply, serverDelay)
       else queueMicrotask(reply)
     },
@@ -267,7 +456,7 @@ function fastFixture({ serverFailure = false, nativeFailure = false, ownAuth = t
     calls.push({ nativeTier: tier, source })
     return !nativeFailure
   }
-  return { window, controller, native, calls, authCalls, key }
+  return { window, controller, native, calls, authCalls, key, events }
 }
 
 test('only a Chinese interface reloads once to pick up the local translation and feature switches', () => {
@@ -286,23 +475,24 @@ test('only a Chinese interface reloads once to pick up the local translation and
 })
 
 test('native Fast updates the native UI before the server and preserves native account access', async () => {
-  const { controller, native, calls, authCalls, key, window } = fastFixture()
+  const { controller, native, calls, authCalls, key, window, events } = fastFixture()
   assert.equal(controller.access('local', 'apikey')?.fast, true)
   assert.equal(controller.access('local', 'chatgpt'), null)
   assert.equal(controller.access('remote', 'apikey'), null)
   assert.equal(controller.wrap('local', 'chatgpt', native), native)
   const wrapped = controller.wrap('local', 'apikey', native)
   assert.equal(controller.wrap('local', 'apikey', native), wrapped)
+  const firstReply = once(events, 'settled')
   assert.equal(await wrapped(null, 'composer_menu'), true)
-  await delay(50)
+  const [firstServerCall] = await firstReply
   assert.equal(calls[0].nativeTier, null)
-  const firstServerCall = calls.find((call) => call.action === 'fast')
   assert.equal(firstServerCall.enabled, false)
   assert.equal(firstServerCall.keyFingerprint, createHash('sha256').update(key).digest('hex'))
   assert.deepEqual(authCalls, ['getAuthStatus'])
   assert.equal(JSON.stringify(calls).includes(key), false)
+  const secondReply = once(events, 'settled')
   assert.equal(await wrapped('priority', 'composer_menu'), true)
-  await delay(10)
+  await secondReply
   assert.equal(calls.findLast((call) => call.action === 'fast').enabled, true)
   assert.equal(calls.findLast((call) => Object.hasOwn(call, 'nativeTier')).nativeTier, 'priority')
   window.__yisamaNativeFastSourceReady = false
@@ -477,6 +667,213 @@ function nativeSyncFixture() {
   })
   return { state, window, calls, sync, settings }
 }
+
+test('local evidence collection is read-only, account-bound and returns no credentials', async () => {
+  const { state, window, calls, settings } = nativeSyncFixture()
+  settings.modelSettings = { demo: { reasoningEfforts: ['high', 'ultra'] } }
+  const inspect = (value = settings) => runInNewContext(`(${inspectNativeControls.toString()})(settings)`, {
+    window, location: { href: CODEX_PAGE }, settings: value, crypto: webcrypto, setTimeout, clearTimeout,
+  })
+  assert.equal((await inspect(null)).status, 'configuration')
+  assert.equal(calls.length, 0)
+  assert.equal((await inspect()).status, 'repairable')
+  assert.equal(state.authorized, undefined)
+  window.__yisamaNativeFastSourceReady = true
+  window.__yisamaNativeReasoningSourceReady = true
+  window.__yisamaNativeModelSync = { version: settings.version, status: 'synced' }
+  const ready = await inspect()
+  assert.equal(ready.status, 'ready')
+  assert.equal(ready.fast, true)
+  assert.equal(ready.ultra, true)
+  assert.doesNotMatch(JSON.stringify(ready), /apiKey|sk-|authToken/)
+  window.__yisamaNativeAdapterUnsupported = true
+  assert.equal((await inspect()).status, 'repairable')
+  state.authToken = 'foreign-test-key'
+  assert.equal((await inspect()).status, 'account-change')
+  state.authToken = settings.apiKey
+  state.failMethod = 'getAuthStatus'
+  assert.equal((await inspect()).status, 'connection')
+  state.failMethod = ''
+  settings.fastAvailable = false
+  settings.modelSettings = {}
+  assert.equal((await inspect()).status, 'not-offered')
+  settings.fastAvailable = true
+  settings.model = 'selected'
+  settings.modelSettings = { selected: { fastAvailable: false, reasoningEfforts: ['high'] },
+    another: { fastAvailable: true, reasoningEfforts: ['ultra'] } }
+  assert.equal((await inspect()).status, 'not-offered', 'another model cannot grant the selected model Fast or Ultra')
+  assert.ok(calls.every((method) => method === 'getAuthStatus'), 'no login, writes, reload, inference or paid checks')
+})
+
+const diagnosticSettings = {
+  provider: 'yisama', apiKey: 'sk-self-check-private', version: 'diagnostic-v1',
+  model: 'gpt-test', models: ['gpt-test'], modelSettings: { 'gpt-test': { reasoningEfforts: ['low', 'ultra'] } },
+}
+const diagnosticResponse = (data) => ({
+  status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(data) }] }],
+})
+
+test('AI self-check uses the current account and model with only sanitized status evidence', async () => {
+  const calls = []
+  const result = await diagnoseNativeControls(diagnosticSettings, {
+    status: 'repairable', canRepair: true, fast: true, ultra: true,
+    ignoredSecret: 'DO-NOT-SEND-THIS', source: 'private source', logs: ['private log'],
+  }, { send: async (url, options) => {
+    calls.push({ url, options })
+    return diagnosticResponse({ summary: `建议重新同步 ${diagnosticSettings.apiKey}`, repair: true })
+  } })
+  assert.equal(calls.length, 1)
+  const { url, options } = calls[0]
+  assert.equal(url, '/responses')
+  assert.equal(options.method, 'POST')
+  assert.equal(options.token, diagnosticSettings.apiKey)
+  assert.equal(options.apiPrefix, '/v1')
+  assert.equal(options.timeoutMs, 60000)
+  assert.equal(options.body.model, diagnosticSettings.model)
+  assert.equal(options.body.store, false)
+  assert.equal(options.body.stream, false)
+  assert.equal(options.body.text.format.strict, true)
+  assert.deepEqual(options.body.reasoning, { effort: 'low' })
+  assert.deepEqual(JSON.parse(options.body.input),
+    { operation: 'check', status: 'repairable', canResync: true, fast: true, ultra: true })
+  assert.doesNotMatch(JSON.stringify(options.body), /sk-self-check|DO-NOT-SEND|private source|private log/)
+  assert.doesNotMatch(result.summary, /sk-self-check/)
+  assert.equal(result.repair, true)
+})
+
+test('model diagnostics complete the real HTTP request chain against a local simulated provider', async (t) => {
+  const { createServer } = await import('node:http')
+  const requests = []
+  const server = createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += chunk
+    requests.push({ url: request.url, authorization: request.headers.authorization, body: JSON.parse(body) })
+    response.writeHead(requests.length === 1 ? 200 : 503, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(requests.length === 1
+      ? diagnosticResponse({ summary: '建议重新同步控件', repair: true })
+      : { error: { message: 'sk-private-provider-error' } }))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const send = (pathname, options) => requestApi(pathname, {
+    ...options, origin: `http://127.0.0.1:${server.address().port}`,
+  })
+  const evidence = { status: 'repairable', canRepair: true, fast: true, ultra: true }
+  const result = await diagnoseNativeControls(diagnosticSettings, evidence, { send })
+  assert.equal(result.repair, true)
+  assert.equal(requests[0].url, '/v1/responses')
+  assert.equal(requests[0].authorization, `Bearer ${diagnosticSettings.apiKey}`)
+  assert.equal(requests[0].body.model, diagnosticSettings.model)
+  assert.doesNotMatch(JSON.stringify(requests[0].body), /sk-self-check/)
+  await assert.rejects(diagnoseNativeControls(diagnosticSettings, evidence, { send, action: 'codexRepair' }),
+    (error) => {
+      assert.doesNotMatch(error.message, /sk-private/)
+      return error.publicCode === 'CODEX_DIAGNOSTIC_FAILED'
+    })
+  assert.equal(requests.length, 2, 'one manual operation sends exactly one model request, including failures')
+  assert.equal(JSON.parse(requests[1].body.input).operation, 'repair')
+})
+
+test('AI advice cannot grant unavailable features or repair unknown adapters', async () => {
+  for (const status of ['ready', 'unsupported', 'not-offered', 'configuration', 'account-change', 'secret-status']) {
+    const result = await diagnoseNativeControls(diagnosticSettings, { status, canRepair: true }, {
+      action: 'codexRepair', send: async (_url, { body }) => {
+        const evidence = JSON.parse(body.input)
+        assert.equal(evidence.operation, 'repair')
+        assert.equal(evidence.canResync, false)
+        assert.doesNotMatch(body.input, /secret-status/)
+        return diagnosticResponse({ summary: '模型建议', repair: true })
+      },
+    })
+    assert.equal(result.repair, false, status)
+  }
+})
+
+test('invalid configuration and failed model requests never fall back to another account or retry', async () => {
+  let calls = 0
+  for (const settings of [null, { ...diagnosticSettings, provider: 'other' },
+    { ...diagnosticSettings, models: [] }]) {
+    await assert.rejects(diagnoseNativeControls(settings, { status: 'ready' }, {
+      send: async () => { calls++; assert.fail('configuration must be checked before inference') },
+    }), (error) => error.publicCode === 'CODEX_DIAGNOSTIC_CONFIGURATION')
+  }
+  assert.equal(calls, 0)
+  for (const payload of [
+    { status: 'incomplete', output: [] }, diagnosticResponse({ summary: '', repair: true }),
+    diagnosticResponse({ summary: 'invalid result', repair: 'true' }),
+  ]) {
+    const before = calls
+    await assert.rejects(diagnoseNativeControls(diagnosticSettings, { status: 'ready' }, {
+      send: async () => { calls++; return payload },
+    }), (error) => error.publicCode === 'CODEX_DIAGNOSTIC_FAILED')
+    assert.equal(calls, before + 1)
+  }
+  for (const status of [402, undefined]) {
+    const before = calls
+    await assert.rejects(diagnoseNativeControls(diagnosticSettings, { status: 'ready' }, {
+      send: async () => { calls++; throw Object.assign(new Error('sk-provider-private'), { status }) },
+    }), (error) => {
+      assert.doesNotMatch(error.message, /sk-provider-private/)
+      return error.publicCode === (status === 402 ? 'CODEX_DIAGNOSTIC_BALANCE' : 'CODEX_DIAGNOSTIC_FAILED')
+    })
+    assert.equal(calls, before + 1)
+  }
+})
+
+test('Codex self-repair requires explicit confirmation and cannot use the standalone account bridge', async () => {
+  assert.throws(() => validateRequest({ id: 1, action: 'codexRepair' }), /invalid bridge request/)
+  assert.throws(() => validateRequest({ id: 1, action: 'codexRepair', confirmed: false }), /invalid bridge request/)
+  assert.deepEqual(validateRequest({ id: 1, action: 'codexRepair', confirmed: true }),
+    { id: 1, action: 'codexRepair', confirmed: true })
+  await assert.rejects(handleRequest({ id: 2, action: 'codexCheck' }), /面板/)
+  const origin = {}
+  let client
+  const request = createRequestQueue((_command, context) => { client = context; return { cost: 0 } })
+  request.quiesce()
+  const reply = request('{"id":3,"action":"codexCheck"}', origin)
+  request.resume()
+  assert.equal((await reply).data.cost, 0)
+  assert.equal(client, origin, 'a queued check must remain bound to its originating renderer')
+})
+
+test('known incompatible native adapters are reported without scheduling a fake repair', async () => {
+  const calls = []
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method, params) {
+      calls.push({ method, params })
+      return { result: { value: { status: 'repairable', canRepair: true } } }
+    },
+  }) })
+  target.allowed = true
+  target.mainFrameId = 'self-check'
+  target.contexts.set(1, { auxData: { isDefault: true, frameId: 'self-check' } })
+  target.nativeAdapterFailed = true
+  target.nativeFastReloadAttempted = true
+  assert.equal((await target.prepareNativeRepair({})).status, 'unsupported')
+  assert.equal(target.nativeFastReloadAttempted, true)
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].params.expression.includes(inspectNativeControls.toString()))
+})
+
+test('manual repair rearms only one native reload after the renderer accepts the request', async () => {
+  const calls = []
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method, params) {
+      calls.push({ method, params })
+      return { result: { value: params.expression.includes(inspectNativeControls.toString())
+        ? { status: 'repairable', canRepair: true, fast: true, ultra: true } : true } }
+    },
+  }) })
+  target.allowed = true
+  target.mainFrameId = 'self-check'
+  target.contexts.set(1, { auxData: { isDefault: true, frameId: 'self-check' } })
+  target.nativeFastReloadAttempted = true
+  assert.equal((await target.prepareNativeRepair({})).status, 'repairing')
+  assert.equal(target.nativeFastReloadAttempted, false)
+  assert.match(calls[1].params.expression, /delete window\.__yisamaNativeModelSync/)
+  assert.equal(calls.some((call) => call.method === 'Page.reload'), false,
+    'the normal synchronization loop must recheck activity before any reload')
+})
 
 test('device migration defers during active replies and switches only the verified previous credential when idle', async () => {
   const { state, window, calls, sync, settings } = nativeSyncFixture()
@@ -902,6 +1299,31 @@ test('native asset interception is scoped, removes stale body headers, and relea
   assert.deepEqual(calls.slice(before), [{ method: 'Fetch.continueRequest', params: { requestId: 'other' } }])
 })
 
+test('numeric ESM asset interception adapts native chunks and continues unrelated code unchanged', async () => {
+  const calls = []
+  let source = chunkFastSource
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'Fetch.getResponseBody') return { body: source }
+      return {}
+    },
+  }) })
+  const request = (url) => ({ requestId: 'chunk', responseStatusCode: 200, request: { url } })
+  await target.adaptNativeScript(request('app://-/assets/async/634175.4437e0034c.js'))
+  assert.equal(calls.at(-1).method, 'Fetch.fulfillRequest')
+  assert.equal(Buffer.from(calls.at(-1).params.body, 'base64').toString(), adaptNativeChunkSource(source))
+  source = 'export const value=42;'
+  await target.adaptNativeScript(request('app://-/assets/async/123456.abcdef0123.js'))
+  assert.equal(calls.at(-1).method, 'Fetch.continueRequest')
+  for (const url of ['https://example.com/assets/async/634175.4437e0034c.js',
+    'app://-/assets/async/other.4437e0034c.js', 'app://-/assets/async/634175.4437e0034c.js?untrusted']) {
+    const before = calls.length
+    await assert.rejects(target.adaptNativeScript(request(url)), /could not be adapted/)
+    assert.deepEqual(calls.slice(before).map((call) => call.method), ['Fetch.continueRequest'])
+  }
+})
+
 test('an incompatible Fast adapter still delivers the feature gates and reports the problem', async () => {
   const calls = []
   const reports = []
@@ -946,7 +1368,9 @@ test('Codex restart keeps its helper alive until the hidden packaged launcher fi
   let finished = false
   const restarting = restartCodex((executable, args, options) => {
     assert.equal(path.basename(executable).toLowerCase(), 'powershell.exe')
+    assert.ok(args.includes('-NonInteractive'))
     assert.equal(path.basename(args[args.indexOf('-File') + 1]), 'launch-codex.ps1')
+    assert.ok(args.includes('-Supervise'))
     assert.equal(args.at(-1), '-Restart')
     assert.deepEqual(options, { detached: false, stdio: 'ignore', windowsHide: true })
     launcher = new EventEmitter()
@@ -979,6 +1403,17 @@ test('Codex restart reports launcher startup and execution failures', async () =
   }), /isolated launcher spawn failure/)
 })
 
+const isolatedRestartPrelude = `[CmdletBinding()]\nparam([switch]$Restart, [switch]$Supervise, ` +
+  `[string]$UpdateInstaller, [string]$UpdateSha256)\n` +
+  `$ErrorActionPreference = 'Stop'\n$env:PSModulePath = "$PSHOME\\Modules;$env:PSModulePath"\n` +
+  `$ast = [Management.Automation.Language.Parser]::ParseFile(` +
+  `'${fileURLToPath(new URL('./launch-codex.ps1', import.meta.url)).replaceAll("'", "''")}', [ref]$null, [ref]$null)\n` +
+  `foreach ($name in 'Quote-StartArgument', 'Start-IndependentLauncher') {\n` +
+  `  $function = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)\n` +
+  `  Invoke-Expression $function.Extent.Text\n}\n` +
+  `if ($Supervise) { exit (Start-IndependentLauncher -ScriptPath $PSCommandPath -Restart:$Restart ` +
+  `-UpdateInstaller $UpdateInstaller -UpdateSha256 $UpdateSha256) }\n`
+
 test('restart executes a real hidden PowerShell process and observes its result without closing Codex', {
   skip: process.platform !== 'win32',
 }, async (t) => {
@@ -986,18 +1421,78 @@ test('restart executes a real hidden PowerShell process and observes its result 
   t.after(() => fs.rm(directory, { recursive: true, force: true }))
   const script = path.join(directory, 'isolated launcher.ps1')
   const marker = path.join(directory, 'executed.txt')
-  await fs.writeFile(script, `[CmdletBinding()]\nparam([switch]$Restart)\n` +
+  await fs.writeFile(script, isolatedRestartPrelude +
     `if (-not $Restart) { exit 7 }\n` +
-    `[IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'restarted-test-only')\nexit 0\n`, 'utf8')
+    `[IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', ` +
+    `(@{restart=[bool]$Restart;installer=$UpdateInstaller;sha256=$UpdateSha256} | ConvertTo-Json -Compress))\nexit 0\n`, 'utf8')
   const launch = (executable, args, options) => {
     const replaced = [...args]
     replaced[replaced.indexOf('-File') + 1] = script
     return spawn(executable, replaced, options)
   }
   await restartCodex(launch)
-  assert.equal(await fs.readFile(marker, 'utf8'), 'restarted-test-only')
-  await fs.writeFile(script, 'param([switch]$Restart)\nexit 9\n', 'utf8')
+  assert.deepEqual(JSON.parse(await fs.readFile(marker, 'utf8')), { restart: true, installer: '', sha256: '' })
+  const installer = { path: path.join(directory, "update with 'quotes'.exe"), sha256: 'a'.repeat(64) }
+  await restartCodex(launch, { installer })
+  assert.deepEqual(JSON.parse(await fs.readFile(marker, 'utf8')),
+    { restart: true, installer: installer.path, sha256: installer.sha256 })
+  await fs.writeFile(script, isolatedRestartPrelude + 'exit 9\n', 'utf8')
   await assert.rejects(restartCodex(launch), /Codex could not restart/)
+})
+
+test('restart launcher can open a new process after an installer terminates its calling helper', {
+  skip: process.platform !== 'win32',
+  timeout: 30000,
+}, async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-restart-handoff-'))
+  const result = path.join(directory, 'desktop.json')
+  const supervisor = path.join(directory, 'launcher.json')
+  const trace = path.join(directory, 'trace.log')
+  t.after(async () => {
+    for (const file of [result, supervisor]) {
+      const saved = await fs.readFile(file, 'utf8').then(JSON.parse).catch(() => null)
+      if (saved?.pid) {
+        try { process.kill(saved.pid) } catch (error) { if (error.code !== 'ESRCH') throw error }
+      }
+    }
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 3 })
+  })
+  const desktop = path.join(directory, 'desktop.mjs')
+  await fs.writeFile(desktop, `import fs from 'node:fs'\n` +
+    `fs.writeFileSync(${JSON.stringify(result)}, JSON.stringify({pid:process.pid}))\nsetInterval(() => {}, 1000)\n`, 'utf8')
+  const script = path.join(directory, 'launcher.ps1')
+  await fs.writeFile(script, isolatedRestartPrelude +
+    `$Desktop = '${desktop.replaceAll("'", "''")}'\n$Node = '${process.execPath.replaceAll("'", "''")}'\n` +
+    `$Caller = (Get-Content -LiteralPath '${supervisor.replaceAll("'", "''")}' -Raw | ConvertFrom-Json).caller\n` +
+    `$trace = Join-Path (Split-Path -Parent $Desktop) 'trace.log'\n` +
+    `if (-not $Restart) { exit 7 }\nStart-Sleep -Milliseconds 500\n` +
+    `[IO.File]::AppendAllText($trace, "started\\n")\n` +
+    `Stop-Process -Id $Caller -Force -ErrorAction Stop\n` +
+    `[IO.File]::AppendAllText($trace, "caller-stopped\\n")\n` +
+    `Start-Process -FilePath $Node -ArgumentList ('"' + $Desktop + '"') -WindowStyle Hidden\n` +
+    `[IO.File]::AppendAllText($trace, "desktop-started\\n")\n`, 'utf8')
+  const driver = path.join(directory, 'driver.mjs')
+  await fs.writeFile(driver, `import {spawn} from 'node:child_process'\nimport fs from 'node:fs'\n` +
+    `import {restartCodex} from ${JSON.stringify(new URL('./codex-assistant.mjs', import.meta.url).href)}\n` +
+    `await restartCodex((executable, args, options) => {\n` +
+    `  args[args.indexOf('-File') + 1] = ${JSON.stringify(script)}\n` +
+    `  const child = spawn(executable, args, options)\n` +
+    `  fs.writeFileSync(${JSON.stringify(supervisor)}, JSON.stringify({pid:child.pid,caller:process.pid}))\n  return child\n})\n`, 'utf8')
+  const caller = spawn(process.execPath, [driver], { windowsHide: true, stdio: 'ignore', timeout: 15000 })
+  const [code] = await once(caller, 'close')
+  assert.notEqual(code, 0, 'the isolated installer must stop its calling helper')
+  let started
+  const deadline = Date.now() + 10000
+  while (!started && Date.now() < deadline) {
+    started = await fs.readFile(result, 'utf8').then(JSON.parse).catch((error) => {
+      if (error.code !== 'ENOENT') throw error
+      return null
+    })
+    if (!started) await delay(50)
+  }
+  const phases = await fs.readFile(trace, 'utf8').catch(() => 'launcher did not execute')
+  assert.ok(started?.pid, `the launcher must survive its calling helper and open the new desktop process: ${phases}`)
+  assert.doesNotThrow(() => process.kill(started.pid, 0))
 })
 
 test('Codex start time uses the verified desktop PID without WMI or a visible shell', {
@@ -1019,7 +1514,8 @@ function sequence(values) {
   return async () => values[Math.min(index++, values.length - 1)]
 }
 
-function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus, restartBlocker = null } = {}) {
+function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus, restartBlocker = null,
+  nativeCheck = { status: 'repairable', canRepair: true, fast: true, ultra: true } } = {}) {
   const connections = []
   return {
     connections,
@@ -1042,7 +1538,13 @@ function makeConnectionFactory({ state = closedPanel, onEnable, syncStatus, rest
             return { result: { value: { status: syncStatus } } }
           }
           if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function codexRestartBlocker')) {
-            return { result: { value: restartBlocker } }
+            return { result: { value: typeof restartBlocker === 'function' ? restartBlocker() : restartBlocker } }
+          }
+          if (method === 'Runtime.evaluate' && params.expression.startsWith('(async function inspectNativeControls')) {
+            return { result: { value: nativeCheck } }
+          }
+          if (method === 'Runtime.evaluate' && params.expression.includes('runtime.startNativeRepair()')) {
+            return { result: { value: true } }
           }
           if (method === 'Runtime.evaluate' && params.expression.includes('const runtime =')) {
             return { result: { value: state() } }
@@ -1070,6 +1572,7 @@ function assistantOptions(overrides = {}) {
     discover: async () => [assistantTarget('main')],
     isRunning: () => true,
     nativeConfiguration: async () => null,
+    diagnose: async () => assert.fail('model diagnostics require an explicit manual request'),
     pollMs: 0,
     report: () => {},
     ...overrides,
@@ -1408,6 +1911,95 @@ test('a launcher failure reaches the still-mounted panel and permits a second re
   const notify = calls.findIndex((call) => call.params?.expression?.includes('restartFailed'))
   const dispose = calls.findIndex((call) => call.method === 'Runtime.removeBinding')
   assert.ok(notify !== -1 && dispose > notify, 'the failure must be shown before renderer cleanup')
+})
+
+test('manual self-repair never interrupts drafts, active tasks or unavailable activity checks', async () => {
+  for (const blocker of ['busy', 'draft', 'unavailable']) {
+    let send
+    let polls = 0
+    const { factory, connections } = makeConnectionFactory({ restartBlocker: blocker,
+      onEnable: (event) => { send = event } })
+    await runAssistant(assistantOptions({
+      handler: async () => assert.fail('self-repair must not invoke account changes'),
+      nativeConfiguration: async () => null,
+      isRunning: () => ++polls <= 5, connectionFactory: factory,
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: { name: 'yisamaAssistantCommand',
+          payload: '{"id":44,"action":"codexRepair","confirmed":true}', executionContextId: 1 } })
+      },
+    }))
+    const calls = connections[0].calls
+    assert.ok(calls.some((call) => call.params?.expression?.includes('"code":"CODEX_REPAIR_BLOCKED"')), blocker)
+    assert.equal(calls.some((call) => call.params?.expression?.includes('runtime.startNativeRepair()')), false)
+    assert.equal(calls.some((call) => call.method === 'Page.reload'), false)
+  }
+})
+
+test('only manual diagnostic requests call the model; self-check never starts a repair', async () => {
+  for (const action of [null, 'codexCheck', 'codexRepair']) {
+    let send
+    let polls = 0
+    let modelCalls = 0
+    const { factory, connections } = makeConnectionFactory({ onEnable: (event) => { send = event } })
+    await runAssistant(assistantOptions({
+      connectionFactory: factory, isRunning: () => ++polls <= 5,
+      nativeConfiguration: async () => diagnosticSettings,
+      diagnose: async (settings, check, options) => {
+        modelCalls++
+        assert.equal(settings.apiKey, diagnosticSettings.apiKey)
+        assert.equal(check.status, 'repairable')
+        assert.equal(options.action, action)
+        return { summary: '建议同步控件', repair: true }
+      },
+      onReady() {
+        if (action) send({ method: 'Runtime.bindingCalled', params: {
+          name: 'yisamaAssistantCommand', executionContextId: 1,
+          payload: JSON.stringify({ id: 51, action, ...(action === 'codexRepair' ? { confirmed: true } : {}) }),
+        } })
+      },
+    }))
+    assert.equal(modelCalls, action ? 1 : 0)
+    const expressions = connections[0].calls.map((call) => call.params?.expression || '').join('\n')
+    assert.equal(expressions.includes('runtime.startNativeRepair()'), action === 'codexRepair')
+    if (action) {
+      assert.match(expressions, /"billing":"account"/)
+      assert.doesNotMatch(expressions, /"cost":0/)
+    }
+  }
+})
+
+test('tasks or changed credentials during model analysis prevent repair without scheduling it later', async () => {
+  for (const change of ['busy', 'credential', 'model', 'declined']) {
+    let send
+    let polls = 0
+    let blocker = null
+    let settings = diagnosticSettings
+    let modelCalls = 0
+    const { factory, connections } = makeConnectionFactory({
+      onEnable: (event) => { send = event }, restartBlocker: () => blocker,
+    })
+    await runAssistant(assistantOptions({
+      connectionFactory: factory, isRunning: () => ++polls <= 5,
+      nativeConfiguration: async () => settings,
+      diagnose: async () => {
+        modelCalls++
+        if (change === 'busy') blocker = 'busy'
+        if (change === 'credential') settings = { ...settings, apiKey: 'sk-changed-account', version: 'changed' }
+        if (change === 'model') settings = { ...settings, model: 'gpt-other-model' }
+        return { summary: '模型分析完成', repair: change !== 'declined' }
+      },
+      onReady() {
+        send({ method: 'Runtime.bindingCalled', params: { name: 'yisamaAssistantCommand', executionContextId: 1,
+          payload: '{"id":52,"action":"codexRepair","confirmed":true}' } })
+      },
+    }))
+    assert.equal(modelCalls, 1)
+    const expressions = connections[0].calls.map((call) => call.params?.expression || '').join('\n')
+    assert.equal(expressions.includes('runtime.startNativeRepair()'), false)
+    if (change !== 'declined') assert.match(expressions,
+      change === 'busy' ? /CODEX_REPAIR_BLOCKED/ : /CODEX_DIAGNOSTIC_CONFIGURATION/)
+    assert.equal(connections[0].calls.some((call) => call.method === 'Page.reload'), false)
+  }
 })
 
 test('interrupting tasks requires explicit consent and unavailable activity checks are never bypassed', async () => {

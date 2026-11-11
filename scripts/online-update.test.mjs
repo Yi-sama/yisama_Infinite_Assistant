@@ -8,6 +8,7 @@ import test from 'node:test'
 import { createUpdater, newerVersion, validateRelease } from './online-update.mjs'
 import { validateRequest } from './desktop-bridge.mjs'
 import { buildUpdateManifest } from './build-update.mjs'
+import { prepareAutomaticUpdate } from './startup-check.mjs'
 
 const installer = Buffer.from('isolated installer fixture - never executed')
 const release = {
@@ -81,6 +82,19 @@ test('failed checksum, changed release and unavailable service never prepare an 
   assert.equal(state.downloads, 1)
   state.status = 404
   await assert.rejects(updater.check(), { publicCode: 'UPDATE_UNAVAILABLE' })
+})
+
+test('startup automatic updating uses the same checksum gate and falls back offline without execution', async (t) => {
+  const { updater, state } = await fixture(t)
+  const prepared = await prepareAutomaticUpdate({ updater })
+  assert.equal(prepared.status, 'prepared')
+  assert.deepEqual(await fs.readFile(prepared.updateInstaller.path), installer)
+  assert.equal(state.downloads, 1)
+  state.bytes = Buffer.alloc(installer.length, 0)
+  assert.deepEqual(await prepareAutomaticUpdate({ updater }), { status: 'unavailable' })
+  state.status = 503
+  assert.deepEqual(await prepareAutomaticUpdate({ updater }), { status: 'unavailable' })
+  assert.equal(state.downloads, 2)
 })
 
 test('older or identical releases cannot be installed and bridge does not accept arbitrary installer paths', async (t) => {

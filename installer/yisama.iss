@@ -135,6 +135,15 @@ begin
   Result := IsTestInstall and (ExpandConstant('{param:YISAMAUI|0}') = '1');
 end;
 
+function IsAssistantOnlyUpdate: Boolean;
+begin
+  Result := (ExpandConstant('{param:YISAMAUPDATE|0}') = '1') and
+    (ExpandConstant('{param:CODEXPATH|}') = '') and
+    FileExists(ExpandConstant('{app}\codex-location.json')) and
+    FileExists(ExpandConstant('{app}\release-manifest.json')) and
+    FileExists(ExpandConstant('{app}\scripts\launch-codex.ps1'));
+end;
+
 function Quote(Value: String): String;
 begin
   Result := '"' + Value + '"';
@@ -562,7 +571,8 @@ begin
     Result := '请先完成任务并关闭所有 Codex 窗口，再继续安装。安装程序不会结束或重启 Codex。';
     Exit;
   end;
-  if WizardSilent and not SelectionTested then
+  { Updating an existing assistant does not replace or claim compatibility for Codex. }
+  if WizardSilent and not SelectionTested and not IsAssistantOnlyUpdate then
   begin
     Result := '此 Codex 版本尚未验证，请使用交互安装程序确认保留当前版本。';
     Exit;
@@ -601,6 +611,10 @@ begin
       Quote(ExpandConstant('{app}\scripts\yisama.mjs')) + ' image install',
       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
       RaiseException('生图配置未完成，原始 imagegen 备份已保留，请联系管理员。');
+    if not Exec(ExpandConstant('{app}\runtime\node.exe'),
+      '--disable-warning=ExperimentalWarning ' + Quote(ExpandConstant('{app}\scripts\yisama.mjs')) + ' startup local',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      RaiseException('本地对话检查未完成，迁移备份已保留。请关闭其他 Codex 进程后重试。');
     RemoveOwnedLegacyRunEntry;
   end;
 end;
@@ -651,6 +665,12 @@ begin
   end;
   Node := ExpandConstant('{app}\runtime\node.exe');
   Script := ExpandConstant('{app}\scripts\yisama.mjs');
+  if not Exec(Node, '--disable-warning=ExperimentalWarning ' + Quote(Script) + ' startup restore',
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  begin
+    SuppressibleMsgBox('恢复旧对话提供商未完成，卸载已取消，迁移备份已保留。', mbError, MB_OK, IDOK);
+    Exit;
+  end;
   if not Exec(Node, Quote(Script) + ' image uninstall', ExpandConstant('{app}'),
     SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
   begin

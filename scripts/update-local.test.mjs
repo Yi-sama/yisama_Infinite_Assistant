@@ -18,6 +18,7 @@ async function makeInstallation(t) {
   t.after(() => fs.rm(target, { recursive: true, force: true, maxRetries: 3 }))
   await fs.mkdir(path.join(target, 'runtime'), { recursive: true })
   await fs.writeFile(path.join(target, 'runtime', 'node.exe'), '')
+  await fs.writeFile(path.join(target, 'runtime', 'codex-bootstrap.exe'), '')
   await fs.copyFile(path.join(repository, 'package.json'), path.join(target, 'package.json'))
   for (const relative of requiredExistingFiles) {
     const destination = path.join(target, relative)
@@ -79,13 +80,26 @@ test('rejects an incompatible package before changing the target', async (t) => 
   await assert.rejects(fs.access(path.join(target, 'update.json')))
 })
 
-test('an existing development install receives the newly required image module', async (t) => {
+test('old installations require the installer before receiving the new launcher', async (t) => {
   const target = await makeInstallation(t)
-  const imageModule = path.join(target, 'scripts', 'imagegen.mjs')
-  await fs.rm(imageModule)
+  await fs.rm(path.join(target, 'runtime', 'codex-bootstrap.exe'))
+  const launcher = path.join(target, 'scripts', 'launch-codex.ps1')
+  await fs.writeFile(launcher, 'previous working launcher\n')
+  await assert.rejects(updateLocal({ target }), /requires the full Windows installer/)
+  assert.equal(await content(launcher), 'previous working launcher\n')
+  await assert.rejects(fs.access(path.join(target, 'update.json')))
+})
+
+test('an existing development install receives the new image and startup modules', async (t) => {
+  const target = await makeInstallation(t)
+  const added = ['imagegen.mjs', 'online-update.mjs', 'startup-check.mjs', 'thread-provider.mjs']
+  for (const name of added) await fs.rm(path.join(target, 'scripts', name))
   const result = await updateLocal({ target })
-  assert.ok(result.changedFiles.includes('scripts/imagegen.mjs'))
-  assert.equal(await content(imageModule), await content(path.join(repository, 'scripts', 'imagegen.mjs')))
+  for (const name of added) {
+    assert.ok(result.changedFiles.includes(`scripts/${name}`))
+    assert.equal(await content(path.join(target, 'scripts', name)),
+      await content(path.join(repository, 'scripts', name)))
+  }
 })
 
 test('rejects the source repository as an update target', async () => {

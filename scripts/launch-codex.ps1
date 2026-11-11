@@ -3,12 +3,15 @@ param(
     [switch]$ValidateOnly,
     # Sent by the assistant after a takeover: close Codex without asking, then reopen it.
     [switch]$Restart,
+    [switch]$Supervise,
     [string]$UpdateInstaller,
     [string]$UpdateSha256
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# A Codex-launched Windows PowerShell can inherit PowerShell 7 module paths.
+$env:PSModulePath = "$PSHOME\Modules;$env:PSModulePath"
 
 $appRoot = Split-Path -Parent $PSScriptRoot
 $runtime = Join-Path $appRoot 'runtime\node.exe'
@@ -154,6 +157,42 @@ function Quote-StartArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
+function Start-IndependentLauncher {
+    param([string]$ScriptPath, [switch]$Restart, [string]$UpdateInstaller, [string]$UpdateSha256)
+    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+        '-File', (Quote-StartArgument $ScriptPath))
+    if ($Restart) { $arguments += '-Restart' }
+    if ($UpdateInstaller) {
+        $arguments += @('-UpdateInstaller', (Quote-StartArgument $UpdateInstaller), '-UpdateSha256', $UpdateSha256)
+    }
+    # Native grandchildren leave Node's kill-on-exit job. Do not use Start-Process
+    # -Wait, which introduces process-tree job tracking of its own.
+    $launcher = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $launcher.WaitForExit()
+    return $launcher.ExitCode
+}
+
+function Invoke-StartupCommand {
+    param([ValidateSet('local', 'update')][string]$Mode)
+    if (Get-CodexDesktopProcesses) { throw 'Codex is still running; startup maintenance was not performed.' }
+    $output = & $runtime --disable-warning=ExperimentalWarning $yisamaScript startup $Mode
+    if ($LASTEXITCODE -ne 0) { throw 'Startup maintenance did not finish.' }
+    return (($output -join "`n") | ConvertFrom-Json)
+}
+
+function Assert-UpdateInstaller {
+    param([string]$Installer, [string]$Sha256)
+    if ($Sha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid update request.' }
+    $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant-cache\updates')) + '\'
+    $updatePath = [IO.Path]::GetFullPath($Installer)
+    if (-not $updatePath.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetExtension($updatePath) -ne '.exe') { throw 'Invalid update installer path.' }
+    if ((Get-FileHash -LiteralPath $updatePath -Algorithm SHA256).Hash -ne $Sha256) {
+        throw 'Update installer verification failed.'
+    }
+    return $updatePath
+}
+
 function Get-WallpaperLauncher {
     $direct = Join-Path $env:LOCALAPPDATA 'CodexWallpaperEngineSkin\launch-codex-with-skin.ps1'
     if (Test-Path -LiteralPath $direct -PathType Leaf) {
@@ -290,25 +329,51 @@ function Write-EndpointFile {
 }
 
 try {
+    $launchMutex = $null
+    $ownsLaunch = $false
+    if ($Supervise) {
+        exit (Start-IndependentLauncher -ScriptPath $PSCommandPath -Restart:$Restart `
+            -UpdateInstaller $UpdateInstaller -UpdateSha256 $UpdateSha256)
+    }
+    foreach ($required in @($runtime, $assistantScript, $bootstrap, $yisamaScript)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required packaged file is missing: $required" }
+    }
     if ($ValidateOnly) {
-        foreach ($required in @($runtime, $assistantScript, $bootstrap, $yisamaScript)) {
-            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required packaged file is missing: $required" }
-        }
         Write-Output "Launcher validation passed. Shortcut target: $PSHOME\powershell.exe -File $PSCommandPath"
         exit 0
     }
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $lockId = [BitConverter]::ToString($hash.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($appRoot).ToUpperInvariant()))).Replace('-', '')
+    }
+    finally { $hash.Dispose() }
+    $launchMutex = [Threading.Mutex]::new($false, "Local\YisamaLauncher-$lockId")
+    try { $ownsLaunch = $launchMutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $ownsLaunch = $true }
+    if (-not $ownsLaunch) { exit 0 }
 
     $script:codexDesktop = Read-SelectedCodex
+    $executable = Find-CodexExecutable
+    $startupWarning = $null
     if ($UpdateInstaller) {
-        if (-not $Restart -or $UpdateSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid update request.' }
-        $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'yisama-infinite-assistant-cache\updates')) + '\'
-        $updatePath = [IO.Path]::GetFullPath($UpdateInstaller)
-        if (-not $updatePath.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase) -or
-            [IO.Path]::GetExtension($updatePath) -ne '.exe') { throw 'Invalid update installer path.' }
-        if ((Get-FileHash -LiteralPath $updatePath -Algorithm SHA256).Hash -ne $UpdateSha256) {
-            throw 'Update installer verification failed. Codex has not been closed.'
-        }
+        if (-not $Restart) { throw 'Invalid update request.' }
+        $updatePath = Assert-UpdateInstaller -Installer $UpdateInstaller -Sha256 $UpdateSha256
     }
+
+    # Finish fallible preparation while the existing Codex is still available.
+    # The update installer also prepares imagegen after replacing its files.
+    if (-not $UpdateInstaller) {
+        & $runtime $yisamaScript image install | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw '生图配置未完成，原始 imagegen 备份已保留。' }
+    }
+    $wallpaper = Get-WallpaperLauncher
+    if ($script:codexDesktop.source -eq 'portable' -and -not [string]::Equals(
+        [IO.Path]::GetFullPath((Split-Path -Parent $script:codexDesktop.executable)),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Codex'), [StringComparison]::OrdinalIgnoreCase)) {
+        $wallpaper = $null
+    }
+
     if ($Restart) { Get-CodexDesktopProcesses | Stop-Process -Force -ErrorAction SilentlyContinue }
     if (-not (Wait-CodexDesktopExit -Seconds $codexExitTimeoutSeconds)) {
         # Closing the window can leave Codex running in the system tray.
@@ -319,45 +384,75 @@ try {
         }
     }
 
+    # Normal launches update before Codex starts; a repair/account restart does not download again.
+    if (-not $UpdateInstaller -and -not $Restart) {
+        try {
+            $automatic = Invoke-StartupCommand -Mode update
+            if ($automatic.status -eq 'prepared') {
+                $updatePath = Assert-UpdateInstaller -Installer $automatic.updateInstaller.path -Sha256 $automatic.updateInstaller.sha256
+                $UpdateInstaller = $updatePath
+            }
+            elseif ($automatic.status -eq 'unavailable') {
+                Write-LauncherFailure 'Automatic assistant update unavailable; starting the installed version.'
+            }
+        }
+        catch {
+            Write-LauncherFailure 'Automatic assistant update did not finish; starting the installed version.'
+        }
+    }
     if ($UpdateInstaller) {
         # The parent helper uses runtime\node.exe, which the installer must be able to replace.
-        $install = Start-Process -FilePath $updatePath -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES',
-            '/NORESTART', '/SP-', ('/DIR="' + $appRoot + '"')) -WindowStyle Hidden -PassThru -Wait
-        if ($install.ExitCode -ne 0) {
-            Write-LauncherFailure "Update installer failed with exit code $($install.ExitCode); reopening Codex."
-            Show-LauncherError '更新安装未完成，将重新打开 Codex。请稍后重试更新。'
+        try {
+            $install = Start-Process -FilePath $updatePath -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES',
+                '/NORESTART', '/SP-', '/YISAMAUPDATE=1', ('/DIR="' + $appRoot + '"')) -WindowStyle Hidden -PassThru -Wait
+            if ($install.ExitCode -ne 0) { throw "Update installer failed with exit code $($install.ExitCode)." }
         }
-        $script:codexDesktop = Read-SelectedCodex
+        catch {
+            Write-LauncherFailure "$($_.Exception.Message) Reopening Codex."
+            $startupWarning = '更新安装未完成，已重新打开 Codex。请稍后重试更新。'
+        }
     }
 
-    # Prepare the system skill before Codex discovers skills; also migrate existing logins.
-    & $runtime $yisamaScript image install | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw '生图配置未完成，原始 imagegen 备份已保留。' }
-
-    $wallpaper = Get-WallpaperLauncher
-    if ($script:codexDesktop.source -eq 'portable' -and -not [string]::Equals(
-        [IO.Path]::GetFullPath((Split-Path -Parent $script:codexDesktop.executable)),
-        (Join-Path $env:LOCALAPPDATA 'Programs\Codex'), [StringComparison]::OrdinalIgnoreCase)) {
-        $wallpaper = $null
+    try {
+        $local = Invoke-StartupCommand -Mode local
+        if ($local.threads.skipped -gt 0) {
+            $startupWarning = '部分旧对话的格式尚不支持迁移，原记录已保留，请更新无限助手后重试。'
+        }
     }
+    catch {
+        Write-LauncherFailure 'Local startup check did not finish; provider backups were retained.'
+        $startupWarning = '旧对话检查未完成，已有迁移备份已保留。请关闭其他 Codex 进程后重新打开。'
+    }
+
+    # Codex's packaged build-flavor policy uses this switch on Windows too.
+    # Process-local only; Microsoft Store and other deployment tools are unchanged.
+    $env:CODEX_SPARKLE_ENABLED = 'false'
+    $env:YISAMA_CODEX_UPDATE_CONTROL = 'launch-disabled'
     if ($wallpaper -and -not (Test-LoopbackPortFree -Port $wallpaper.Port)) {
         Write-LauncherFailure "Port $($wallpaper.Port) is held by another process; starting Codex without Wallpaper Skin."
         $wallpaper = $null
     }
+    $endpoint = $null
     if ($wallpaper) {
-        Start-Process -FilePath $wallpaper.FilePath -ArgumentList $wallpaper.Arguments -WindowStyle Hidden | Out-Null
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
-        $codexProcess = $null
-        do {
-            $codexProcess = @(Get-CodexDesktopProcesses | Sort-Object StartTime | Select-Object -First 1)
-            if ($codexProcess) { break }
-            Start-Sleep -Milliseconds 300
-        } while ([DateTime]::UtcNow -lt $deadline)
-        if (-not $codexProcess) { throw 'The existing Codex Wallpaper Skin launcher did not start Codex.' }
-        $endpoint = Wait-DebugPort -Process $codexProcess[0] -Port ([int]$wallpaper.Port)
+        try {
+            Start-Process -FilePath $wallpaper.FilePath -ArgumentList $wallpaper.Arguments -WindowStyle Hidden | Out-Null
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            $codexProcess = $null
+            do {
+                $codexProcess = @(Get-CodexDesktopProcesses | Sort-Object StartTime | Select-Object -First 1)
+                if ($codexProcess) { break }
+                Start-Sleep -Milliseconds 300
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if (-not $codexProcess) { throw 'The existing Codex Wallpaper Skin launcher did not start Codex.' }
+            $endpoint = Wait-DebugPort -Process $codexProcess[0] -Port ([int]$wallpaper.Port)
+        }
+        catch {
+            # Do not start a second instance if the skin opened Codex without a usable endpoint.
+            if (Get-CodexDesktopProcesses) { throw }
+            Write-LauncherFailure "Wallpaper Skin launch failed; starting Codex directly: $($_.Exception.Message)"
+        }
     }
-    else {
-        $executable = Find-CodexExecutable
+    if (-not $endpoint) {
         New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
         $debugLog = Join-Path $dataRoot ("codex-launch-$([Guid]::NewGuid().ToString('N')).stderr.log")
         try {
@@ -368,6 +463,8 @@ try {
             if ($script:codexDesktop.source -ne 'msix') { throw }
             Write-LauncherFailure "Direct Codex start failed, using app activation: $($_.Exception.Message)"
             $port = Get-FreeLoopbackPort
+            # Windows app activation may not inherit our process environment.
+            $env:YISAMA_CODEX_UPDATE_CONTROL = 'activation-unverified'
             $codex = Start-CodexStoreApp -Arguments @('--remote-debugging-address=127.0.0.1', "--remote-debugging-port=$port")
             if (-not $codex) { throw }
             $endpoint = Wait-DebugPort -Process $codex -Port $port
@@ -387,6 +484,7 @@ try {
         if ([DateTime]::UtcNow -ge $deadline) { throw "The yisama assistant did not become ready. See $errorLog." }
         Start-Sleep -Milliseconds 250
     } while ($true)
+    if ($startupWarning) { Show-LauncherError $startupWarning }
 }
 catch {
     if (-not $ValidateOnly) {
@@ -395,4 +493,10 @@ catch {
     }
     Write-Error $_.Exception.Message
     exit 1
+}
+finally {
+    if ($launchMutex) {
+        if ($ownsLaunch) { $launchMutex.ReleaseMutex() }
+        $launchMutex.Dispose()
+    }
 }

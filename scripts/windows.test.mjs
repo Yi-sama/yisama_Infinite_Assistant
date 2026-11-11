@@ -169,6 +169,44 @@ test('Windows installer initializes the Codex wizard and installs the bundled la
   assert.match(launcher.stdout, /Launcher validation passed\. Shortcut target:/)
   assert.equal(launcher.stderr, '')
 
+  await t.test('packaged startup migrates and restores a real local provider index without changing message bodies', async () => {
+    const { DatabaseSync } = await import('node:sqlite')
+    const home = path.join(root, 'startup-codex')
+    const data = path.join(root, 'startup-data')
+    const id = '019a7b18-3000-7000-8000-000000000003'
+    const file = path.join(home, 'sessions', `rollout-2026-11-11-${id}.jsonl`)
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.mkdir(data)
+    await fs.writeFile(path.join(home, 'config.toml'), 'model_provider="yisama"\n', 'utf8')
+    await fs.writeFile(path.join(data, 'state.json'), '{"configured":true}\n', 'utf8')
+    const original = JSON.stringify({ type: 'session_meta', payload: { id, model_provider: 'custom' } }) +
+      '\n{"type":"response_item","payload":{"content":"keep custom verbatim"}}\n'
+    await fs.writeFile(file, original, 'utf8')
+    const databaseFile = path.join(home, 'state_5.sqlite')
+    const database = new DatabaseSync(databaseFile)
+    database.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, model_provider TEXT)')
+    database.prepare('INSERT INTO threads VALUES (?, ?, ?)').run(id, path.toNamespacedPath(file), 'custom')
+    database.close()
+    const env = { ...process.env, CODEX_HOME: home, PLUGIN_DATA: data }
+    const script = path.join(extracted, 'scripts', 'yisama.mjs')
+    const checked = await exec(node, ['--disable-warning=ExperimentalWarning', script, 'startup', 'local'], { env })
+    assert.equal(checked.stderr, '')
+    assert.equal(JSON.parse(checked.stdout).threads.changed, 1)
+    const migrated = await fs.readFile(file, 'utf8')
+    assert.equal(JSON.parse(migrated.split('\n')[0]).payload.model_provider, 'yisama')
+    assert.equal(migrated.slice(migrated.indexOf('\n')), original.slice(original.indexOf('\n')))
+    const indexed = new DatabaseSync(databaseFile)
+    assert.equal(indexed.prepare('SELECT model_provider FROM threads WHERE id = ?').get(id).model_provider, 'yisama')
+    indexed.close()
+    const appended = '{"type":"response_item","payload":{"content":"new message"}}\n'
+    await fs.appendFile(file, appended, 'utf8')
+    await exec(node, ['--disable-warning=ExperimentalWarning', script, 'startup', 'restore'], { env })
+    assert.equal(await fs.readFile(file, 'utf8'), original + appended)
+    const restored = new DatabaseSync(databaseFile)
+    assert.equal(restored.prepare('SELECT model_provider FROM threads WHERE id = ?').get(id).model_provider, 'custom')
+    restored.close()
+  })
+
   await t.test('the packaged image path installs the system skill and generates through its dedicated station', async () => {
     const home = path.join(root, 'image-codex')
     const data = path.join(root, 'image-data')

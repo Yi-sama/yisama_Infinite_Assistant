@@ -887,10 +887,15 @@ test('a fresh desktop startup loads controls without a click and completes after
   await prepareNative(false)
   let reloads = 0
   const reports = []
+  const network = []
   const target = new AssistantTarget({}, null, {
     report: (message) => reports.push(message),
     connectionFactory: () => ({
       async call(method, params) {
+        if (method.startsWith('Network.')) {
+          network.push({ method, params })
+          return {}
+        }
         if (method === 'Page.reload') {
           reloads++
           await page.reload()
@@ -910,6 +915,10 @@ test('a fresh desktop startup loads controls without a click and completes after
   const settings = { version: 'startup-test', provider: 'yisama', apiKey: 'isolated-startup-key' }
   assert.equal((await target.syncModels(settings)).status, 'pending')
   assert.equal(reloads, 1, 'the helper reloads automatically without clicking the refresh control')
+  assert.deepEqual(network, [
+    { method: 'Network.enable', params: undefined },
+    { method: 'Network.setCacheDisabled', params: { cacheDisabled: true } },
+  ])
   assert.match(reports[0], /Native model controls: startup page reload\.$/)
   assert.equal(await page.evaluate(() => performance.getEntriesByType('navigation')[0].type), 'reload')
   assert.equal(await page.evaluate(() => window.__yisamaNativeStartup.pending()), false)
@@ -987,6 +996,170 @@ test('native controls reload only after a click and never queue behind a draft o
   await page.evaluate(() => { window.nativeFixture.ready = true })
   assert.equal((await sync()).status, 'synced')
   assert.equal(await button.isHidden(), true)
+})
+
+test('manual Codex self-check shows a quota note before one click and retains repair safety confirmation', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, commands, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  const quotaNote = page.locator('[data-testid="codex-check-cost"]')
+  assert.equal(await quotaNote.isVisible(), true)
+  assert.equal(await quotaNote.innerText(), '此处会消耗一定额度，用于尝试启用 Ultra、Fast 等功能。')
+  assert.equal(await page.locator('[data-testid="codex-check-panel"]').isHidden(), true)
+  assert.equal(commands.some((entry) => entry.action === 'codexCheck' || entry.action === 'codexRepair'), false)
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.nativeStatus('unsupported'))
+  assert.match(await page.locator('[data-testid="message"]').innerText(), /Codex 自检/)
+  await page.locator('[data-testid="codex-check"]').click()
+  const check = await next('codexCheck')
+  assert.equal(await page.locator('[data-testid="codex-check"]').isDisabled(), true)
+  await respond(check, { ok: true, data: {
+    status: 'repairable', canRepair: true, fast: true, ultra: true, billing: 'account', updates: 'launch-disabled',
+    summary: '建议重新同步本机控件。',
+    ignoredSecret: 'sk-private-test',
+  } })
+  assert.equal(commands.filter((entry) => entry.action === 'codexCheck').length, 1)
+  assert.doesNotMatch(await page.locator('[data-testid="assistant-panel"]').innerText(), /不调用 GPT|不消耗额度|确认付费/)
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /模型分析：建议重新同步/)
+  assert.match(await page.locator('[data-testid="codex-update-policy"]').innerText(), /Microsoft Store.*不受/)
+  assert.doesNotMatch(await page.locator('[data-testid="codex-check-panel"]').innerText(), /sk-private/)
+  await page.locator('[data-testid="codex-repair"]').click()
+  assert.equal(commands.some((entry) => entry.action === 'codexRepair'), false)
+  assert.equal(await page.locator('[data-testid="codex-repair-confirmation"]').isVisible(), true)
+  await page.locator('[data-testid="codex-repair-cancel"]').click()
+  assert.equal(commands.some((entry) => entry.action === 'codexRepair'), false)
+  await page.locator('[data-testid="codex-repair"]').click()
+  await fs.mkdir(output, { recursive: true })
+  for (const width of [1280, 390, 280]) {
+    await page.setViewportSize({ width, height: 844 })
+    await page.locator('[data-testid="codex-repair-confirm"]').scrollIntoViewIfNeeded()
+    const overflow = await page.locator('[data-testid="codex-check-panel"]').evaluate((node) =>
+      [...node.querySelectorAll('button,p,small')].some((child) => child.scrollWidth > child.clientWidth + 1))
+    assert.equal(overflow, false, `self-check text must fit at ${width}px`)
+    await page.locator('[data-testid="assistant-panel"]').screenshot({
+      path: path.join(output, `assistant-codex-self-check-${width}.png`),
+    })
+  }
+  await page.locator('[data-testid="codex-repair-confirm"]').click()
+  const repair = await next('codexRepair')
+  assert.equal(repair.confirmed, true)
+  await respond(repair, { ok: false, code: 'CODEX_REPAIR_BLOCKED' })
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /未进行修复.*不会延后自动执行/)
+  assert.equal(await page.locator('[data-testid="codex-repair"]').isHidden(), true)
+  await page.waitForTimeout(100)
+  assert.equal(commands.filter((entry) => entry.action === 'codexRepair').length, 1)
+})
+
+test('model diagnostic failures stay manual and never render model output as HTML', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, commands, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  await page.locator('[data-testid="codex-check"]').click()
+  await respond(await next('codexCheck'), { ok: true, data: {
+    status: 'ready', summary: '<img src=x onerror="window.untrustedModelCode=true">', fast: true, ultra: true,
+  } })
+  assert.equal(await page.locator('[data-testid="codex-check-result"] img').count(), 0)
+  assert.equal(await page.evaluate(() => window.untrustedModelCode), undefined)
+  await page.locator('[data-testid="codex-check"]').click()
+  await respond(await next('codexCheck'), { ok: false, code: 'CODEX_DIAGNOSTIC_BALANCE', error: 'sk-private' })
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /可用额度不足/)
+  assert.equal(await page.locator('[data-testid="codex-repair"]').isHidden(), true)
+  await page.waitForTimeout(100)
+  assert.equal(commands.filter((entry) => entry.action === 'codexCheck').length, 2)
+  assert.doesNotMatch(await page.locator('[data-testid="codex-check-result"]').innerText(), /sk-private|img src/)
+})
+
+test('self-check rejects unknown adapters and never advertises app-activation updates as disabled', async (t) => {
+  const app = await fixture(t, { width: 390, height: 844 })
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  await page.locator('[data-testid="codex-check"]').click()
+  await respond(await next('codexCheck'), { ok: true, data: {
+    status: 'unsupported', canRepair: true, updates: 'activation-unverified',
+  } })
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /未能修复.*更新无限助手/)
+  assert.equal(await page.locator('[data-testid="codex-repair"]').isHidden(), true)
+  assert.match(await page.locator('[data-testid="codex-update-policy"]').innerText(), /无法确认.*商店|无法确认.*Microsoft Store/)
+})
+
+test('manual repair survives renderer reinjection and reports success only after native readiness', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, commands, next, respond } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await page.evaluate(() => {
+    window.__yisamaInfiniteAssistant.startNativeRepair()
+    window.__yisamaInfiniteAssistant.dispose()
+  })
+  await page.evaluate(installAssistantUI, { allowTestLocation: true })
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  assert.equal(await page.locator('[data-testid="assistant-panel"]').isVisible(), true)
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /正在进行本地修复/)
+  assert.equal(await page.locator('[data-testid="codex-check"]').isDisabled(), true)
+  await page.evaluate(() => window.__yisamaInfiniteAssistant.nativeStatus('synced'))
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /检查通过.*实际线路/)
+  assert.equal(await page.locator('[data-testid="codex-check"]').isEnabled(), true)
+  assert.equal(await page.evaluate(() => window.sessionStorage.getItem('yisama-codex-self-check-v1')), null)
+  assert.equal(commands.some((entry) => entry.action === 'codexCheck' || entry.action === 'codexRepair'), false)
+})
+
+test('manual repair finishes after one real renderer reload without another diagnostic request', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond, open } = app
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await open(signedIn())
+  const prepare = (ready) => page.evaluate((ready) => {
+    Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: () => `self-check-${Math.random()}` })
+    window.__codexRoot = { _internalRoot: { current: { memoizedProps: { client: {
+      getQueryCache() {}, async invalidateQueries() {},
+    } } } } }
+    window.__yisamaNativeModelSync = { version: 'manual-repair-test', status: ready ? 'synced' : 'error' }
+    window.__yisamaNativeFastSourceReady = ready
+    window.__yisamaNativeReasoningSourceReady = ready
+    window.__yisamaNativeFast = { authorize() {}, isBusy: () => false, needsReload: () => !ready }
+    window.electronBridge = { async sendMessageFromView({ hostId, request }) {
+      const result = request.method === 'getAuthStatus'
+        ? { authMethod: 'apikey', authToken: 'isolated-self-check-key' } : { data: [], nextCursor: null }
+      window.postMessage({ type: 'mcp-response', hostId, message: { id: request.id, result } }, '*')
+    } }
+  }, ready)
+  await prepare(false)
+  let reloads = 0
+  const target = new AssistantTarget({}, null, { connectionFactory: () => ({
+    async call(method, params) {
+      if (method.startsWith('Network.')) return {}
+      if (method === 'Page.reload') { reloads++; await page.reload(); return {} }
+      assert.equal(method, 'Runtime.evaluate')
+      const expression = params.expression.replaceAll("location.href !== 'app://-/index.html'", 'false')
+      return { result: { value: await page.evaluate(expression) } }
+    },
+  }) })
+  target.allowed = true
+  target.mainFrameId = 'self-check'
+  target.contexts.set(1, { auxData: { isDefault: true, frameId: 'self-check' } })
+  const settings = { version: 'manual-repair-test', provider: 'yisama', apiKey: 'isolated-self-check-key',
+    fastAvailable: true, modelSettings: { demo: { reasoningEfforts: ['high', 'ultra'] } } }
+  assert.equal((await target.checkNative(settings)).status, 'repairable')
+  assert.equal(reloads, 0, 'checking must not refresh the page')
+  assert.equal((await target.prepareNativeRepair(settings)).status, 'repairing')
+  assert.equal((await target.syncModels(settings)).status, 'pending')
+  assert.equal(reloads, 1)
+  await page.evaluate(installAssistantUI, { allowTestLocation: true })
+  await respond(await next('status'), { ok: true, data: signedIn() })
+  await prepare(true)
+  assert.equal((await target.syncModels(settings)).status, 'synced')
+  assert.equal(await page.locator('[data-testid="assistant-panel"]').isVisible(), true)
+  assert.match(await page.locator('[data-testid="codex-check-result"]').innerText(), /检查通过/)
+  assert.equal(await page.locator('[data-testid="codex-check-cost"]').innerText(),
+    '此处会消耗一定额度，用于尝试启用 Ultra、Fast 等功能。')
+  assert.equal((await target.checkNative(settings)).status, 'ready')
+  assert.equal(reloads, 1)
 })
 
 test('native synchronization updates subsequent turns only for assistant-owned providers', async (t) => {
@@ -1205,6 +1378,62 @@ test('badge position adapts to viewport changes and survives reinjection', async
   assert.equal(savedPosition.viewportHeight, 500)
   assert.ok(Number.isFinite(savedPosition.badgeWidth))
   assert.ok(Number.isFinite(savedPosition.badgeHeight))
+})
+
+test('failed initial status still prepares inline login and keeps it usable during later refresh failures', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, commands, next, respond } = app
+  await respond(await next('status'), { ok: false, error: 'Bearer sk-secret' })
+  await respond(await next('authOptions'), { ok: true, data: authOptions() })
+  await page.locator('[data-testid="assistant-badge"]').click()
+  await respond(await next('status'), { ok: false, error: 'Bearer sk-secret' })
+  assert.equal(await page.locator('[data-testid="login"]').isEnabled(), true)
+  assert.equal(commands.filter((command) => command.action === 'authOptions').length, 1)
+  assert.doesNotMatch(await page.locator('[data-testid="message"]').textContent(), /Bearer|sk-secret/)
+  await page.locator('[data-testid="auth-username"]').fill('demo')
+  await page.locator('[data-testid="auth-password"]').fill('test-password')
+  await page.locator('[data-testid="login"]').click()
+  const login = await next('login')
+  assert.equal(login.username, 'demo')
+  await respond(login, { ok: true, data: signedIn() })
+  assert.equal(await page.locator('[data-testid="logged-out"]').isHidden(), true)
+})
+
+test('timed-out initial status prepares inline login and cannot overwrite a later login', async (t) => {
+  const app = await fixture(t, { width: 390, height: 844 }, { requestTimeouts: { status: 50 } })
+  if (!app) return
+  const { page, next, respond } = app
+  const initial = await next('status')
+  await page.waitForTimeout(75)
+  await respond(await next('authOptions'), { ok: true, data: authOptions() })
+  await page.locator('[data-testid="assistant-badge"]').click()
+  assert.equal(await page.locator('[data-testid="login"]').isEnabled(), true)
+  await page.locator('[data-testid="auth-username"]').fill('demo')
+  await page.locator('[data-testid="auth-password"]').fill('test-password')
+  await page.locator('[data-testid="login"]').click()
+  await respond(await next('login'), { ok: true, data: signedIn() })
+  assert.equal(await respond(initial, { ok: true, data: loggedOut }), false)
+  assert.equal(await page.evaluate(() => window.__yisamaInfiniteAssistant.snapshot().loggedIn), true)
+})
+
+test('refresh retries unavailable login options even when account status also fails', async (t) => {
+  const app = await fixture(t)
+  if (!app) return
+  const { page, next, respond } = app
+  await respond(await next('status'), { ok: false })
+  await respond(await next('authOptions'), { ok: false, code: 'AUTH_CONNECTION', error: 'Bearer sk-secret' })
+  await page.locator('[data-testid="assistant-badge"]').click()
+  await respond(await next('status'), { ok: false })
+  const retry = await next('authOptions')
+  assert.equal(await page.locator('[data-testid="login"]').isDisabled(), true)
+  await respond(retry, { ok: false, code: 'AUTH_CONNECTION' })
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /连接/)
+  await page.locator('[data-testid="refresh"]').click()
+  await respond(await next('status'), { ok: false })
+  await respond(await next('authOptions'), { ok: true, data: authOptions({ passwordLoginEnabled: false }) })
+  assert.equal(await page.locator('[data-testid="login"]').isDisabled(), true)
+  assert.match(await page.locator('[data-testid="message"]').textContent(), /暂未开放密码登录/)
 })
 
 test('inline login validates inputs, handles errors and two-factor verification without browser navigation', async (t) => {

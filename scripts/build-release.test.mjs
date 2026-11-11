@@ -47,6 +47,12 @@ test('release builder emits only bundled runtime entries', async (t) => {
   const imageData = path.join(output, 'test-data')
   const imageEnv = { ...process.env, CODEX_HOME: imageHome, PLUGIN_DATA: imageData }
   const bundledEntry = path.join(output, 'scripts', 'yisama.mjs')
+  const startup = await exec(process.execPath,
+    ['--disable-warning=ExperimentalWarning', bundledEntry, 'startup', 'local'], { env: imageEnv })
+  assert.equal(startup.stderr, '')
+  assert.deepEqual(JSON.parse(startup.stdout), {
+    local: true, paidCalls: 0, configured: false, threads: { status: 'unchanged', changed: 0, skipped: 0 },
+  })
   await exec(process.execPath, [bundledEntry, 'image', 'install'], { env: imageEnv })
   const skill = await fs.readFile(path.join(imageHome, 'skills', '.system', 'imagegen', 'SKILL.md'), 'utf8')
   assert.ok(skill.includes(bundledEntry), 'the installed skill must use the distributed entry, not the source checkout')
@@ -84,4 +90,18 @@ test('release builder emits only bundled runtime entries', async (t) => {
     setTimeout, clearTimeout, document: { querySelectorAll: () => [] },
   }), null, 'the minified restart check must execute independently inside the renderer')
   assert.deepEqual(methods, ['thread/loaded/list'])
+})
+
+test('silent assistant-only updates retain detection, first-install consent and running-task protection', async () => {
+  const installer = await fs.readFile(path.join(repository, 'installer/yisama.iss'), 'utf8')
+  const policy = installer.slice(installer.indexOf('function IsAssistantOnlyUpdate:'),
+    installer.indexOf('function Quote('))
+  assert.match(policy, /YISAMAUPDATE/)
+  for (const file of ['codex-location.json', 'release-manifest.json', 'launch-codex.ps1']) {
+    assert.ok(policy.includes(file))
+  }
+  assert.match(policy, /CODEXPATH/)
+  assert.match(installer, /WizardSilent and not SelectionTested and not IsAssistantOnlyUpdate/)
+  assert.match(installer, /if SelectionRunning or CodexDesktopRunning then/)
+  assert.match(installer, /if not WizardSilent or \(ExpandConstant\('\{param:INSTALLCODEX\|0\}'\) <> '1'\) then/)
 })

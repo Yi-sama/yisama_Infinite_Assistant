@@ -213,3 +213,240 @@ test('portable Codex uses its selected executable and bundled CLI without changi
     'recognized=True', 'unrelated=False', 'selected=True', 'started', 'restored=True',
   ])
 })
+
+// Execute the launcher's main block against disposable processes, not the user's Codex.
+const RESTART_PROBE = `
+param([string]$Launcher, [string]$Root, [string]$Node, [string]$Scenario)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+foreach ($assignment in $ast.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$env:PSModulePath'
+}) { Invoke-Expression $assignment.Extent.Text }
+foreach ($definition in $ast.FindAll({ param($n)
+    $n -is [Management.Automation.Language.FunctionDefinitionAst]
+}, $true)) { Invoke-Expression $definition.Extent.Text }
+$appRoot = $Root
+$dataRoot = $Root
+$endpointFile = Join-Path $Root 'endpoint.json'
+$runtime = $Node
+$assistantScript = Join-Path $Root 'assistant.mjs'
+$yisamaScript = Join-Path $Root 'image.mjs'
+$bootstrap = $Node
+$ValidateOnly = $false
+$Restart = -not $Scenario.StartsWith('startup-')
+$Supervise = $false
+$UpdateInstaller = ''
+$UpdateSha256 = ''
+if ($Scenario -like 'update-*-failure') {
+    $env:LOCALAPPDATA = $Root
+    $UpdateInstaller = Join-Path $Root 'yisama-infinite-assistant-cache\\updates\\test.exe'
+    $UpdateSha256 = (Get-FileHash -LiteralPath $UpdateInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$startupTimeoutSeconds = 5
+$codexExitTimeoutSeconds = 2
+$script:codexDesktop = $null
+$script:newProcess = $null
+$script:helperProcess = $null
+$script:warningAfterReopen = $false
+$script:automaticInstalled = $false
+$script:oldProcess = $null
+if ($Restart) {
+    $script:oldProcess = Microsoft.PowerShell.Management\\Start-Process -FilePath $Node -ArgumentList @(
+        (Quote-StartArgument (Join-Path $Root 'desktop.mjs')), 'old'
+    ) -WindowStyle Hidden -PassThru
+}
+$script:status = 'running'
+function Read-SelectedCodex {
+    return @{ source = 'portable'; executable = (Join-Path $env:LOCALAPPDATA 'Programs\\Codex\\ChatGPT.exe') }
+}
+function Get-CodexDesktopProcesses {
+    foreach ($process in @($script:oldProcess, $script:newProcess)) {
+        if ($process) {
+            $process.Refresh()
+            if (-not $process.HasExited) { $process }
+        }
+    }
+}
+function Find-CodexExecutable {
+    if ($Scenario -eq 'missing-executable') { throw 'Selected executable missing (isolated test).' }
+    return $script:codexDesktop.executable
+}
+function Get-WallpaperLauncher {
+    if ($Scenario -eq 'wallpaper-failure') { return @{ FilePath = 'isolated-wallpaper'; Arguments = @(); Port = 9222 } }
+    return $null
+}
+function Test-LoopbackPortFree { return $true }
+function Start-Process {
+    param($FilePath, $ArgumentList, $WindowStyle, $WorkingDirectory, $RedirectStandardOutput,
+        $RedirectStandardError, [switch]$PassThru, [switch]$Wait)
+    if ($FilePath -eq 'isolated-wallpaper') { throw 'Wallpaper launcher failed (isolated test).' }
+    if ($FilePath -eq $UpdateInstaller) {
+        if ($ArgumentList -notcontains '/YISAMAUPDATE=1') { throw 'Missing assistant-only update flag.' }
+        if ($ArgumentList -contains '/INSTALLCODEX=1') { throw 'Assistant updates must not install Codex.' }
+        if ($Scenario -eq 'startup-update') {
+            $script:automaticInstalled = $true
+            if (Get-CodexDesktopProcesses) { throw 'Automatic update ran while Codex was open.' }
+            return @{ ExitCode = 0 }
+        }
+        if ($Scenario -eq 'update-launch-failure') { throw 'Installer could not start (isolated test).' }
+        return @{ ExitCode = 8 }
+    }
+    $parameters = @{ FilePath = $FilePath; ArgumentList = $ArgumentList; WindowStyle = 'Hidden'; PassThru = $true }
+    if ($WorkingDirectory) { $parameters.WorkingDirectory = $WorkingDirectory }
+    if ($RedirectStandardOutput) { $parameters.RedirectStandardOutput = $RedirectStandardOutput }
+    if ($RedirectStandardError) { $parameters.RedirectStandardError = $RedirectStandardError }
+    if ($Wait) { $parameters.Wait = $true }
+    $process = Microsoft.PowerShell.Management\\Start-Process @parameters
+    if ($RedirectStandardOutput) { $script:helperProcess = $process }
+    return $process
+}
+function Start-CodexDesktopExecutable {
+    param([string]$Executable, [string]$LogPath)
+    $script:newProcess = Microsoft.PowerShell.Management\\Start-Process -FilePath $Node -ArgumentList @(
+        (Quote-StartArgument (Join-Path $Root 'desktop.mjs')), 'new'
+    ) -RedirectStandardError $LogPath -WindowStyle Hidden -PassThru
+    return $script:newProcess
+}
+function Confirm-LauncherAction { throw 'Unexpected interactive confirmation in isolated restart.' }
+function Show-LauncherError {
+    param([string]$Message)
+    $script:warningAfterReopen = $script:newProcess -and -not $script:newProcess.HasExited -and
+        (Test-Path -LiteralPath $endpointFile)
+}
+function Write-Error { param([string]$Message) $script:status = 'failed' }
+$main = $ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] } |
+    Select-Object -Last 1
+try {
+    # A nested script block contains the launcher's exit without ending this probe.
+    & ([scriptblock]::Create($main.Extent.Text))
+}
+finally {
+    $oldAlive = $false
+    if ($script:oldProcess) { $script:oldProcess.Refresh(); $oldAlive = -not $script:oldProcess.HasExited }
+    $newAlive = $false
+    if ($script:newProcess) { $script:newProcess.Refresh(); $newAlive = -not $script:newProcess.HasExited }
+    $endpoint = if (Test-Path -LiteralPath $endpointFile) { Get-Content -LiteralPath $endpointFile -Raw | ConvertFrom-Json } else { $null }
+    @{
+        oldAlive = $oldAlive; newAlive = $newAlive
+        endpointMatches = ($null -ne $endpoint -and $script:newProcess -and $endpoint.processId -eq $script:newProcess.Id)
+        assistantReady = @(Get-ChildItem -LiteralPath $Root -Filter 'assistant-*.stdout.log' |
+            Select-String -Pattern '"ready":true').Count -gt 0
+        warningAfterReopen = $script:warningAfterReopen
+        localChecked = (Test-Path -LiteralPath (Join-Path $Root 'checked-local'))
+        automaticChecked = (Test-Path -LiteralPath (Join-Path $Root 'checked-update'))
+        automaticInstalled = $script:automaticInstalled
+    } | ConvertTo-Json -Compress
+    foreach ($process in @($script:oldProcess, $script:newProcess, $script:helperProcess)) {
+        if ($process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    }
+}
+`
+
+for (const scenario of ['normal', 'image-failure', 'missing-executable', 'missing-assistant',
+  'wallpaper-failure', 'update-launch-failure', 'update-exit-failure',
+  'startup-current', 'startup-update', 'startup-offline', 'startup-invalid-update', 'startup-local-failure']) {
+  test(`launcher restart completes or preserves the running desktop: ${scenario}`, {
+    skip: process.platform !== 'win32' && 'Windows launcher only.',
+    timeout: 30000,
+  }, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-restart-flow-'))
+    t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+    await fs.writeFile(path.join(root, 'desktop.mjs'), `
+import http from 'node:http'
+const server = http.createServer((request, response) => response.end('{}'))
+server.listen(0, '127.0.0.1', () => {
+  console.error('DevTools listening on ws://127.0.0.1:' + server.address().port + '/devtools/browser/isolated')
+})
+`, 'utf8')
+    await fs.writeFile(path.join(root, 'image.mjs'), `
+import fs from 'node:fs'
+import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+const root = path.dirname(fileURLToPath(import.meta.url))
+if (process.argv[2] === 'startup') {
+  const mode = process.argv[3]
+  fs.writeFileSync(path.join(root, 'checked-' + mode), '')
+  if (mode === 'local') {
+    if (${JSON.stringify(scenario)} === 'startup-local-failure') process.exit(6)
+    console.log(JSON.stringify({ local: true, paidCalls: 0, threads: { skipped: 0 } }))
+  } else if (${JSON.stringify(scenario)} === 'startup-offline') {
+    console.log(JSON.stringify({ status: 'unavailable' }))
+  } else if (['startup-update', 'startup-invalid-update'].includes(${JSON.stringify(scenario)})) {
+    const file = path.join(root, 'yisama-infinite-assistant-cache', 'updates', 'test.exe')
+    const sha256 = ${JSON.stringify(scenario)} === 'startup-invalid-update' ? '0'.repeat(64)
+      : createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+    console.log(JSON.stringify({ status: 'prepared', updateInstaller: { path: file, sha256 } }))
+  } else console.log(JSON.stringify({ status: 'current' }))
+} else process.exit(${scenario === 'image-failure' ? 7 : 0})
+`, 'utf8')
+    if (scenario !== 'missing-assistant') {
+      await fs.writeFile(path.join(root, 'assistant.mjs'),
+        "console.log('{\"ready\":true}'); setInterval(() => {}, 1000)\n", 'utf8')
+    }
+    if (scenario.startsWith('update-') || scenario.startsWith('startup-')) {
+      const cache = path.join(root, 'yisama-infinite-assistant-cache', 'updates')
+      await fs.mkdir(cache, { recursive: true })
+      await fs.writeFile(path.join(cache, 'test.exe'), 'isolated installer fixture\n', 'utf8')
+    }
+    const probe = path.join(root, 'probe.ps1')
+    await fs.writeFile(probe, RESTART_PROBE, 'utf8')
+    const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+      '-File', probe, '-Launcher', launcher, '-Root', root, '-Node', process.execPath, '-Scenario', scenario],
+    { windowsHide: true, timeout: 25000, env: { ...process.env, LOCALAPPDATA: root } }).catch((error) => {
+      // The probe prints its observable process state even when the launcher exits 1.
+      if (!error.stdout) throw error
+      return error
+    })
+    const result = JSON.parse(stdout.trim())
+    if (['image-failure', 'missing-executable', 'missing-assistant'].includes(scenario)) {
+      assert.equal(result.oldAlive, true, 'preflight failure must not close the existing Codex')
+      assert.equal(result.newAlive, false)
+    } else {
+      assert.deepEqual(result, { oldAlive: false, newAlive: true, endpointMatches: true, assistantReady: true,
+        warningAfterReopen: scenario.startsWith('update-') || scenario === 'startup-local-failure',
+        localChecked: true, automaticChecked: scenario.startsWith('startup-'),
+        automaticInstalled: scenario === 'startup-update' })
+    }
+  })
+}
+
+test('Codex updater opt-out is inherited only by launcher children and app activation remains unverified', {
+  skip: process.platform !== 'win32' && 'Windows launcher only.',
+  timeout: 30000,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'yisama-updater-launch-test-'))
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 3 }))
+  const probe = path.join(root, 'probe.ps1')
+  await fs.writeFile(probe, `
+param([string]$Launcher, [string]$Node)
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile($Launcher, [ref]$null, [ref]$null)
+foreach ($name in 'CODEX_SPARKLE_ENABLED', 'YISAMA_CODEX_UPDATE_CONTROL') {
+  $assignments = $ast.FindAll({ param($n)
+    $n -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $n.Left.Extent.Text -eq ('$env:' + $name)
+  }, $true)
+  Invoke-Expression $assignments[0].Extent.Text
+}
+& $Node -e 'console.log(JSON.stringify({updater:process.env.CODEX_SPARKLE_ENABLED,control:process.env.YISAMA_CODEX_UPDATE_CONTROL}))'
+`, 'utf8')
+  const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', probe, '-Launcher', launcher, '-Node', process.execPath], { windowsHide: true })
+  assert.deepEqual(JSON.parse(stdout), { updater: 'false', control: 'launch-disabled' })
+  const source = await fs.readFile(launcher, 'utf8')
+  assert.match(source, /YISAMA_CODEX_UPDATE_CONTROL = 'activation-unverified'[\s\S]*Start-CodexStoreApp -Arguments/)
+  assert.doesNotMatch(source, /SetEnvironmentVariable|Set-ItemProperty.*Appx|WindowsStore\\AutoDownload/)
+})
+
+test('inspected packaged Codex applies its updater opt-out on Windows', {
+  skip: !process.env.YISAMA_CODEX_BOOTSTRAP && 'Set YISAMA_CODEX_BOOTSTRAP to an inspected official bootstrap asset.',
+}, async () => {
+  const source = await fs.readFile(process.env.YISAMA_CODEX_BOOTSTRAP, 'utf8')
+  const gate = /\(([\w$]+),([\w$]+),([\w$]+),([\w$]+)\)=>"false"!==\4\.CODEX_SPARKLE_ENABLED&&([\w$]+)\.includes\(\1\)&&\2===\3/.exec(source)
+  assert.ok(gate, 'the inspected distribution must actually read the launch opt-out')
+  const enabled = new Function(gate[5], `return (${gate[0]})`)(['prod'])
+  assert.equal(enabled('prod', 'win32', 'win32', {}), true)
+  assert.equal(enabled('prod', 'win32', 'win32', { CODEX_SPARKLE_ENABLED: 'false' }), false)
+})

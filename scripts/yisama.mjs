@@ -18,7 +18,7 @@ import {
 
 export { DEFAULT_ORIGIN, PROVIDER_ID, patchCodexConfig }
 export const KEY_PREFIX = 'yisama-infinite-assistant'
-const ASSISTANT_VERSION = '1.2.4'
+const ASSISTANT_VERSION = '1.2.5'
 const ASSISTANT_LICENSE_PUBLIC_KEY =
   'MCowBQYDK2VwAyEAwdYPN4l6iJ9vQDCV6FZEFPDrsAJBenNhJIeDGeMxf10='
 const ASSISTANT_LICENSE_RENEW_BEFORE = 24 * 60 * 60
@@ -351,13 +351,13 @@ function apiError(status) {
 
 export async function requestApi(pathname, {
   token, method = 'GET', body, origin = originFromEnvironment(),
-  fetchImpl = globalThis.fetch, apiPrefix = '/api',
+  fetchImpl = globalThis.fetch, apiPrefix = '/api', timeoutMs,
 } = {}) {
   const headers = { Accept: 'application/json' }
   if (token) headers.Authorization = `Bearer ${token}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   const response = await withRoute(origin, (base, timeout) => fetchImpl(new URL(`${apiPrefix}${pathname}`, base), {
-    method, headers, redirect: 'error', signal: AbortSignal.timeout(timeout),
+    method, headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs ?? timeout),
     body: body === undefined ? undefined : JSON.stringify(body),
   }), { retry: method === 'GET' || pathname.startsWith('/user/login') })
   const payload = await response.json().catch(() => null)
@@ -1627,6 +1627,15 @@ export function publicErrorCode(error) {
 
 export async function run(argv = process.argv.slice(2)) {
   const [command = 'setup', ...args] = argv
+  if (command === 'startup') {
+    const { checkLocalStartup, prepareAutomaticUpdate } = await import('./startup-check.mjs')
+    const mode = args[0] || 'local'
+    if (!['local', 'update', 'restore'].includes(mode) || args.length > 1) throw new UserError('操作不存在。')
+    const result = mode === 'update' ? await prepareAutomaticUpdate()
+      : await checkLocalStartup(paths(), { restore: mode === 'restore' })
+    console.log(JSON.stringify(result))
+    return result
+  }
   if (command === 'image') return runImagegen(paths(), args, { prepare: prepareImagegen })
   const group = flagValue(args, '--group')
   if (command === 'setup') return setup(group, flagValue(args, '--reasoning'))
